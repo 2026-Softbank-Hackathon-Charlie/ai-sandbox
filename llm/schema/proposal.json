@@ -1,0 +1,60 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["plan", "manifest", "notes"],
+  "properties": {
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source", "target", "gateway", "verify", "thresholds"],
+      "properties": {
+        "id": { "type": "string" },
+        "source": { "$ref": "#/$defs/endpoint" },
+        "target": { "$ref": "#/$defs/endpoint" },
+        "files": {
+          "type": "object", "additionalProperties": false, "required": ["source", "target"],
+          "properties": {
+            "source": { "type": "string" }, "target": { "type": "string" },
+            "flags": { "type": "array", "items": { "type": "string" } }, "rclone": { "type": "string" }
+          }
+        },
+        "gateway": {
+          "type": "object", "additionalProperties": false, "required": ["mode"],
+          "properties": {
+            "mode": { "type": "string", "enum": ["http", "none"] }, "url": { "type": "string" }, "token": { "type": "string" },
+            "sourceBackend": { "type": "string" }, "targetBackend": { "type": "string" }
+          }
+        },
+        "verify": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "schemas": { "type": "array", "items": { "type": "string" } },
+            "tables": { "type": "array", "items": { "type": "string" } },
+            "fenceGate": { "type": "boolean" },
+            "writtenRecords": { "type": "string" }
+          }
+        },
+        "thresholds": {
+          "type": "object", "additionalProperties": false,
+          "required": ["maxLagBytes", "catchupTimeout", "switchoverTimeout", "maxDowntime"],
+          "properties": {
+            "maxLagBytes": { "type": "integer" }, "catchupTimeout": { "type": "string" },
+            "switchoverTimeout": { "type": "string" }, "maxDowntime": { "type": "string" }
+          }
+        }
+      }
+    },
+    "manifest": { "type": "string" },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "endpoint": {
+      "type": "object", "additionalProperties": false, "required": ["env", "namespace", "cluster", "dsn"],
+      "properties": {
+        "env": { "type": "string" }, "kubeconfig": { "type": "string" }, "context": { "type": "string" },
+        "namespace": { "type": "string" }, "cluster": { "type": "string" }, "dsn": { "type": "string" },
+        "manifest": { "type": "string" }
+      }
+    }
+  }
+}

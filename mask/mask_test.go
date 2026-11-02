@@ -57,3 +57,14 @@ func TestStringKeepsDiagnosisClues(t *testing.T) {
 		t.Errorf("주소와 사용자 이름은 남아야 함: %q", out)
 	}
 }
+
+func TestSecretKey(t *testing.T) {
+	for k, want := range map[string]bool{
+		"token": true, "apiKey": true, "DB_PASSWORD": true, "Authorization": true, "client_secret": true,
+		"env": false, "name": false, "storageClass": false, "count": false,
+	} {
+		if got := SecretKey(k); got != want {
+			t.Errorf("SecretKey(%q) = %v, want %v", k, got, want)
+		}
+	}
+}

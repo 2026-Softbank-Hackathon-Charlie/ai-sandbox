@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cause", "evidence", "fix"],
+  "properties": {
+    "cause": { "type": "string" },
+    "evidence": { "type": "array", "items": { "type": "string" } },
+    "fix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "patch"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["manifest-patch", "plan-param"] },
+        "patch": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["op", "path", "value"],
+            "properties": {
+              "op": { "type": "string", "enum": ["replace", "add"] },
+              "path": { "type": "string" },
+              "value": { "anyOf": [{ "type": "string" }, { "type": "number" }, { "type": "boolean" }, { "type": "array", "items": { "type": "string" } }] }
+            }
+          }
+        }
+      }
+    }
+  }
+}
