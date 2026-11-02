@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"maps"
 	"regexp"
 	"strings"
 	"time"
@@ -30,6 +31,11 @@ const (
 	AIServiceAccount = "ai-sandbox"
 
 	namePrefix = "sandbox-"
+
+	// PodSecurityEnforce, PodSecurityLevel은 샌드박스 네임스페이스에 거는 Pod Security Admission 기준이다.
+	// CNPG 인스턴스 Pod도 뜰 수 있게 restricted가 아니라 baseline을 쓴다.
+	PodSecurityEnforce = "pod-security.kubernetes.io/enforce"
+	PodSecurityLevel   = "baseline"
 )
 
 // Config는 샌드박스 하나의 설정이다. 0값이면 기본값(데모 값)을 쓴다.
@@ -221,11 +227,19 @@ func Build(c Config, now time.Time) (Objects, error) {
 		})
 	}
 
+	// Pod 보안 기준(baseline)을 강제한다. hostNetwork Pod는 NetworkPolicy를 받지 않고, hostPath·privileged Pod는
+	// 노드를 연다. AI 계정이 Pod를 만들 수 있으므로 이 라벨이 없으면 격리를 스스로 벗어날 수 있다.
+	nsLabels := map[string]string{
+		PodSecurityEnforce:                           PodSecurityLevel,
+		"pod-security.kubernetes.io/enforce-version": "latest",
+	}
+	maps.Copy(nsLabels, labels)
+
 	cpu, mem := resource.MustParse(c.CPU), resource.MustParse(c.Memory)
 	return Objects{
 		Namespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 			Name:        ns,
-			Labels:      labels,
+			Labels:      nsLabels,
 			Annotations: map[string]string{AnnoExpires: now.Add(c.TTL).UTC().Format(time.RFC3339)},
 		}},
 		ServiceAccount: &corev1.ServiceAccount{

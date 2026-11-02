@@ -30,6 +30,9 @@ func TestBuild(t *testing.T) {
 	if o.Namespace.Name != "sandbox-shop-ab12" {
 		t.Fatalf("네임스페이스 이름: %s", o.Namespace.Name)
 	}
+	if o.Namespace.Labels[PodSecurityEnforce] != "baseline" || o.Role.Labels[PodSecurityEnforce] != "" {
+		t.Fatalf("Pod Security 라벨은 네임스페이스에만: %v", o.Namespace.Labels)
+	}
 	if o.Namespace.Labels[LabelSandbox] != "true" || o.Namespace.Annotations[AnnoExpires] != "2026-11-04T11:00:00Z" {
 		t.Fatalf("라벨·만료 시각: %v %v", o.Namespace.Labels, o.Namespace.Annotations)
 	}
@@ -240,10 +243,18 @@ func TestSweep(t *testing.T) {
 }
 
 // aiFake는 권한 확인 요청에 '거절'로 답하는 가짜 AI 클라이언트다. fake clientset은 이 요청을 처리하지 못한다.
+// Pod 생성은 Pod Security(baseline)가 hostNetwork Pod를 거절하는 것처럼 답한다.
 func aiFake() *fake.Clientset {
 	cs := fake.NewClientset()
 	cs.PrependReactor("create", "selfsubjectaccessreviews", func(a k8stesting.Action) (bool, runtime.Object, error) {
 		return true, a.(k8stesting.CreateAction).GetObject(), nil
+	})
+	cs.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.(k8stesting.CreateAction).GetObject().(*corev1.Pod).Spec.HostNetwork {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "host-escape-x",
+				errors.New(`violates PodSecurity "baseline:latest": host namespaces (hostNetwork=true)`))
+		}
+		return false, nil, nil
 	})
 	return cs
 }
@@ -292,6 +303,26 @@ func TestCheckRBAC(t *testing.T) {
 		rs := checkRBAC(context.Background(), ai, "sandbox-shop-ab12", "shop")
 		if last := rs[len(rs)-1]; last.Name != "own-pods-list" || last.Pass {
 			t.Fatalf("%+v", last)
+		}
+	})
+	t.Run("호스트 Pod를 만들 수 있으면 실패", func(t *testing.T) {
+		ai := aiFake()
+		ai.PrependReactor("list", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) { return true, nil, forbidden })
+		ai.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) { return true, &corev1.Pod{}, nil })
+		rs := checkRBAC(context.Background(), ai, "sandbox-shop-ab12", "shop")
+		r := rs[len(rs)-2]
+		if r.Name != "host-pod-create" || r.Pass || r.Got != ExpectOpen {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("Quota 거절은 막힘으로 치지 않음", func(t *testing.T) {
+		ai := aiFake()
+		ai.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "x", errors.New("exceeded quota: sandbox-quota"))
+		})
+		r := checkHostPod(context.Background(), ai, "sandbox-shop-ab12")
+		if r.Pass || r.Got != "error" {
+			t.Fatalf("%+v", r)
 		}
 	})
 	t.Run("네트워크 오류는 막힘으로 치지 않음", func(t *testing.T) {

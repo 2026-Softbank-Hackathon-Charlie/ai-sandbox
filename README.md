@@ -138,7 +138,7 @@ AI의 출력은 엔진 Plan, 대상 CNPG 매니페스트, 근거를 묶은 JSON�
 | 초안과 같아야 함 | id, source 전체, target의 env·context·namespace·cluster·dsn, gateway, files 전체(위치, rclone, flags. 빼거나 더할 수 없음), verify의 schemas·writtenRecords (없음과 빈 목록은 같게 봄). AI가 데이터나 비밀번호를 다른 곳으로 보내지 못하게 한다 |
 | 고정 규칙 | `verify.fenceGate`는 끌 수 없음. `target.manifest`는 비우거나 `attachment:target.yaml`. 검증 테이블은 초안보다 줄일 수 없음 |
 | 상한값 범위 (제안값) | maxDowntime(쓰기 보류) 5s~60s (게이트웨이는 90s(`-max-hold`) 넘게 붙잡힌 쓰기에 503을 돌려주므로, 그 전에 끝나 실패한 요청이 없게 한다), switchoverTimeout 30s~3m, catchupTimeout 1m~15m, maxLagBytes 1 KiB~64 MiB |
-| 매니페스트 | `postgresql.cnpg.io/v1` Cluster 하나, 이름·네임스페이스는 Plan의 대상과 같음, `spec.replica.primary`는 원본 클러스터, 시작은 `pg_basebackup`만, spec 키는 허용 목록만 (슈퍼유저, 백업 대상, 관리 계정 키 금지), instances 1~5 |
+| 매니페스트 | `postgresql.cnpg.io/v1` Cluster 하나, 이름·네임스페이스는 Plan의 대상과 같음, `spec.replica.primary`는 원본 클러스터, 시작은 `pg_basebackup`만(source는 원본, secret은 `<원본>-app`, database·owner는 원본 DSN과 같음), `externalClusters`는 원본·대상 이름만 쓰고 host·port는 Plan의 해당 DSN과 같아야 하며 user는 `streaming_replica`, 인증서 시크릿은 `<이름>-replication`·`<이름>-ca`만(비밀번호 키 금지), `imageName`은 `ghcr.io/cloudnative-pg/postgresql` 이미지만, spec 키는 허용 목록만 (슈퍼유저, 백업 대상, 관리 계정 키 금지), instances 1~5 |
 
 수정안(진단 결과)은 두 종류다.
 
@@ -203,6 +203,7 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 | 항목 | 설정 |
 |---|---|
 | 네임스페이스 | `sandbox-<app>-<4자리 id>`, 라벨 `hopcharlie/sandbox=true`, 주석 `expires-at` |
+| Pod Security | `pod-security.kubernetes.io/enforce=baseline`. AI 계정이 Pod를 만들 수 있으므로 hostNetwork(NetworkPolicy를 받지 않음), hostPath, privileged Pod를 막는다. CNPG Pod가 뜰 수 있게 restricted가 아니라 baseline |
 | RBAC | 이 네임스페이스에만 바인딩한 Role. TokenRequest로 1시간짜리 토큰 발급 |
 | NetworkPolicy | 기본 전부 차단. 같은 네임스페이스와 kube-dns만 허용. 운영망, Tailscale 대역(100.64.0.0/10), 169.254.169.254 차단 |
 | ResourceQuota, LimitRange | CPU 4, 메모리 8 GiB, Pod 20개 (데모 값) |
@@ -224,6 +225,7 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 - 운영 DB 주소로 연결 → NetworkPolicy가 막아야 한다
 - 자기 NetworkPolicy 삭제, 자기 Role 수정, 토큰 발급, 운영 Deployment 삭제 → 권한 확인 요청으로 막혔는지 본다 (실제로 지우지 않음)
 - API 서버(CNPG 모드에서는 다른 네임스페이스 서비스) → 정책이 없으면 열리는 곳이라 정책 동작의 증거
+- hostNetwork·hostPath Pod 생성 (dry-run) → Pod Security가 막아야 한다. Quota 거절처럼 다른 이유로 막힌 것은 통과로 치지 않는다
 - 자기 네임스페이스 조회와 DNS는 열려야 한다 (리허설이 가능한지, 검사 자체를 믿을 수 있는지)
 
 결과는 리허설 세션의 `blocked` 이벤트로도 남는다.
