@@ -150,8 +150,8 @@ func TokenKubeconfig(dir string, admin *rest.Config, token string) (string, erro
 	return path, nil
 }
 
-// SandboxPlan은 엔진이 샌드박스에서 돌릴 Plan이다. 원본·대상을 샌드박스 클러스터로 바꾸고,
-// 게이트웨이, 파일, k6 쓰기 기록은 뺀다 (샌드박스에는 없다). 상한값과 검증 범위는 AI의 Plan 그대로다.
+// SandboxPlan points the engine at sandbox resources and synthetic fixture tables.
+// Gateway, files and production write records do not exist in the sandbox.
 func SandboxPlan(p *eplan.Plan, ns, kubeconfig, manifestPath, srcDSN, dstDSN string) *eplan.Plan {
 	sp := *p
 	sp.ID = p.ID + "-rehearsal"
@@ -160,8 +160,37 @@ func SandboxPlan(p *eplan.Plan, ns, kubeconfig, manifestPath, srcDSN, dstDSN str
 	sp.Files = nil
 	sp.Gateway = eplan.GatewaySpec{Mode: "none", SourceBackend: p.Source.Env, TargetBackend: p.Target.Env}
 	sp.Verify = p.Verify
+	sp.Verify.Schemas = fixtureSchemas(p.Verify.Schemas)
+	sp.Verify.Tables = fixtureTables(sp.Verify.Schemas)
 	sp.Verify.WrittenRecords = ""
+	if sp.Verify.FenceGate == nil {
+		gate := true
+		sp.Verify.FenceGate = &gate
+	}
 	return &sp
+}
+
+func fixtureSchemas(schemas []string) []string {
+	if len(schemas) == 0 {
+		return []string{"public"}
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, s := range schemas {
+		if !seen[s] {
+			out = append(out, s)
+			seen[s] = true
+		}
+	}
+	return out
+}
+
+func fixtureTables(schemas []string) []string {
+	var tables []string
+	for _, s := range fixtureSchemas(schemas) {
+		tables = append(tables, s+".rehearsal_orders", s+".rehearsal_items")
+	}
+	return tables
 }
 
 // DSN은 로컬 프록시로 가는 DSN이다. 비밀번호는 URL 인코딩한다.
@@ -173,15 +202,15 @@ func DSN(db DBInfo, password string, port int) string {
 // Seed는 임시 원본에 테스트 데이터를 넣는다. 검증할 스키마마다 표 두 개를 만든다.
 // 운영 데이터는 넣지 않는다 (설계 문서 6장).
 func Seed(ctx context.Context, dsn string, schemas []string, rows int) error {
+	if rows < 4 {
+		return fmt.Errorf("fixture rows must be at least 4")
+	}
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		return fmt.Errorf("임시 원본 접속 실패: %w", err)
 	}
 	defer conn.Close(ctx)
-	if len(schemas) == 0 {
-		schemas = []string{"public"}
-	}
-	for _, s := range schemas {
+	for _, s := range fixtureSchemas(schemas) {
 		id := pgx.Identifier{s}.Sanitize()
 		stmts := []string{
 			"CREATE SCHEMA IF NOT EXISTS " + id,

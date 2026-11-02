@@ -74,6 +74,7 @@ type Attempt struct {
 	Passed    bool                  `json:"passed"`
 	Outcome   string                `json:"outcome,omitempty"` // 엔진 결과
 	Steps     map[string]string     `json:"steps,omitempty"`   // 단계별 상태
+	Coverage  *Coverage             `json:"coverage,omitempty"`
 	Isolation []sandbox.CheckResult `json:"isolation,omitempty"`
 	Error     string                `json:"error,omitempty"`
 	Evidence  []string              `json:"evidence,omitempty"`
@@ -123,6 +124,9 @@ func Rehearse(ctx context.Context, c Config) (*Report, error) {
 	c.defaults()
 	if c.Proposal == nil || c.Draft == nil {
 		return nil, errors.New("계획과 초안이 필요함")
+	}
+	if c.MaxRuns < 1 || c.Rows < 4 {
+		return nil, errors.New("maxRuns must be positive and rows must be at least 4")
 	}
 	ses, err := c.Sink.Start(ctx, agentlog.Start{Kind: agentlog.KindRehearsal, Title: "샌드박스 리허설 (" + c.Proposal.Plan.ID + ")", PlanRef: c.PlanRef})
 	if err != nil {
@@ -326,6 +330,12 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 	default:
 	}
 	if runErr == nil && st.Outcome == engine.OutcomeSucceeded {
+		coverage, err := fixtureCoverage(st, sp.Verify.Schemas, c.Rows)
+		if err != nil {
+			failf("fixture verification coverage: %v", err)
+			return a, nil, nil
+		}
+		a.Coverage = coverage
 		a.Passed = true
 		ses.Log(ctx, agentlog.Event{Type: agentlog.Decision, Status: "ok", Output: fmt.Sprintf("%d회차 통과: 엔진 %s, 쓰기 보류 %dms", n, st.Outcome, st.DowntimeMillis)})
 		return a, nil, nil

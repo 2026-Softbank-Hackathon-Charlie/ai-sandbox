@@ -101,6 +101,17 @@ func TestPlanParamFixRejects(t *testing.T) {
 	}
 }
 
+func TestPlanParamFixCannotNarrowExistingTableFilter(t *testing.T) {
+	p := proposal(t)
+	d := draft(t)
+	d.Verify.Tables = []string{"app.orders", "app.items"}
+	p.Plan.Verify.Tables = append([]string(nil), d.Verify.Tables...)
+	f := Fix{Kind: KindPlanParam, Patch: []Op{{Op: "replace", Path: "/verify/tables", Value: []byte(`["app.orders"]`)}}}
+	if _, is := f.Apply(p, d); !strings.Contains(is.Error(), "plan.verify.tables") {
+		t.Fatalf("diagnosis must preserve the draft's verification scope: %v", is)
+	}
+}
+
 func TestFixPatchLimit(t *testing.T) {
 	ops := make([]Op, maxPatchOps+1)
 	for i := range ops {
