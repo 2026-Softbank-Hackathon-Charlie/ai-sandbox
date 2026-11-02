@@ -69,6 +69,8 @@ func TestParseRejectsBrokenAIOutput(t *testing.T) {
 		{"원본 바꾸기", replace(t, v, `"cluster": "moimroom-db-gke"`, `"cluster": "other-db"`), "plan.source: 초안과 같아야 함"},
 		{"게이트웨이 끄기", replace(t, v, `"mode": "http"`, `"mode": "none"`), "plan.gateway: 초안과 같아야 함"},
 		{"파일 위치 바꾸기", replace(t, v, `"target": "s3:moimroom-photos-eks"`, `"target": "s3:attacker"`), "plan.files.target"},
+		{"파일 이전 빼기", replace(t, v, `"files": { "source": "gcs:moimroom-photos-gke", "target": "s3:moimroom-photos-eks" },`, ``), "초안의 파일 이전을 뺄 수 없음"},
+		{"rclone 옵션 더하기", replace(t, v, `"target": "s3:moimroom-photos-eks" }`, `"target": "s3:moimroom-photos-eks", "flags": ["--delete-before"] }`), "plan.files.flags"},
 		{"쓰기 기록 빼기", replace(t, v, `, "writtenRecords": "stream:moimroom-demo"`, ``), "plan.verify.writtenRecords"},
 		{"검증 스키마 줄이기", replace(t, v, `"schemas": ["app"], "fenceGate"`, `"schemas": [], "fenceGate"`), "plan.verify.schemas"},
 		{"검증 테이블만", replace(t, v, `"fenceGate": true,`, `"fenceGate": true, "tables": ["app.orders"],`), "범위를 줄일 수 없음"},
@@ -134,5 +136,17 @@ func TestPlanWithoutManifest(t *testing.T) {
 	p.Manifest = "kind: Cluster"
 	if is := p.Check(draft(t)); !strings.Contains(is.Error(), "매니페스트를 보내지 않음") {
 		t.Fatalf("매니페스트만 따로 오면 걸려야 함: %v", is)
+	}
+}
+
+func TestEquivalentEmptyValues(t *testing.T) {
+	// 초안에 schemas가 없고(null) AI가 빈 목록을 내도, rclone 기본값을 적어도 같은 계획이다.
+	d := draft(t)
+	d.Verify.Schemas = nil
+	v := read(t, "proposal.json")
+	v = replace(t, v, `"schemas": ["app"], "fenceGate"`, `"schemas": [], "fenceGate"`)
+	v = replace(t, v, `"target": "s3:moimroom-photos-eks" }`, `"target": "s3:moimroom-photos-eks", "rclone": "rclone", "flags": [] }`)
+	if _, is := Parse([]byte(v), d); len(is) > 0 {
+		t.Fatalf("같은 뜻의 값은 통과해야 함:\n%s", is.Error())
 	}
 }
