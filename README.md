@@ -91,7 +91,7 @@ AI가 플랫폼에 제출하는 본문은 **`EnginePlan` 자체**다. 필수 필
     "maxLagBytes": 16777216,
     "catchupTimeout": "10m",
     "switchoverTimeout": "2m",
-    "maxDowntime": "3m"
+    "maxDowntime": "30s"
   }
 }
 ```
