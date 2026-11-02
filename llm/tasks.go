@@ -29,9 +29,9 @@ const planSystem = `너는 HopCharlie의 이전 계획 작성기다. 가동 중�
 3. 대상 클러스터에 만들 CNPG Cluster 매니페스트를 쓴다. 원본의 복제본이어야 한다:
    - metadata.name은 target.cluster, metadata.namespace는 target.namespace
    - spec.replica: {self: <target.cluster>, primary: <source.cluster>, source: <source.cluster>}
-   - spec.bootstrap.pg_basebackup: {source: <source.cluster>, database, owner, secret: {name: <source.cluster>-app}}
-   - spec.externalClusters에 원본(호스트는 source.dsn의 호스트, user streaming_replica, sslmode verify-full, 인증서는 <source.cluster>-replication과 <source.cluster>-ca 시크릿)과 대상 자신
-   - storage, resources, instances, imageName은 원본을 참고하되 대상 클러스터에 맞춘다
+   - spec.bootstrap.pg_basebackup: {source: <source.cluster>, database, owner, secret: {name: <source.cluster>-app}}. database·owner는 source.dsn의 DB와 사용자
+   - spec.externalClusters에 원본(호스트는 source.dsn의 호스트, user streaming_replica, sslmode verify-full, 인증서는 <source.cluster>-replication과 <source.cluster>-ca 시크릿)과 대상 자신(호스트는 target.dsn의 호스트). 이 두 이름 말고는 쓰지 않고, 비밀번호 키는 넣지 않는다
+   - storage, resources, instances, imageName은 원본을 참고하되 대상 클러스터에 맞춘다. imageName은 ghcr.io/cloudnative-pg/postgresql:<버전>만 쓴다
    - 슈퍼유저, 백업, 관리 계정 같은 키는 쓰지 않는다
 4. target.manifest를 "attachment:target.yaml"로 두고, 값을 정한 근거를 notes에 쓴다.
 
