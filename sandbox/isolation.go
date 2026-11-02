@@ -1,0 +1,284 @@
+package sandbox
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	authzv1 "k8s.io/api/authorization/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+)
+
+// 검사 결과의 기대값
+const (
+	ExpectBlocked = "blocked"
+	ExpectOpen    = "open"
+)
+
+// CheckResult는 차단 테스트 한 줄이다. 콘솔의 '막힌 명령' 표에 그대로 나온다.
+type CheckResult struct {
+	Name    string `json:"name"`
+	Command string `json:"command"` // 사람이 읽는 같은 뜻의 명령
+	Expect  string `json:"expect"`
+	Got     string `json:"got"`
+	Pass    bool   `json:"pass"`
+	Detail  string `json:"detail,omitempty"`
+}
+
+// Target은 샌드박스 안에서 TCP 연결을 시도할 곳이다.
+type Target struct {
+	Name   string
+	Host   string
+	Port   int
+	Expect string
+}
+
+// IsolationConfig는 격리 검증 설정이다.
+type IsolationConfig struct {
+	// ProdNamespace는 운영 앱 네임스페이스다. 이 안의 secret을 AI 토큰으로 읽을 수 없어야 한다.
+	ProdNamespace string
+	// Targets는 기본 대상(메타데이터 주소, API 서버) 뒤에 더할 대상이다. 운영 DB 주소를 넣는다.
+	Targets []Target
+	// ProbeImage는 검사 Pod 이미지다. 기본 busybox:1.37.
+	ProbeImage string
+	// Timeout은 검사 Pod가 끝날 때까지 기다리는 시간이다. 기본 90초.
+	Timeout time.Duration
+}
+
+// DefaultTargets는 모든 샌드박스에서 막혀야 하는 곳이다.
+// API 서버는 NetworkPolicy가 없으면 어느 Pod에서나 열리므로, 정책이 실제로 동작하는지 보여주는 증거가 된다.
+// (CNPG 때문에 AllowEgressCIDRs에 API 서버를 넣었다면 이 항목은 빼야 한다.)
+var DefaultTargets = []Target{
+	{Name: "metadata", Host: "169.254.169.254", Port: 80, Expect: ExpectBlocked},
+	{Name: "apiserver", Host: "kubernetes.default.svc.cluster.local", Port: 443, Expect: ExpectBlocked},
+}
+
+var hostRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.-]{0,251}[a-zA-Z0-9])?$`)
+var nameRe = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
+
+// CheckIsolation은 AI 토큰(aiCS)과 관리자 권한(adminCS)으로 차단 테스트를 돌린다.
+// 관리자 권한은 검사 Pod를 띄우고 로그를 읽는 데만 쓴다.
+func CheckIsolation(ctx context.Context, adminCS, aiCS kubernetes.Interface, sb *Sandbox, c IsolationConfig) ([]CheckResult, error) {
+	if c.ProdNamespace == "" {
+		return nil, fmt.Errorf("운영 네임스페이스를 정해야 함")
+	}
+	results := checkRBAC(ctx, aiCS, sb.Namespace, c.ProdNamespace)
+	net, err := checkNetwork(ctx, adminCS, sb.Namespace, c)
+	if err != nil {
+		return results, err
+	}
+	return append(results, net...), nil
+}
+
+// AllPass는 모든 항목이 기대대로인지 알려준다.
+func AllPass(rs []CheckResult) bool {
+	for _, r := range rs {
+		if !r.Pass {
+			return false
+		}
+	}
+	return len(rs) > 0
+}
+
+func checkRBAC(ctx context.Context, ai kubernetes.Interface, sbNS, prodNS string) []CheckResult {
+	var out []CheckResult
+
+	// 실제로 시도한다. 읽기 요청이라 성공해도 바뀌는 것은 없다.
+	r := CheckResult{Name: "prod-secrets", Command: "kubectl get secrets -n " + prodNS, Expect: ExpectBlocked}
+	_, err := ai.CoreV1().Secrets(prodNS).List(ctx, metav1.ListOptions{Limit: 1})
+	r.Got, r.Detail = rbacOutcome(err)
+	r.Pass = r.Got == ExpectBlocked
+	out = append(out, r)
+
+	// 쓰기 권한은 실제로 시도하지 않고 API 서버에 물어본다. 혹시 열려 있으면 정책이 지워지기 때문이다.
+	for _, q := range []struct{ name, cmd, ns, group, res, verb string }{
+		{"own-netpol-delete", "kubectl delete networkpolicy -n " + sbNS + " sandbox-isolation", sbNS, "networking.k8s.io", "networkpolicies", "delete"},
+		{"own-role-escalate", "kubectl edit role -n " + sbNS + " " + AIServiceAccount, sbNS, "rbac.authorization.k8s.io", "roles", "update"},
+		{"own-token-create", "kubectl create token -n " + sbNS + " " + AIServiceAccount, sbNS, "", "serviceaccounts/token", "create"},
+		{"prod-deploy-delete", "kubectl delete deployment -n " + prodNS + " --all", prodNS, "apps", "deployments", "delete"},
+	} {
+		res, sub, _ := strings.Cut(q.res, "/")
+		ssar, err := ai.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, &authzv1.SelfSubjectAccessReview{
+			Spec: authzv1.SelfSubjectAccessReviewSpec{ResourceAttributes: &authzv1.ResourceAttributes{
+				Namespace: q.ns, Group: q.group, Resource: res, Subresource: sub, Verb: q.verb,
+			}},
+		}, metav1.CreateOptions{})
+		r := CheckResult{Name: q.name, Command: q.cmd, Expect: ExpectBlocked}
+		switch {
+		case err != nil:
+			r.Got, r.Detail = "error", err.Error()
+		case ssar.Status.Allowed:
+			r.Got, r.Detail = ExpectOpen, ssar.Status.Reason
+		default:
+			r.Got = ExpectBlocked
+		}
+		r.Pass = r.Got == ExpectBlocked
+		out = append(out, r)
+	}
+
+	// 반대로, 자기 네임스페이스에서는 일할 수 있어야 한다. 아니면 리허설 자체가 안 된다.
+	r = CheckResult{Name: "own-pods-list", Command: "kubectl get pods -n " + sbNS, Expect: ExpectOpen}
+	_, err = ai.CoreV1().Pods(sbNS).List(ctx, metav1.ListOptions{Limit: 1})
+	r.Got, r.Detail = rbacOutcome(err)
+	r.Pass = r.Got == ExpectOpen
+	return append(out, r)
+}
+
+func rbacOutcome(err error) (string, string) {
+	switch {
+	case err == nil:
+		return ExpectOpen, ""
+	case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
+		return ExpectBlocked, ""
+	default:
+		// 네트워크 오류 같은 것은 막힌 것으로 치지 않는다. 검사가 안 된 것이다.
+		return "error", err.Error()
+	}
+}
+
+// probeScript는 인자로 받은 "이름 호스트 포트" 묶음마다 TCP 연결을 시도하고 PROBE 줄을 찍는다.
+// 대상 값은 셸 문자열에 끼워 넣지 않고 인자로만 넘긴다.
+const probeScript = `
+if nslookup kubernetes.default.svc.cluster.local >/dev/null 2>&1; then echo "PROBE dns open"; else echo "PROBE dns blocked"; fi
+while [ $# -ge 3 ]; do
+  if nc -w 3 "$2" "$3" </dev/null >/dev/null 2>&1; then echo "PROBE $1 open"; else echo "PROBE $1 blocked"; fi
+  shift 3
+done
+echo "PROBE-END"
+`
+
+// ProbePod는 검사 Pod다. 같은 네임스페이스에 뜨므로 샌드박스 NetworkPolicy를 그대로 받는다.
+func ProbePod(namespace, image string, targets []Target) (*corev1.Pod, error) {
+	args := []string{"-c", probeScript, "probe"}
+	for _, t := range targets {
+		if !nameRe.MatchString(t.Name) || !hostRe.MatchString(t.Host) || t.Port < 1 || t.Port > 65535 {
+			return nil, fmt.Errorf("검사 대상 형식이 잘못됨: %+v", t)
+		}
+		if t.Expect != ExpectBlocked && t.Expect != ExpectOpen {
+			return nil, fmt.Errorf("%s: 기대값은 blocked 또는 open이어야 함", t.Name)
+		}
+		args = append(args, t.Name, t.Host, strconv.Itoa(t.Port))
+	}
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "isolation-probe-",
+			Namespace:    namespace,
+			Labels:       map[string]string{LabelSandbox: "true", "hopcharlie/role": "isolation-probe"},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy:                corev1.RestartPolicyNever,
+			AutomountServiceAccountToken: ptr(false),
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot:   ptr(true),
+				RunAsUser:      ptr(int64(65534)),
+				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			},
+			Containers: []corev1.Container{{
+				Name:    "probe",
+				Image:   image,
+				Command: []string{"sh"},
+				Args:    args,
+				SecurityContext: &corev1.SecurityContext{
+					AllowPrivilegeEscalation: ptr(false),
+					ReadOnlyRootFilesystem:   ptr(true),
+					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+				},
+			}},
+		},
+	}, nil
+}
+
+func checkNetwork(ctx context.Context, admin kubernetes.Interface, ns string, c IsolationConfig) ([]CheckResult, error) {
+	image := c.ProbeImage
+	if image == "" {
+		image = "busybox:1.37"
+	}
+	timeout := c.Timeout
+	if timeout == 0 {
+		timeout = 90 * time.Second
+	}
+	targets := append(append([]Target{}, DefaultTargets...), c.Targets...)
+	pod, err := ProbePod(ns, image, targets)
+	if err != nil {
+		return nil, err
+	}
+	created, err := admin.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("검사 Pod 생성 실패: %w", err)
+	}
+	defer func() {
+		_ = admin.CoreV1().Pods(ns).Delete(context.WithoutCancel(ctx), created.Name, metav1.DeleteOptions{})
+	}()
+
+	wctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		p, err := admin.CoreV1().Pods(ns).Get(wctx, created.Name, metav1.GetOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("검사 Pod 상태 조회 실패: %w", err)
+		}
+		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			break
+		}
+		select {
+		case <-wctx.Done():
+			return nil, fmt.Errorf("검사 Pod가 %s 안에 끝나지 않음 (상태 %s)", timeout, p.Status.Phase)
+		case <-time.After(time.Second):
+		}
+	}
+
+	logs, err := admin.CoreV1().Pods(ns).GetLogs(created.Name, &corev1.PodLogOptions{}).DoRaw(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("검사 Pod 로그 읽기 실패: %w", err)
+	}
+	return ParseProbe(string(logs), targets)
+}
+
+// ParseProbe는 검사 Pod 로그를 결과로 바꾼다. 로그가 끝까지 찍히지 않았으면 오류다.
+func ParseProbe(logs string, targets []Target) ([]CheckResult, error) {
+	got := map[string]string{}
+	ended := false
+	sc := bufio.NewScanner(strings.NewReader(logs))
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		switch {
+		case len(f) == 1 && f[0] == "PROBE-END":
+			ended = true
+		case len(f) == 3 && f[0] == "PROBE":
+			got[f[1]] = f[2]
+		}
+	}
+	if !ended {
+		return nil, fmt.Errorf("검사 Pod 로그가 끝까지 찍히지 않음:\n%s", logs)
+	}
+
+	// DNS는 열려 있어야 한다. 막혀 있으면 정책이 아니라 검사 Pod 네트워크가 고장 난 것일 수 있다.
+	out := []CheckResult{result("dns", "nslookup kubernetes.default", ExpectOpen, got["dns"])}
+	for _, t := range targets {
+		out = append(out, result(t.Name, commandFor(t), t.Expect, got[t.Name]))
+	}
+	return out, nil
+}
+
+func result(name, cmd, expect, got string) CheckResult {
+	r := CheckResult{Name: name, Command: cmd, Expect: expect, Got: got}
+	if got == "" {
+		r.Got, r.Detail = "missing", "로그에 결과가 없음"
+	}
+	r.Pass = r.Got == expect
+	return r
+}
+
+func commandFor(t Target) string {
+	if t.Port == 80 {
+		return "curl http://" + t.Host + "/"
+	}
+	return fmt.Sprintf("nc %s %d", t.Host, t.Port)
+}

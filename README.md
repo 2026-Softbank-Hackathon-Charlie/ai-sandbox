@@ -168,6 +168,8 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 | 패키지 | 내용 | 설계 문서 |
 |---|---|---|
 | `plan` | Plan JSON 읽기, 스키마·고정 검사, 진단(`{cause, evidence, fix}`)과 수정안 검사, 재요청 루프 | 3장, 4장 |
+| `sandbox` | 샌드박스 생성·삭제, AI 토큰 발급(1시간), 만료 정리, 격리 검증(차단 테스트) | 6장 |
+| `cmd/sandboxctl` | 샌드박스를 손으로 만들고 검사하고 지우는 도구 | 6장 |
 
 실행:
 
@@ -180,3 +182,44 @@ go test ./...
 - `plan.Retry(ctx, 2, ask, parse)`는 걸린 항목을 `ask`에 넘겨 다시 요청한다. 실제 Claude 호출은 `ask` 함수로 붙인다. 호출 오류(타임아웃 포함)는 다시 묻지 않고 바로 실패한다.
 - 테스트에는 형식이 깨진 AI 응답(코드 블록, 중간에 끊김, 뒤에 붙은 설명, 숫자를 문자열로)과 규칙을 어긴 응답 사례가 들어 있다.
 - 제안값: 쓰기 보류 상한 30초, 수정안 한 번에 5줄, 엔드포인트 변수 이름 규칙(`_HOST`, `_URL`, `_ENDPOINT`, `_ADDR`, `_PORT`로 끝남). 샘플 앱 변수 이름과 11/6 상한 값이 정해지면 맞춘다.
+
+### 샌드박스 (`sandbox`)
+
+- `Create`는 네임스페이스 다음 바로 NetworkPolicy를 만든다. 다른 리소스가 열린 상태로 뜨지 않게 하기 위해서다. 중간에 실패하면 네임스페이스를 지운다.
+- `Delete`는 이름이 `sandbox-`로 시작하고 `hopcharlie/sandbox=true` 라벨이 있을 때만 지운다. 운영 네임스페이스는 거절한다.
+- `Token`은 TokenRequest로 1시간짜리 토큰을 발급하고, 샌드박스 만료 시각을 넘기지 않는다.
+- `Sweep`은 `hopcharlie/expires-at`이 지난 샌드박스를 지운다. CronJob에서 부를 함수다 (CronJob 매니페스트는 아직 없음).
+- AI 계정 Role에는 Role, RoleBinding, NetworkPolicy, ResourceQuota, LimitRange, `serviceaccounts/token`, `pods/exec` 권한이 없다. 격리를 스스로 풀 수 없게 하기 위해서다. Helm이 릴리스 기록을 secret에 남기므로 자기 네임스페이스의 secret 권한은 있다.
+
+격리 검증(`CheckIsolation`)이 확인하는 것:
+
+| 항목 | 명령 (같은 뜻) | 기대 | 방법 |
+|---|---|---|---|
+| prod-secrets | `kubectl get secrets -n <운영>` | 막힘 | AI 토큰으로 실제 시도 |
+| own-netpol-delete | `kubectl delete networkpolicy ...` | 막힘 | 권한 확인 요청 (실제로 지우지 않음) |
+| own-role-escalate | `kubectl edit role ...` | 막힘 | 권한 확인 요청 |
+| own-token-create | `kubectl create token ...` | 막힘 | 권한 확인 요청 |
+| prod-deploy-delete | `kubectl delete deployment -n <운영> --all` | 막힘 | 권한 확인 요청 |
+| own-pods-list | `kubectl get pods -n <샌드박스>` | 열림 | 리허설이 가능한지 확인 |
+| dns | `nslookup kubernetes.default` | 열림 | 검사 Pod. 막히면 검사 자체를 믿을 수 없음 |
+| metadata | `curl http://169.254.169.254/` | 막힘 | 검사 Pod |
+| apiserver | `nc kubernetes.default.svc 443` | 막힘 | 검사 Pod. 정책이 없으면 열리는 곳이라 정책 동작의 증거 |
+| (추가) | `-target db=호스트:포트` | 막힘 | 검사 Pod. 운영 DB 주소를 넣는다 |
+
+로컬 kind 클러스터에서 확인한 결과 (2026-11-02, kind 0.33, kindnet):
+
+- 정책이 없는 네임스페이스에서는 apiserver와 다른 네임스페이스의 서비스가 **열림** (대조군)
+- 샌드박스에서는 10개 항목 모두 기대대로 (`rehearse-check` 종료 코드 0)
+- 샌드박스의 NetworkPolicy를 지우면 apiserver와 db가 열림으로 나와 검사가 **실패** (종료 코드 1)
+
+```bash
+kind create cluster --name hop-sandbox --kubeconfig ./kind.kubeconfig
+go run ./cmd/sandboxctl -kubeconfig ./kind.kubeconfig rehearse-check -app shop -prod-ns shop -target db=<운영 DB 호스트>:5432
+```
+
+`-kubeconfig`는 필수다. 현재 컨텍스트(운영 클러스터일 수 있음)를 실수로 쓰지 않도록 기본값을 두지 않았다.
+
+주의:
+
+- CNPG를 샌드박스에 띄우려면 `AllowIngressNamespaces`에 operator 네임스페이스를, `AllowEgressCIDRs`에 API 서버 주소를 넣어야 한다. 이때는 기본 대상의 apiserver 항목을 빼야 한다.
+- EKS(VPC CNI 네트워크 정책), GKE(Dataplane V2), k3s에서는 아직 돌려 보지 않았다. 11/4 A 영역 작업과 같이 확인한다.
