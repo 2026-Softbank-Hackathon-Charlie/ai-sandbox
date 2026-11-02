@@ -12,6 +12,7 @@ import (
 	"io"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/mask"
 )
@@ -209,10 +210,19 @@ func short(v any) string {
 	if s == "" {
 		s = fmt.Sprint(v)
 	}
-	if len(s) > 200 {
-		s = s[:199] + "…"
+	return Truncate(s, 200)
+}
+
+// Truncate는 s를 n바이트 안으로 자른다. 한글처럼 여러 바이트인 글자를 반으로 자르지 않는다.
+func Truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
 	}
-	return s
+	cut := n - len("…")
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 /* ---------- 여러 곳에 동시에 ---------- */
