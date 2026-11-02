@@ -134,7 +134,7 @@ AI의 출력은 엔진 Plan, 대상 CNPG 매니페스트, 근거를 묶은 JSON�
 
 | 구분 | 규칙 |
 |---|---|
-| 초안과 같아야 함 | id, source 전체, target의 env·context·namespace·cluster·dsn, gateway, files 위치, verify의 schemas·writtenRecords. AI가 데이터나 비밀번호를 다른 곳으로 보내지 못하게 한다 |
+| 초안과 같아야 함 | id, source 전체, target의 env·context·namespace·cluster·dsn, gateway, files 전체(위치, rclone, flags. 빼거나 더할 수 없음), verify의 schemas·writtenRecords (없음과 빈 목록은 같게 봄). AI가 데이터나 비밀번호를 다른 곳으로 보내지 못하게 한다 |
 | 고정 규칙 | `verify.fenceGate`는 끌 수 없음. `target.manifest`는 비우거나 `attachment:target.yaml`. 검증 테이블은 초안보다 줄일 수 없음 |
 | 상한값 범위 (제안값) | maxDowntime 5s~60s (게이트웨이 `-max-hold` 90s보다 짧게), switchoverTimeout 30s~3m, catchupTimeout 1m~15m, maxLagBytes 1 KiB~64 MiB |
 | 매니페스트 | `postgresql.cnpg.io/v1` Cluster 하나, 이름·네임스페이스는 Plan의 대상과 같음, `spec.replica.primary`는 원본 클러스터, 시작은 `pg_basebackup`만, spec 키는 허용 목록만 (슈퍼유저, 백업 대상, 관리 계정 키 금지), instances 1~5 |
@@ -179,8 +179,8 @@ AI의 출력은 엔진 Plan, 대상 CNPG 매니페스트, 근거를 묶은 JSON�
 
 - 기록은 에이전트 코드가 남긴다. AI가 기록을 고치거나 빼먹을 수 없다.
 - 플랫폼에 보내기 전에 문자열의 비밀값과 비밀처럼 보이는 키(token, password 등) 아래 값을 가린다. 플랫폼도 저장 전에 가린다.
-- 기록 요청이 실패해도 작업은 멈추지 않고, 세션을 닫을 때 실패를 돌려준다.
-- 계획 세션은 Plan 제출 전에 열리므로 planRef가 없다. 리허설과 진단 세션은 planRef와 함께 열린다. 계획 세션에 나중에 planRef를 붙이는 API가 생기면 연결한다.
+- 기록 요청이 실패해도 작업은 멈추지 않는다. 검사를 통과한 결과는 그대로 쓰고, 남기지 못한 기록은 경고로 알린다(`OnLogError`).
+- 계획 세션은 Plan 제출 전에 열리므로 planRef가 없다. 그래서 리허설 세션(planRef 있음)의 첫 기록에 planRef와 계획 세션 ID를 남겨, 승인 화면에서 계획 세션을 찾아갈 수 있게 한다. 리허설과 진단 세션은 planRef와 함께 열린다.
 - 토큰은 `ANTHROPIC_API_KEY`, 플랫폼 agent 토큰은 환경 변수로만 읽는다.
 
 ## 5. 도구 허용 목록
@@ -235,7 +235,7 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 2. 임시 원본 CNPG 클러스터를 만든다. 이름은 Plan의 원본 클러스터와 같고, 엔진의 분산 토폴로지(`replica.source`가 대상)를 따른다. 검증할 스키마마다 테스트 데이터를 넣는다. 운영 데이터는 넣지 않는다.
 3. AI가 쓴 대상 매니페스트를 샌드박스로 옮긴다. 네임스페이스와 접속 주소만 바꾸고 StorageClass, 크기, 자원, 인스턴스 수, 이미지는 그대로 둔다. 그 값이 대상 클러스터에서 되는지가 리허설이 보려는 것이다.
 4. 엔진을 라이브러리로 부른다. 쿠버네티스는 **샌드박스 토큰**(최소 권한)으로, DB는 로컬 프록시(연결마다 현재 primary Pod로 port-forward)로 붙는다. 게이트웨이, 파일, k6 기록은 샌드박스에 없으므로 뺀다. 상한값과 검증 범위는 AI의 Plan 그대로다.
-5. 같은 경고(PVC ProvisioningFailed, FailedScheduling, 이미지 풀 실패 등)가 25초 넘게 이어지면 기다려도 풀리지 않는 환경 문제로 보고 엔진을 멈춘다. 엔진의 catchupTimeout(분 단위)까지 기다리지 않는다.
+5. 같은 경고(PVC ProvisioningFailed, FailedScheduling, 이미지 풀 실패 등)가 25초 넘게 **계속 되풀이되면** 기다려도 풀리지 않는 환경 문제로 보고 엔진을 멈춘다. 이 실행 전부터 있던 경고와, 한 번 나고 다시 일어나지 않은 경고는 보지 않는다. 엔진이 끝나면 감시를 먼저 멈추므로 성공한 실행이 늦은 판정으로 실패가 되지 않는다. 엔진의 catchupTimeout(분 단위)까지 기다리지 않는다.
 6. 엔진 단계 이벤트는 `engine.<단계>` 도구 호출·결과로 리허설 세션에 남는다.
 7. 통과 기준: 엔진 결과 `succeeded` (9단계 모두 성공, fence 비교와 verify 통과).
 8. 실패하면 샌드박스가 살아 있는 동안 AI가 진단한다(샌드박스 조회 도구: `sandbox_events`, `sandbox_cnpg_status`, `sandbox_pvcs`, 대상 환경의 `list_storage_classes`, `node_capacity`). 수정안이 검사를 통과하면 새 샌드박스에서 다시 돌린다. 최대 3회다.
@@ -275,7 +275,7 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 - **DB 지원 범위:** 현재 엔진은 CNPG replica·demote·promote를 사용한다. 다른 DB 이전 방식을 지원하려면 엔진 변경과 별도 합의가 필요하다. AI가 Plan에 이전 방식 enum을 새로 만들지 않는다.
 - **트래픽 게이트웨이 연결:** 현재 플랫폼의 Go 게이트웨이 계약을 사용한다. 각 환경 backend 주소와 샌드박스용 게이트웨이를 인계받아야 한다.
 - **AI 범위 (3장 7번):** 온보딩(Dockerfile·PR 생성)을 넣을지. 콘솔에서는 일단 뺐다.
-- **계획 세션의 planRef:** 계획 세션은 Plan 제출 전에 열리므로 planRef가 없다. 승인 화면에 계획 세션도 보이려면 플랫폼에 세션의 planRef를 나중에 붙이는 API가 필요하다 (platform 담당과 상의).
+- **계획 세션의 planRef:** 지금은 리허설 세션에 계획 세션 ID를 남겨 연결한다. 세션에 planRef를 나중에 붙이는 API가 플랫폼에 생기면 계획 세션을 Plan에 직접 연결할 수 있다 (platform 담당과 상의).
 - **리허설 범위:** 지금은 대상 클러스터 하나에 원본과 대상을 모두 만든다. 클러스터 사이 복제까지 시험하려면 양쪽에 샌드박스가 필요하다.
 - **샌드박스 관리 자격 증명:** 리허설은 대상 클러스터에서 네임스페이스 생성·삭제, 검사 Pod, port-forward 권한이 필요하다. 어느 계정으로 할지 A 영역과 정한다.
 - **타임아웃·재요청 상한 값:** 이 문서의 숫자(재요청 2회, 리허설 3회, 쓰기 보류 상한 범위, 멈춤 판단 25초)는 제안값이다.
@@ -284,10 +284,10 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 
 | 패키지 | 내용 | 장 |
 |---|---|---|
-| `plan` | AI 출력(엔진 Plan + 매니페스트 + 근거) 검사, 진단 수정안 검사와 사본 적용, 재요청 | 3 |
+| `plan` | AI 출력(엔진 Plan + 매니페스트 + 근거) 검사, 진단 수정안 검사와 사본 적용 | 3 |
 | `mask` | AI와 플랫폼에 보내기 전 비밀값 가리기 | 4 |
 | `agentlog` | 플랫폼 에이전트 세션 기록 (`/v1/agent/sessions`) | 4 |
-| `llm` | 도구를 쓰는 에이전트 (계획, 진단), 읽기 전용 조사 도구 | 4, 5 |
+| `llm` | 도구를 쓰는 에이전트 (계획, 진단, 검사에 걸리면 대화를 이어 재요청), 읽기 전용 조사 도구 | 4, 5 |
 | `sandbox` | 샌드박스 생성·삭제, 1시간 토큰, 만료 정리, CNPG 모드, 격리 검사 | 6 |
 | `rehearsal` | 샌드박스에서 실제 엔진으로 리허설, 실패 시 진단과 재실행 | 7 |
 | `cmd/hopai` | 전체 흐름 (초안 → 계획 → 제출 → 리허설 → 첨부) | 2 |
@@ -329,8 +329,8 @@ REHEARSAL_KUBECONFIG=<kubeconfig> REHEARSAL_SC=standard go test -tags cluster -r
 
 | 경우 | 결과 |
 |---|---|
-| 대상 StorageClass `standard` | 격리 검사 10/10 → 임시 원본과 테스트 데이터 → 엔진 9단계 모두 성공, 쓰기 보류 8.8초, 전체 80초 |
-| 대상 StorageClass `gp3` (kind에 없음) | prepare에서 52초 만에 멈춤, 근거 `storageclass.storage.k8s.io "gp3" not found`, 쓰기 보류 전이라 원본 그대로 |
+| 대상 StorageClass `standard` | 격리 검사 10/10 → 임시 원본과 테스트 데이터 → 엔진 9단계 모두 성공, 쓰기 보류 8.7초, 전체 77초 |
+| 대상 StorageClass `gp3` (kind에 없음) | prepare에서 51초 만에 멈춤, 근거 `storageclass.storage.k8s.io "gp3" not found`, 쓰기 보류 전이라 원본 그대로 |
 
 알려진 한계:
 
