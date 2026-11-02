@@ -23,6 +23,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -39,6 +40,7 @@ import (
 
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/agentlog"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/llm"
+	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/mask"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/plan"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/rehearsal"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/sandbox"
@@ -146,6 +148,7 @@ func main() {
 		},
 	})
 
+	printRehearsalWarnings(os.Stderr, rep)
 	// 5. 수정안 반영과 리포트 첨부
 	result := map[string]any{"planRef": rec.Ref, "planSession": planSession}
 	if rep != nil {
@@ -179,11 +182,26 @@ func main() {
 	} else {
 		fmt.Println(string(enc))
 	}
-	if rep == nil || !rep.Passed || rerr != nil {
-		fmt.Fprintf(os.Stderr, "리허설을 통과하지 못했습니다. Plan %s는 승인하지 마세요\n", rec.Ref)
-		os.Exit(1)
+	if code := reportRehearsal(os.Stderr, rep, rerr, rec.Ref, final.Revision); code != 0 {
+		os.Exit(code)
 	}
-	fmt.Fprintf(os.Stderr, "리허설 통과. 콘솔에서 Plan %s (revision %d)를 확인하고 승인하세요\n", rec.Ref, final.Revision)
+}
+
+func printRehearsalWarnings(w io.Writer, rep *rehearsal.Report) {
+	if rep != nil {
+		for _, warning := range rep.Warnings {
+			fmt.Fprintf(w, "경고: %s\n", mask.String(warning))
+		}
+	}
+}
+
+func reportRehearsal(w io.Writer, rep *rehearsal.Report, err error, ref string, revision int64) int {
+	if rep == nil || !rep.Passed || err != nil {
+		fmt.Fprintf(w, "리허설을 통과하지 못했습니다. Plan %s는 승인하지 마세요\n", ref)
+		return 1
+	}
+	fmt.Fprintf(w, "리허설 통과. 콘솔에서 Plan %s (revision %d)를 확인하고 승인하세요\n", ref, revision)
+	return 0
 }
 
 func submit(ctx context.Context, pc *client.Client, p *plan.Proposal) (*apiv1.PlanRecord, error) {
