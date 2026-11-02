@@ -98,7 +98,8 @@ AI가 플랫폼에 제출하는 본문은 **`EnginePlan` 자체**다. 필수 필
 
 - `files`, `gateway`, `verify`, `thresholds`는 선택 필드다. `files`를 쓰면 `source`, `target` 둘 다 필요하며, 값은 runner에 설정한 rclone remote 경로다. 접속 키는 Plan에 넣지 않는다.
 - `gateway.mode: "none"`은 쓰기 보류·트래픽 전환을 수행하지 않는다. 운영 이전에서는 설정된 HTTP 게이트웨이를 사용한다.
-- timeout은 `"10m"`, `"2m"` 같은 duration 문자열이다. `maxDowntime`은 전환 후 실측값과 비교하는 예산이며, 초과만으로 자동 중단·원복하지 않는다. catchup 대기시간과 이전 다운타임은 다른 지표다.
+- timeout은 `"10m"`, `"2m"` 같은 duration 문자열이다.
+- `maxDowntime`은 서비스 중단 시간이 아니라 **쓰기 보류 시간**의 예산이다. 이전은 무중단이다. 전환 순간 두 DB가 함께 쓰기를 받지 않도록 게이트웨이가 쓰기를 잠깐 붙잡는다(fence부터 cutover까지). 그동안 읽기는 계속되고, 붙잡힌 쓰기는 거절되지 않고 새 primary로 넘어간다. 엔진은 전환 후 실측값과 이 예산을 비교하며, 초과만으로 자동 중단·원복하지 않는다. catchup 대기시간과는 다른 지표다.
 
 ### 실행 순서와 플랫폼 연동
 
@@ -136,7 +137,7 @@ AI의 출력은 엔진 Plan, 대상 CNPG 매니페스트, 근거를 묶은 JSON�
 |---|---|
 | 초안과 같아야 함 | id, source 전체, target의 env·context·namespace·cluster·dsn, gateway, files 전체(위치, rclone, flags. 빼거나 더할 수 없음), verify의 schemas·writtenRecords (없음과 빈 목록은 같게 봄). AI가 데이터나 비밀번호를 다른 곳으로 보내지 못하게 한다 |
 | 고정 규칙 | `verify.fenceGate`는 끌 수 없음. `target.manifest`는 비우거나 `attachment:target.yaml`. 검증 테이블은 초안보다 줄일 수 없음 |
-| 상한값 범위 (제안값) | maxDowntime 5s~60s (게이트웨이 `-max-hold` 90s보다 짧게), switchoverTimeout 30s~3m, catchupTimeout 1m~15m, maxLagBytes 1 KiB~64 MiB |
+| 상한값 범위 (제안값) | maxDowntime(쓰기 보류) 5s~60s (게이트웨이는 90s(`-max-hold`) 넘게 붙잡힌 쓰기에 503을 돌려주므로, 그 전에 끝나 실패한 요청이 없게 한다), switchoverTimeout 30s~3m, catchupTimeout 1m~15m, maxLagBytes 1 KiB~64 MiB |
 | 매니페스트 | `postgresql.cnpg.io/v1` Cluster 하나, 이름·네임스페이스는 Plan의 대상과 같음, `spec.replica.primary`는 원본 클러스터, 시작은 `pg_basebackup`만, spec 키는 허용 목록만 (슈퍼유저, 백업 대상, 관리 계정 키 금지), instances 1~5 |
 
 수정안(진단 결과)은 두 종류다.
