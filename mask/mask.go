@@ -34,8 +34,9 @@ var rules = []rule{
 }
 
 var (
-	variable    = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*\}$`)
-	dsnPassword = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://[^:/@\s]+:)([^@\s]+)@`)
+	variable = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*\}$`)
+	// 사용자가 비어 있거나(:pass@) 비밀번호에 @가 있어도 호스트 앞의 마지막 @까지 지운다 (경로 /, ?, #은 넘지 않음).
+	dsnPassword = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://[^:/@\s]*:)([^\s/?#]*)@`)
 	assignment  = regexp.MustCompile(`(?i)("?[A-Za-z0-9_.-]*(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential)[A-Za-z0-9_.-]*"?\s*[:=]\s*)("[^"]*"|'[^']*'|\$\{[A-Za-z_][A-Za-z0-9_]*\}|[^\s,}]+)`)
 )
 

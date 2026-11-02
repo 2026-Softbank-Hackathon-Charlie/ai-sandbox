@@ -153,7 +153,8 @@ func main() {
 	result := map[string]any{"planRef": rec.Ref, "planSession": planSession}
 	if rep != nil {
 		result["rehearsal"] = rep
-		if rep.Changed {
+		// 수정안은 리허설을 통과했을 때만 올린다. 통과하지 못한 수정안이 승인 대상 revision이 되면 안 된다.
+		if rep.Changed && rep.Passed && rerr == nil {
 			if !samePlan(&rep.Final.Plan, &prop.Plan) {
 				// 제출한 Plan은 고칠 수 없으므로 새로 제출한다. 앞의 Plan은 운영자가 반려한다(agent 토큰은 반려 못 함).
 				nrec, err := submit(ctx, pc, rep.Final)

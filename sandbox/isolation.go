@@ -38,6 +38,9 @@ type Target struct {
 	Host   string
 	Port   int
 	Expect string
+	// MustResolve면 이름을 찾지 못한 것을 '막힘'으로 치지 않는다. 정책 동작의 증거로 쓰는 대상은
+	// 정책이 없으면 열리는 곳이어야 하므로, 주소가 없으면 아무것도 증명하지 못한다.
+	MustResolve bool
 }
 
 // IsolationConfig는 격리 검증 설정이다.
@@ -56,7 +59,7 @@ type IsolationConfig struct {
 }
 
 // CNPGWitness는 정책이 없으면 열리고, 샌드박스 정책으로는 막혀야 하는 다른 네임스페이스의 서비스다.
-var CNPGWitness = Target{Name: "other-namespace", Host: "cnpg-webhook-service.cnpg-system.svc.cluster.local", Port: 443, Expect: ExpectBlocked}
+var CNPGWitness = Target{Name: "other-namespace", Host: "cnpg-webhook-service.cnpg-system.svc.cluster.local", Port: 443, Expect: ExpectBlocked, MustResolve: true}
 
 // targetsFor는 설정에 맞는 기본 검사 대상을 고른다.
 func targetsFor(c IsolationConfig) []Target {
@@ -78,7 +81,7 @@ func targetsFor(c IsolationConfig) []Target {
 // (ForCNPG로 API 서버를 열었으면 APIServerAllowed를 켠다. 그러면 이 항목 대신 CNPGWitness를 쓴다.)
 var DefaultTargets = []Target{
 	{Name: "metadata", Host: "169.254.169.254", Port: 80, Expect: ExpectBlocked},
-	{Name: "apiserver", Host: "kubernetes.default.svc.cluster.local", Port: 443, Expect: ExpectBlocked},
+	{Name: "apiserver", Host: "kubernetes.default.svc.cluster.local", Port: 443, Expect: ExpectBlocked, MustResolve: true},
 }
 
 var hostRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.-]{0,251}[a-zA-Z0-9])?$`)
@@ -199,13 +202,15 @@ func rbacOutcome(err error) (string, string) {
 	}
 }
 
-// probeScript는 인자로 받은 "이름 호스트 포트" 묶음마다 TCP 연결을 시도하고 PROBE 줄을 찍는다.
+// probeScript는 인자로 받은 "이름 호스트 포트 이름확인" 묶음마다 TCP 연결을 시도하고 PROBE 줄을 찍는다.
+// 이름확인이 1이면 먼저 이름을 찾고, 못 찾으면 unresolved를 찍는다 (연결 실패와 구분).
 // 대상 값은 셸 문자열에 끼워 넣지 않고 인자로만 넘긴다.
 const probeScript = `
 if nslookup kubernetes.default.svc.cluster.local >/dev/null 2>&1; then echo "PROBE dns open"; else echo "PROBE dns blocked"; fi
-while [ $# -ge 3 ]; do
-  if nc -w 3 "$2" "$3" </dev/null >/dev/null 2>&1; then echo "PROBE $1 open"; else echo "PROBE $1 blocked"; fi
-  shift 3
+while [ $# -ge 4 ]; do
+  if [ "$4" = 1 ] && ! nslookup "$2" >/dev/null 2>&1; then echo "PROBE $1 unresolved"
+  elif nc -w 3 "$2" "$3" </dev/null >/dev/null 2>&1; then echo "PROBE $1 open"; else echo "PROBE $1 blocked"; fi
+  shift 4
 done
 echo "PROBE-END"
 `
@@ -220,7 +225,11 @@ func ProbePod(namespace, image string, targets []Target) (*corev1.Pod, error) {
 		if t.Expect != ExpectBlocked && t.Expect != ExpectOpen {
 			return nil, fmt.Errorf("%s: 기대값은 blocked 또는 open이어야 함", t.Name)
 		}
-		args = append(args, t.Name, t.Host, strconv.Itoa(t.Port))
+		resolve := "0"
+		if t.MustResolve {
+			resolve = "1"
+		}
+		args = append(args, t.Name, t.Host, strconv.Itoa(t.Port), resolve)
 	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -325,8 +334,11 @@ func ParseProbe(logs string, targets []Target) ([]CheckResult, error) {
 
 func result(name, cmd, expect, got string) CheckResult {
 	r := CheckResult{Name: name, Command: cmd, Expect: expect, Got: got}
-	if got == "" {
+	switch got {
+	case "":
 		r.Got, r.Detail = "missing", "로그에 결과가 없음"
+	case "unresolved":
+		r.Detail = "주소를 찾을 수 없어 정책 동작을 증명하지 못함"
 	}
 	r.Pass = r.Got == expect
 	return r
