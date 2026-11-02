@@ -107,7 +107,9 @@ func main() {
 		clusters[e.name] = llm.Cluster{Typed: cs, Dynamic: dyn}
 	}
 	sink := agentlog.Tee{agentlog.Platform{C: pc}, agentlog.Writer{W: os.Stderr}}
-	agent := llm.New(llm.Config{Sink: sink})
+	agent := llm.New(llm.Config{Sink: sink, OnLogError: func(err error) {
+		fmt.Fprintln(os.Stderr, "경고: 에이전트 기록 일부를 플랫폼에 남기지 못함:", err)
+	}})
 	scope := llm.PlanScope{App: *app, Namespace: draft.Source.Namespace, Envs: []string{*from, *to}}
 	prop, planSession, err := agent.Plan(ctx, llm.PlanInput{App: *app, Draft: &draft, Tools: llm.PlanTools(scope, pc, clusters)})
 	must(err)
@@ -134,7 +136,7 @@ func main() {
 	}
 	rep, rerr := rehearsal.Rehearse(ctx, rehearsal.Config{
 		Admin: admin, AdminREST: adminCfg,
-		Proposal: prop, Draft: &draft, PlanRef: rec.Ref,
+		Proposal: prop, Draft: &draft, PlanRef: rec.Ref, PlanSession: planSession,
 		Diagnoser: agent, Sink: sink,
 		Isolation:     sandbox.IsolationConfig{ProdNamespace: *prodNS, Targets: targets},
 		DiagnoseTools: diagTools,
