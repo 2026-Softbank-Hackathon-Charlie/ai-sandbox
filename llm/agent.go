@@ -36,6 +36,9 @@ type Config struct {
 	MaxIterations int
 	// Sink는 세션 기록을 받는 곳이다. 비우면 기록하지 않는다(테스트).
 	Sink agentlog.Sink
+	// OnLogError는 작업은 성공했지만 세션 기록 일부를 남기지 못했을 때 불린다.
+	// 기록 실패 때문에 검사를 통과한 결과를 버리지 않는다. 비우면 무시한다.
+	OnLogError func(error)
 	// Options는 SDK 옵션이다. 테스트에서 option.WithBaseURL로 가짜 서버를 붙인다.
 	// API 키는 기본으로 ANTHROPIC_API_KEY 환경 변수에서 읽는다.
 	Options []option.RequestOption
@@ -212,7 +215,10 @@ func run[T any](ctx context.Context, a *Agent, t task[T]) (T, string, error) {
 		if len(is) == 0 {
 			sum, detail := t.summary(v)
 			ses.Log(ctx, agentlog.Event{Type: agentlog.Decision, Status: "ok", Output: detail})
-			return v, ses.ID(), ses.Finish(ctx, true, sum)
+			if err := ses.Finish(ctx, true, sum); err != nil && a.cfg.OnLogError != nil {
+				a.cfg.OnLogError(err)
+			}
+			return v, ses.ID(), nil
 		}
 		ses.Log(ctx, agentlog.Event{Type: agentlog.Error, Status: "check", Output: is.Error()})
 		if attempt > a.cfg.MaxRetries {
@@ -237,10 +243,7 @@ func messageEvent(m *anthropic.BetaMessage, d time.Duration) agentlog.Event {
 		out["toolCalls"] = calls
 	}
 	if s := text(m); s != "" {
-		if len(s) > 2000 {
-			s = s[:2000] + "…"
-		}
-		out["text"] = s
+		out["text"] = agentlog.Truncate(s, 2000)
 	}
 	return agentlog.Event{Type: agentlog.Message, Output: out, Duration: d, InputTokens: m.Usage.InputTokens, OutputTokens: m.Usage.OutputTokens}
 }
