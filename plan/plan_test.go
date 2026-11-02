@@ -86,6 +86,7 @@ func TestParseRejectsBrokenAIOutput(t *testing.T) {
 		{"다른 네임스페이스", replace(t, v, `namespace: moimroom\nspec`, `namespace: kube-system\nspec`), "manifest.metadata.namespace"},
 		{"복제본 아님", replace(t, v, `  replica: {self: moimroom-db-eks, primary: moimroom-db-gke, source: moimroom-db-gke}\n`, ``), "manifest.spec.replica"},
 		{"엉뚱한 원본에서 복제", replace(t, v, `primary: moimroom-db-gke`, `primary: other-db`), "manifest.spec.replica.primary"},
+		{"복제 소스가 원본이 아님", replace(t, v, `primary: moimroom-db-gke, source: moimroom-db-gke}`, `primary: moimroom-db-gke, source: other}`), "manifest.spec.replica.source"},
 		{"슈퍼유저 켜기", replace(t, v, `  instances: 2\n`, `  instances: 2\n  enableSuperuserAccess: true\n`), "spec.enableSuperuserAccess: 쓸 수 없는 키"},
 		{"백업 대상 넣기", replace(t, v, `  instances: 2\n`, `  instances: 2\n  backup: {barmanObjectStore: {destinationPath: s3://x}}\n`), "spec.backup"},
 		{"빈 DB로 시작", replace(t, v, `pg_basebackup: {source`, `initdb: {source`), "pg_basebackup으로만"},

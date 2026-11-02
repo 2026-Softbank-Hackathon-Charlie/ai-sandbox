@@ -68,8 +68,12 @@ func CheckManifest(manifest string, p *eplan.Plan) Issues {
 	if rep == nil {
 		is.add("spec.replica", "원본 %q의 복제본 설정이 있어야 함", p.Source.Cluster)
 	} else {
+		// 엔진의 분산 토폴로지 검사(checkTopology)와 같은 규칙이다
 		if src := str(rep, "primary"); src != p.Source.Cluster {
 			is.add("spec.replica.primary", "원본 클러스터 %q여야 함 (받은 값 %q)", p.Source.Cluster, src)
+		}
+		if src := str(rep, "source"); src != p.Source.Cluster {
+			is.add("spec.replica.source", "원본 클러스터의 externalCluster 이름 %q여야 함 (받은 값 %q)", p.Source.Cluster, src)
 		}
 		if self := str(rep, "self"); self != "" && self != p.Target.Cluster {
 			is.add("spec.replica.self", "대상 클러스터 %q여야 함 (받은 값 %q)", p.Target.Cluster, self)
