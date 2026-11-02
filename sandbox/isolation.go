@@ -144,12 +144,47 @@ func checkRBAC(ctx context.Context, ai kubernetes.Interface, sbNS, prodNS string
 		out = append(out, r)
 	}
 
+	// AI 계정은 Pod를 만들 수 있으므로, 노드 네트워크·파일시스템을 쓰는 Pod는 Pod Security가 막아야 한다.
+	// dry-run으로 보내 실제로는 아무것도 만들지 않는다.
+	out = append(out, checkHostPod(ctx, ai, sbNS))
+
 	// 반대로, 자기 네임스페이스에서는 일할 수 있어야 한다. 아니면 리허설 자체가 안 된다.
 	r = CheckResult{Name: "own-pods-list", Command: "kubectl get pods -n " + sbNS, Expect: ExpectOpen}
 	_, err = ai.CoreV1().Pods(sbNS).List(ctx, metav1.ListOptions{Limit: 1})
 	r.Got, r.Detail = rbacOutcome(err)
 	r.Pass = r.Got == ExpectOpen
 	return append(out, r)
+}
+
+// HostPod는 격리를 벗어나는 Pod다. hostNetwork면 NetworkPolicy를 받지 않고, hostPath면 노드 파일을 읽는다.
+func HostPod(namespace string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "host-escape-", Namespace: namespace},
+		Spec: corev1.PodSpec{
+			HostNetwork: true,
+			Volumes:     []corev1.Volume{{Name: "host", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/"}}}},
+			Containers: []corev1.Container{{
+				Name: "x", Image: "busybox:1.37",
+				VolumeMounts: []corev1.VolumeMount{{Name: "host", MountPath: "/host"}},
+			}},
+		},
+	}
+}
+
+func checkHostPod(ctx context.Context, ai kubernetes.Interface, sbNS string) CheckResult {
+	r := CheckResult{Name: "host-pod-create", Command: "kubectl run -n " + sbNS + " --dry-run=server (hostNetwork, hostPath /)", Expect: ExpectBlocked}
+	_, err := ai.CoreV1().Pods(sbNS).Create(ctx, HostPod(sbNS), metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
+	switch {
+	case err == nil:
+		r.Got = ExpectOpen
+	// Quota 초과도 Forbidden이므로, Pod Security가 막은 것만 막힘으로 친다
+	case apierrors.IsForbidden(err) && strings.Contains(err.Error(), "PodSecurity"):
+		r.Got = ExpectBlocked
+	default:
+		r.Got, r.Detail = "error", err.Error()
+	}
+	r.Pass = r.Got == ExpectBlocked
+	return r
 }
 
 func rbacOutcome(err error) (string, string) {

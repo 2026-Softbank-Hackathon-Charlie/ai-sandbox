@@ -133,3 +133,13 @@ func TestManifestPathAllowed(t *testing.T) {
 		}
 	}
 }
+
+func TestManifestFixRejectsForeignImage(t *testing.T) {
+	_, is := Fix{Kind: KindManifestPatch, Patch: []Op{{"replace", "/spec/imageName", []byte(`"attacker/pg:latest"`)}}}.Apply(proposal(t), draft(t))
+	if !strings.Contains(is.Error(), "spec.imageName") {
+		t.Fatalf("임의 이미지가 걸려야 함:\n%s", is.Error())
+	}
+	if _, is := (Fix{Kind: KindManifestPatch, Patch: []Op{{"replace", "/spec/imageName", []byte(`"ghcr.io/cloudnative-pg/postgresql:17.6"`)}}}).Apply(proposal(t), draft(t)); len(is) > 0 {
+		t.Fatalf("CNPG 이미지 버전 바꾸기는 통과해야 함:\n%s", is.Error())
+	}
+}
