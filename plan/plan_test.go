@@ -78,8 +78,6 @@ func TestParseRejectsBrokenAIOutput(t *testing.T) {
 		// 고정 규칙
 		{"fence 비교 끄기", replace(t, v, `"fenceGate": true`, `"fenceGate": false`), "끌 수 없음"},
 		{"쓰기 보류 너무 김", replace(t, v, `"maxDowntime": "30s"`, `"maxDowntime": "5m"`), "5s~1m0s"},
-		{"쓰기 보류 0", replace(t, v, `"maxDowntime": "30s"`, `"maxDowntime": "0s"`), "plan.thresholds.maxDowntime"},
-		{"상한값 비움", replace(t, v, `"thresholds": { "maxLagBytes": 1048576, "catchupTimeout": "10m", "switchoverTimeout": "2m", "maxDowntime": "30s" }`, `"thresholds": {}`), "plan.thresholds.catchupTimeout"},
 		{"전환 시간 너무 김", replace(t, v, `"switchoverTimeout": "2m"`, `"switchoverTimeout": "30m"`), "switchoverTimeout"},
 		{"복제 지연 기준 너무 큼", replace(t, v, `"maxLagBytes": 1048576`, `"maxLagBytes": 999999999999`), "maxLagBytes"},
 		{"서버 파일 경로", replace(t, v, `"manifest": "attachment:target.yaml"`, `"manifest": "/etc/passwd"`), "서버 파일 경로"},
@@ -161,16 +159,75 @@ func TestEquivalentEmptyValues(t *testing.T) {
 	}
 }
 
-func TestDraftTablesKept(t *testing.T) {
-	d := draft(t)
-	d.Verify.Tables = []string{"app.orders", "app.payments"}
-	p := *d
-	p.Verify.Tables = []string{"app.orders"}
-	if is := CheckAgainstDraft(&p, d); !strings.Contains(is.Error(), `"app.payments"를 뺄 수 없음`) {
-		t.Fatalf("초안의 테이블을 빼면 걸려야 함:\n%s", is.Error())
+func TestParseDefaultsFenceGateWithoutExpandingReferences(t *testing.T) {
+	raw := replace(t, read(t, "proposal.json"), `"fenceGate": true,`, ``)
+	p, is := Parse([]byte(raw), draft(t))
+	if len(is) > 0 {
+		t.Fatal(is.Error())
 	}
-	p.Verify.Tables = []string{"app.orders", "app.payments", "app.items"}
-	if is := CheckAgainstDraft(&p, d); len(is) > 0 {
-		t.Fatalf("늘리는 것은 통과해야 함:\n%s", is.Error())
+	if p.Plan.Verify.FenceGate == nil || !*p.Plan.Verify.FenceGate {
+		t.Fatal("omitted fenceGate must default to true before execution")
+	}
+	if !strings.Contains(p.Plan.Source.DSN, "${GKE_MOIMROOM_PGPASSWORD}") {
+		t.Fatal("validation must not expand deployment secrets")
+	}
+}
+
+func TestParseRejectsMissingOrZeroThresholds(t *testing.T) {
+	for _, field := range []string{"maxLagBytes", "catchupTimeout", "switchoverTimeout", "maxDowntime"} {
+		for _, missing := range []bool{true, false} {
+			t.Run(field+map[bool]string{true: "/missing", false: "/zero"}[missing], func(t *testing.T) {
+				var raw map[string]any
+				_ = json.Unmarshal([]byte(read(t, "proposal.json")), &raw)
+				thresholds := raw["plan"].(map[string]any)["thresholds"].(map[string]any)
+				if missing {
+					delete(thresholds, field)
+				} else if field == "maxLagBytes" {
+					thresholds[field] = 0
+				} else {
+					thresholds[field] = "0s"
+				}
+				b, _ := json.Marshal(raw)
+				if _, is := Parse(b, draft(t)); !strings.Contains(is.Error(), "plan.thresholds."+field) {
+					t.Fatalf("missing or zero %s must fail: %v", field, is)
+				}
+			})
+		}
+	}
+}
+
+func TestCheckAgainstDraftPreservesRequiredTables(t *testing.T) {
+	d := draft(t)
+	d.Verify.Tables = []string{"app.orders", "app.items"}
+	for _, c := range []struct {
+		name   string
+		tables []string
+		ok     bool
+	}{
+		{"same order-independent set", []string{"app.items", "app.orders"}, true},
+		{"wider filter", []string{"app.orders", "app.items", "app.extra"}, true},
+		{"all tables", nil, true},
+		{"reduced filter", []string{"app.orders"}, false},
+		{"replaced filter", []string{"app.other"}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p := *d
+			p.Verify.Tables = c.tables
+			is := CheckAgainstDraft(&p, d)
+			if (len(is) == 0) != c.ok {
+				t.Fatalf("unexpected table scope result: %v", is)
+			}
+		})
+	}
+}
+
+func TestCheckAgainstDraftDoesNotDiscloseOriginalSecrets(t *testing.T) {
+	d := draft(t)
+	d.Source.DSN = "postgres://app:unlabelled-original-secret@db:5432/app"
+	p := *d
+	p.Source.DSN = "postgres://app:replacement-secret@db:5432/app"
+	is := CheckAgainstDraft(&p, d)
+	if len(is) == 0 || strings.Contains(is.Error(), "unlabelled-original-secret") || strings.Contains(is.Error(), "replacement-secret") {
+		t.Fatalf("mismatch issue must identify the path without secret values: %v", is)
 	}
 }

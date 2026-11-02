@@ -17,6 +17,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/agentlog"
+	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/mask"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/plan"
 )
 
@@ -220,12 +221,17 @@ func run[T any](ctx context.Context, a *Agent, t task[T]) (T, string, error) {
 			}
 			return v, ses.ID(), nil
 		}
-		ses.Log(ctx, agentlog.Event{Type: agentlog.Error, Status: "check", Output: is.Error()})
+		for i := range is {
+			is[i].Path = mask.String(is[i].Path)
+			is[i].Message = mask.String(is[i].Message)
+		}
+		issues := is.Error()
+		ses.Log(ctx, agentlog.Event{Type: agentlog.Error, Status: "check", Output: issues})
 		if attempt > a.cfg.MaxRetries {
 			return fail(&plan.RetryError{Attempts: attempt, Last: is})
 		}
 		msgs = append(runner.Messages(), anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(
-			"방금 낸 JSON이 검사에 걸렸다. 아래 항목을 고쳐서 JSON 전체를 다시 내라.\n- "+strings.ReplaceAll(is.Error(), "\n", "\n- "))))
+			"방금 낸 JSON이 검사에 걸렸다. 아래 항목을 고쳐서 JSON 전체를 다시 내라.\n- "+strings.ReplaceAll(issues, "\n", "\n- "))))
 	}
 	return fail(ErrNoAnswer)
 }

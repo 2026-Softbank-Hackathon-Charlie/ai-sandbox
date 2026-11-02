@@ -1,6 +1,7 @@
 package mask
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -33,6 +34,42 @@ func TestStringMasksSecrets(t *testing.T) {
 				t.Fatalf("지운 자리 표시가 없음: %q", out)
 			}
 		})
+	}
+}
+
+func TestStringPreservesEnvironmentReferencesAndJSON(t *testing.T) {
+	in := `{"dsn":"postgres://app:${DB_PASSWORD}@db:5432/app","token":"${GATEWAY_TOKEN}"}`
+	if got := String(in); got != in {
+		t.Fatalf("symbolic references must survive masking: %s", got)
+	}
+	masked := String(`{"token":"plain-secret","dsn":"postgres://app:db-secret@db:5432/app"}`)
+	if !json.Valid([]byte(masked)) || strings.Contains(masked, "plain-secret") || strings.Contains(masked, "db-secret") {
+		t.Fatalf("masked JSON must remain valid and secret-free: %s", masked)
+	}
+}
+
+func TestJSONMasksNestedStringsWithoutChangingOtherValues(t *testing.T) {
+	in := map[string]any{
+		"rows": int64(9007199254740993),
+		"nested": []any{map[string]any{
+			"token":        "quoted\"secret",
+			"password":     "${DB_PASSWORD}",
+			"input_tokens": 1200,
+			"cookie":       "session-secret",
+		}},
+	}
+	b, err := JSON(in)
+	if err != nil || !json.Valid(b) {
+		t.Fatalf("structured mask must return valid JSON: %s %v", b, err)
+	}
+	if !strings.Contains(string(b), `"rows":9007199254740993`) || !strings.Contains(string(b), `"input_tokens":1200`) || !strings.Contains(string(b), "${DB_PASSWORD}") {
+		t.Fatalf("numbers and symbolic references must survive: %s", b)
+	}
+	if strings.Contains(string(b), "quoted") || strings.Contains(string(b), "session-secret") {
+		t.Fatalf("nested secrets must be masked: %s", b)
+	}
+	if in["nested"].([]any)[0].(map[string]any)["token"] != "quoted\"secret" {
+		t.Fatal("masking must leave the caller's input unchanged")
 	}
 }
 

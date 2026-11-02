@@ -136,8 +136,8 @@ AI의 출력은 엔진 Plan, 대상 CNPG 매니페스트, 근거를 묶은 JSON�
 | 구분 | 규칙 |
 |---|---|
 | 초안과 같아야 함 | id, source 전체, target의 env·context·namespace·cluster·dsn, gateway, files 전체(위치, rclone, flags. 빼거나 더할 수 없음), verify의 schemas·writtenRecords (없음과 빈 목록은 같게 봄). AI가 데이터나 비밀번호를 다른 곳으로 보내지 못하게 한다 |
-| 고정 규칙 | `verify.fenceGate`는 끌 수 없음. `target.manifest`는 비우거나 `attachment:target.yaml`. 검증 테이블은 초안보다 줄일 수 없음 (초안에 목록이 있으면 그 테이블을 모두 포함) |
-| 상한값 범위 (제안값) | 네 값 모두 있어야 함 (비우면 엔진 기본값 maxDowntime 3m이 들어가 범위를 벗어남). maxDowntime(쓰기 보류) 5s~60s (게이트웨이는 90s(`-max-hold`) 넘게 붙잡힌 쓰기에 503을 돌려주므로, 그 전에 끝나 실패한 요청이 없게 한다), switchoverTimeout 30s~3m, catchupTimeout 1m~15m, maxLagBytes 1 KiB~64 MiB |
+| 고정 규칙 | `verify.fenceGate` 생략은 `true`로 정규화하고 `false`는 거절. `target.manifest`는 비우거나 `attachment:target.yaml`. 검증 테이블은 초안보다 줄일 수 없음(기존 필터의 테이블도 유지) |
+| 상한값 범위 (제안값) | 네 값 모두 필수이며 0은 거절. maxDowntime(쓰기 보류) 5s~60s (게이트웨이는 90s(`-max-hold`) 넘게 붙잡힌 쓰기에 503을 돌려주므로, 그 전에 끝나 실패한 요청이 없게 한다), switchoverTimeout 30s~3m, catchupTimeout 1m~15m, maxLagBytes 1 KiB~64 MiB |
 | 매니페스트 | `postgresql.cnpg.io/v1` Cluster 하나, 이름·네임스페이스는 Plan의 대상과 같음, `spec.replica.primary`는 원본 클러스터, 시작은 `pg_basebackup`만(source는 원본, secret은 `<원본>-app`, database·owner는 원본 DSN과 같음), `externalClusters`는 원본·대상 이름만 쓰고 host·port는 Plan의 해당 DSN과 같아야 하며 user는 `streaming_replica`, 인증서 시크릿은 `<이름>-replication`·`<이름>-ca`만(비밀번호 키 금지), `imageName`은 `ghcr.io/cloudnative-pg/postgresql` 이미지만, spec 키는 허용 목록만 (슈퍼유저, 백업 대상, 관리 계정 키 금지), instances 1~5 |
 
 수정안(진단 결과)은 두 종류다.
@@ -164,7 +164,7 @@ AI의 출력은 엔진 Plan, 대상 CNPG 매니페스트, 근거를 묶은 JSON�
 - 응답은 두 겹으로 막는다. API에 JSON 스키마(`llm/schema/*.json`)를 넘겨 형식을 강제하고, 받은 뒤 `plan` 검사를 다시 돌린다.
 - 검사에 걸리면 대화를 이어서 걸린 항목을 붙여 다시 묻는다. 거절, 출력 잘림, API 오류, 타임아웃(호출당 90초)은 다시 묻지 않는다. 답 한 번에 AI 호출은 10번까지다.
 - 안전 분류기가 거절하면 서버가 권장 대체 모델로 다시 돌리도록 `fallbacks: "default"`를 켰다.
-- AI에 보내는 Plan, 매니페스트, 로그는 비밀값을 가린 뒤 보낸다.
+- AI에 보내는 Plan, 매니페스트, 로그는 비밀값을 가린 뒤 보낸다. Plan은 JSON 구조와 `${VAR}` 참조를 보존한다. 평문 비밀값은 가린 초안과 응답의 고정 필드를 비교한 뒤에만 원래 값으로 복원하며, 재요청 오류에도 원문 비밀값을 넣지 않는다.
 
 ### 기록 (플랫폼 세션)
 
@@ -237,12 +237,14 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 1. 샌드박스를 CNPG 모드로 만들고(6장) 격리 검사를 돌린다. 막혀야 하는 명령은 `blocked` 이벤트로 남는다. 격리가 깨지면 그 샌드박스에서 아무것도 하지 않고 리허설 전체를 멈춘다.
 2. 임시 원본 CNPG 클러스터를 만든다. 이름은 Plan의 원본 클러스터와 같고, 엔진의 분산 토폴로지(`replica.source`가 대상)를 따른다. 검증할 스키마마다 테스트 데이터를 넣는다. 운영 데이터는 넣지 않는다.
 3. AI가 쓴 대상 매니페스트를 샌드박스로 옮긴다. 네임스페이스와 접속 주소만 바꾸고 StorageClass, 크기, 자원, 인스턴스 수, 이미지는 그대로 둔다. 그 값이 대상 클러스터에서 되는지가 리허설이 보려는 것이다.
-4. 엔진을 라이브러리로 부른다. 쿠버네티스는 **샌드박스 토큰**(최소 권한)으로, DB는 로컬 프록시(연결마다 현재 primary Pod로 port-forward)로 붙는다. 게이트웨이, 파일, k6 기록은 샌드박스에 없으므로 뺀다. 상한값과 검증 범위는 AI의 Plan 그대로다.
+4. 엔진을 라이브러리로 부른다. 쿠버네티스는 **샌드박스 토큰**(최소 권한)으로, DB는 로컬 프록시(연결마다 현재 primary Pod로 port-forward)로 붙는다. 게이트웨이, 파일, k6 기록은 샌드박스에 없으므로 뺀다. 상한값과 스키마는 AI의 Plan을 따르며, 테이블 필터는 샌드박스에 만든 합성 fixture 이름으로 바꾼 사본을 사용한다.
 5. 같은 경고(PVC ProvisioningFailed, FailedScheduling, 이미지 풀 실패 등)가 25초 넘게 **계속 되풀이되면** 기다려도 풀리지 않는 환경 문제로 보고 엔진을 멈춘다. 이 실행 전부터 있던 경고와, 한 번 나고 다시 일어나지 않은 경고는 보지 않는다. 엔진이 끝나면 감시를 먼저 멈추므로 성공한 실행이 늦은 판정으로 실패가 되지 않는다. 엔진의 catchupTimeout(분 단위)까지 기다리지 않는다.
 6. 엔진 단계 이벤트는 `engine.<단계>` 도구 호출·결과로 리허설 세션에 남는다.
-7. 통과 기준: 엔진 결과 `succeeded` (9단계 모두 성공, fence 비교와 verify 통과).
+7. 통과 기준: 엔진 결과 `succeeded`와 실제 합성 데이터 검증 증거가 모두 필요하다. 각 스키마의 `rehearsal_orders/items`를 명시적으로 비교하고, fence 비교와 verify 결과에서 모든 fixture의 행 수가 예상값과 일치하며 0보다 커야 한다. 누락·중복·빈 검증은 실패다. 각 시도의 `coverage`에 실제 원본·대상·검사 행 수를 남긴다. 운영 Plan의 테이블 필터는 유지되며, 이 coverage는 합성 데이터에 대한 것이다.
 8. 실패하면 샌드박스가 살아 있는 동안 AI가 진단한다(샌드박스 조회 도구: `sandbox_events`, `sandbox_cnpg_status`, `sandbox_pvcs`, 대상 환경의 `list_storage_classes`, `node_capacity`). 수정안이 검사를 통과하면 새 샌드박스에서 다시 돌린다. 최대 3회다.
-9. 끝나면 샌드박스를 지운다. 고친 매니페스트와 리허설 리포트(`rehearsal-report.json`)를 Plan 첨부로 올린다. Plan 값(`plan-param`)이 바뀌었으면 Plan을 새로 제출하고, 앞의 Plan은 운영자가 반려한다(agent 토큰은 반려할 수 없다).
+9. 끝나면 샌드박스 삭제를 요청한다. 각 시도의 `cleanup.status`는 `delete_requested`(요청 수락) 또는 `failed`이며, 요청 수락을 namespace 삭제 완료로 간주하지 않는다. 삭제 실패의 원인은 마스킹하여 보고서와 경고에 남긴다. 고친 매니페스트와 리허설 리포트(`rehearsal-report.json`)를 Plan 첨부로 올린다. Plan 값(`plan-param`)이 바뀌었으면 Plan을 새로 제출하고, 앞의 Plan은 운영자가 반려한다(agent 토큰은 반려할 수 없다).
+
+`passed`는 엔진 실행과 합성 데이터 검증 결과다. 이벤트 전송·세션 종료 기록·정리 실패는 별도의 `warnings`에 남기며 성공한 실행 결과를 뒤집지 않는다. CLI는 경고를 출력하고 같은 실행 판정으로 종료한다. 실행 실패·취소나 필수 Plan/리포트 첨부 실패는 종료 코드 1이다. 세션을 처음 열지 못하면 실행하지 않는다. 취소 후에도 정리는 최대 60초, 최종 세션 기록은 별도의 제한 시간(기본 5초) 안에서 시도한다. 기록 실패 시 플랫폼 세션이 갱신되지 않았을 수 있으므로 보고서의 경고를 확인한다. `cleanup.status: failed`인 namespace는 운영자가 확인하고 `sandboxctl sweep` 등으로 정리해야 한다.
 
 다루지 않는 것: 클러스터 사이 네트워크(원본과 대상이 한 클러스터 안), 게이트웨이와 카나리, 파일(rclone), 부하(k6). 이것들은 실제 이전에서 엔진과 플랫폼이 다룬다.
 

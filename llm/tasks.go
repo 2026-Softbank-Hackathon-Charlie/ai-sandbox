@@ -54,17 +54,48 @@ func (a *Agent) Plan(ctx context.Context, in PlanInput) (*plan.Proposal, string,
 	if in.Draft == nil {
 		return nil, "", fmt.Errorf("Plan 초안이 필요함")
 	}
-	draft, err := json.MarshalIndent(in.Draft, "", "  ")
+	safeJSON, err := mask.JSON(in.Draft)
+	if err != nil {
+		return nil, "", err
+	}
+	var safeDraft eplan.Plan
+	if err := json.Unmarshal(safeJSON, &safeDraft); err != nil {
+		return nil, "", err
+	}
+	draft, err := json.MarshalIndent(&safeDraft, "", "  ")
 	if err != nil {
 		return nil, "", err
 	}
 	return run(ctx, a, task[*plan.Proposal]{
 		session: agentlog.Start{Kind: agentlog.KindPlan, Title: in.App + " 이전 계획 (" + in.Draft.Source.Env + " → " + in.Draft.Target.Env + ")"},
 		system:  planSystem,
-		user:    "다음 Plan 초안으로 이전 계획을 작성해라.\n\n<draft>\n" + mask.String(string(draft)) + "\n</draft>",
+		user:    "다음 Plan 초안으로 이전 계획을 작성해라.\n\n<draft>\n" + string(draft) + "\n</draft>",
 		tools:   in.Tools,
 		schema:  proposalSchema,
-		parse:   func(raw []byte) (*plan.Proposal, plan.Issues) { return plan.Parse(raw, in.Draft) },
+		parse: func(raw []byte) (*plan.Proposal, plan.Issues) {
+			p, is := plan.Parse(raw, &safeDraft)
+			if len(is) > 0 {
+				return nil, is
+			}
+			// Only restore secrets after the model's immutable fields match the safe draft.
+			manifest := p.Plan.Target.Manifest
+			p.Plan.ID = in.Draft.ID
+			p.Plan.Source = in.Draft.Source
+			p.Plan.Target = in.Draft.Target
+			p.Plan.Target.Manifest = manifest
+			p.Plan.Gateway = in.Draft.Gateway
+			if in.Draft.Files != nil {
+				files := *in.Draft.Files
+				files.Flags = append([]string(nil), files.Flags...)
+				p.Plan.Files = &files
+			}
+			p.Plan.Verify.Schemas = append([]string(nil), in.Draft.Verify.Schemas...)
+			p.Plan.Verify.WrittenRecords = in.Draft.Verify.WrittenRecords
+			if is := p.Check(in.Draft); len(is) > 0 {
+				return nil, is
+			}
+			return p, nil
+		},
 		summary: func(p *plan.Proposal) (string, any) {
 			return fmt.Sprintf("Plan %s 작성, 근거 %d개", p.Plan.ID, len(p.Notes)), map[string]any{"thresholds": p.Plan.Thresholds, "notes": p.Notes}
 		},
@@ -100,12 +131,12 @@ func (a *Agent) Diagnose(ctx context.Context, in DiagnoseInput) (*plan.Diagnosis
 	if in.Proposal == nil {
 		return nil, "", fmt.Errorf("진단에는 계획이 필요함")
 	}
-	pj, err := json.MarshalIndent(in.Proposal.Plan, "", "  ")
+	pj, err := mask.JSON(in.Proposal.Plan)
 	if err != nil {
 		return nil, "", err
 	}
 	user := fmt.Sprintf("리허설이 실패했다. 원인을 진단해라.\n\n<plan>\n%s\n</plan>\n\n<manifest file=%q>\n%s\n</manifest>\n\n<log>\n%s\n</log>",
-		mask.String(string(pj)), plan.ManifestName, mask.String(in.Proposal.Manifest), mask.String(in.Log))
+		string(pj), plan.ManifestName, mask.String(in.Proposal.Manifest), mask.String(in.Log))
 	return run(ctx, a, task[*plan.Diagnosis]{
 		session: agentlog.Start{Kind: agentlog.KindDiagnose, Title: "리허설 실패 진단 (" + in.Proposal.Plan.ID + ")", PlanRef: in.PlanRef},
 		system:  diagnoseSystem,

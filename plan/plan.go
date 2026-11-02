@@ -98,6 +98,11 @@ func decodeStrict(raw []byte, v any) Issues {
 
 // Check는 엔진의 검사, 초안과의 비교, 고정 규칙, 매니페스트 검사를 한 번에 하고 걸린 항목을 모두 돌려준다.
 func (p *Proposal) Check(draft *eplan.Plan) Issues {
+	// Engine defaults normally run while loading a file; rehearsal receives this struct directly.
+	if p.Plan.Verify.FenceGate == nil {
+		enabled := true
+		p.Plan.Verify.FenceGate = &enabled
+	}
 	var is Issues
 	if err := p.Plan.Validate(); err != nil {
 		for _, line := range strings.Split(err.Error(), "\n") {
@@ -129,7 +134,7 @@ func CheckAgainstDraft(p, draft *eplan.Plan) Issues {
 	}
 	same := func(path string, got, want any) {
 		if !reflect.DeepEqual(got, want) {
-			is.add(path, "초안과 같아야 함 (초안 %v, 받은 값 %v)", show(want), show(got))
+			is.add(path, "초안과 같아야 함")
 		}
 	}
 	same("plan.id", p.ID, draft.ID)
@@ -153,7 +158,7 @@ func CheckAgainstDraft(p, draft *eplan.Plan) Issues {
 	case draft.Files == nil && p.Files != nil:
 		is.add("plan.files", "초안에 없는 파일 이전을 넣을 수 없음")
 	case draft.Files != nil && p.Files == nil:
-		is.add("plan.files", "초안의 파일 이전을 뺄 수 없음 (버킷 %s → %s가 옮겨지지 않음)", draft.Files.Source, draft.Files.Target)
+		is.add("plan.files", "초안의 파일 이전을 뺄 수 없음")
 	case draft.Files != nil && p.Files != nil:
 		same("plan.files.source", p.Files.Source, draft.Files.Source)
 		same("plan.files.target", p.Files.Target, draft.Files.Target)
@@ -166,10 +171,12 @@ func CheckAgainstDraft(p, draft *eplan.Plan) Issues {
 	same("plan.verify.schemas", nonNil(p.Verify.Schemas), nonNil(draft.Verify.Schemas))
 	if len(draft.Verify.Tables) == 0 && len(p.Verify.Tables) > 0 {
 		is.add("plan.verify.tables", "초안이 모든 테이블을 검증하면 범위를 줄일 수 없음")
-	}
-	for _, t := range draft.Verify.Tables {
-		if !slices.Contains(p.Verify.Tables, t) {
-			is.add("plan.verify.tables", "초안의 검증 테이블 %q를 뺄 수 없음", t)
+	} else if len(p.Verify.Tables) > 0 {
+		for _, required := range draft.Verify.Tables {
+			if !slices.Contains(p.Verify.Tables, required) {
+				is.add("plan.verify.tables", "초안의 필수 테이블을 빼서 검증 범위를 줄일 수 없음")
+				break
+			}
 		}
 	}
 	return is
@@ -190,7 +197,6 @@ func CheckRules(p *eplan.Plan) Issues {
 		}
 	}
 	th := p.Thresholds
-	// 0(없음)도 범위 밖으로 본다. 비우면 엔진이 기본값(maxDowntime 3m 등)을 채워 이 범위를 벗어난다.
 	inDur := func(path string, d eplan.Duration, r [2]time.Duration) {
 		if d.Duration < r[0] || d.Duration > r[1] {
 			is.add(path, "%s~%s여야 함 (받은 값 %s)", r[0], r[1], d.Duration)
@@ -218,14 +224,6 @@ func nonNil(s []string) []string {
 		return []string{}
 	}
 	return s
-}
-
-func show(v any) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return fmt.Sprint(v)
-	}
-	return string(b)
 }
 
 func joinPath(a, b string) string {
