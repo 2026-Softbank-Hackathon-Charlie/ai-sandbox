@@ -1,0 +1,15 @@
+{
+  "id": "moimroom-gke-to-eks",
+  "source": {
+    "env": "gke", "context": "gke-hopcharlie", "namespace": "moimroom", "cluster": "moimroom-db-gke",
+    "dsn": "postgres://app:${GKE_MOIMROOM_PGPASSWORD}@moimroom-db-gke-rw.moimroom.gke.ts.net:5432/app?sslmode=require"
+  },
+  "target": {
+    "env": "eks", "context": "eks-hopcharlie", "namespace": "moimroom", "cluster": "moimroom-db-eks",
+    "dsn": "postgres://app:${EKS_MOIMROOM_PGPASSWORD}@moimroom-db-eks-rw.moimroom.eks.ts.net:5432/app?sslmode=require"
+  },
+  "files": { "source": "gcs:moimroom-photos-gke", "target": "s3:moimroom-photos-eks" },
+  "gateway": { "mode": "http", "url": "http://127.0.0.1:9901", "token": "${GATEWAY_TOKEN}" },
+  "verify": { "schemas": ["app"], "writtenRecords": "stream:moimroom-demo" },
+  "thresholds": {}
+}
