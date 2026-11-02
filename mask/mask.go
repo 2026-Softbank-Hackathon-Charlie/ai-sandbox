@@ -33,6 +33,12 @@ var rules = []rule{
 	{regexp.MustCompile(`(?i)("?[A-Za-z0-9_.-]*(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential)[A-Za-z0-9_.-]*"?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,}]+)`), "${1}" + Placeholder},
 }
 
+var secretKey = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|authorization|cookie)`)
+
+// SecretKey는 키 이름이 비밀값을 담는 이름인지 알려준다 (JSON, YAML 키).
+// input_tokens처럼 숫자를 담는 키는 이름이 걸려도 값이 문자열이 아니면 호출하는 쪽에서 그대로 둔다.
+func SecretKey(name string) bool { return secretKey.MatchString(name) }
+
 // String은 s에서 비밀값을 지운 결과를 돌려준다.
 func String(s string) string {
 	for _, r := range rules {
