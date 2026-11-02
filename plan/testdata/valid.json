@@ -1,0 +1,15 @@
+{
+  "app": "shop",
+  "from": "aws",
+  "to": "gcp",
+  "profile": "values-gcp.yaml",
+  "steps": [
+    { "id": "precopy", "db": "initial-copy", "files": "rclone sync" },
+    { "id": "sync",    "until": { "dbLagSec": 1, "filesBehind": 0 } },
+    { "id": "fence",   "holdWrites": true, "timeoutSec": 30 },
+    { "id": "verify",  "rows": "pk-compare", "files": "rclone check" },
+    { "id": "cutover", "gateway": { "gcp": 100 } },
+    { "id": "cleanup", "source": "scale-to-zero", "delete": "needs-approval" }
+  ],
+  "rollback": "auto-until-target-accepts-writes"
+}
