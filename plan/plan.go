@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -166,6 +167,11 @@ func CheckAgainstDraft(p, draft *eplan.Plan) Issues {
 	if len(draft.Verify.Tables) == 0 && len(p.Verify.Tables) > 0 {
 		is.add("plan.verify.tables", "초안이 모든 테이블을 검증하면 범위를 줄일 수 없음")
 	}
+	for _, t := range draft.Verify.Tables {
+		if !slices.Contains(p.Verify.Tables, t) {
+			is.add("plan.verify.tables", "초안의 검증 테이블 %q를 뺄 수 없음", t)
+		}
+	}
 	return is
 }
 
@@ -184,15 +190,16 @@ func CheckRules(p *eplan.Plan) Issues {
 		}
 	}
 	th := p.Thresholds
+	// 0(없음)도 범위 밖으로 본다. 비우면 엔진이 기본값(maxDowntime 3m 등)을 채워 이 범위를 벗어난다.
 	inDur := func(path string, d eplan.Duration, r [2]time.Duration) {
-		if d.Duration != 0 && (d.Duration < r[0] || d.Duration > r[1]) {
+		if d.Duration < r[0] || d.Duration > r[1] {
 			is.add(path, "%s~%s여야 함 (받은 값 %s)", r[0], r[1], d.Duration)
 		}
 	}
 	inDur("plan.thresholds.maxDowntime", th.MaxDowntime, maxDowntimeRange)
 	inDur("plan.thresholds.switchoverTimeout", th.SwitchoverTimeout, switchoverTimeoutRange)
 	inDur("plan.thresholds.catchupTimeout", th.CatchupTimeout, catchupTimeoutRange)
-	if th.MaxLagBytes != 0 && (th.MaxLagBytes < maxLagBytesRange[0] || th.MaxLagBytes > maxLagBytesRange[1]) {
+	if th.MaxLagBytes < maxLagBytesRange[0] || th.MaxLagBytes > maxLagBytesRange[1] {
 		is.add("plan.thresholds.maxLagBytes", "%d~%d여야 함 (받은 값 %d)", maxLagBytesRange[0], maxLagBytesRange[1], th.MaxLagBytes)
 	}
 	return is

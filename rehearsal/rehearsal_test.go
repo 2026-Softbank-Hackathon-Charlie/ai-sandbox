@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"sigs.k8s.io/yaml"
 
@@ -162,5 +163,19 @@ func TestLogIsolation(t *testing.T) {
 	}
 	if ev[2].Type != agentlog.ToolResult {
 		t.Fatalf("열려야 하는 항목은 차단으로 남기지 않음: %+v", ev[2])
+	}
+}
+
+func TestSandboxApp(t *testing.T) {
+	if got := SandboxApp("moimroom"); got != "moimroom" {
+		t.Fatalf("짧은 이름은 그대로: %s", got)
+	}
+	long := "moimroom-reservation-service-prod-01"
+	got := SandboxApp(long)
+	if len(got) > 32 || got != SandboxApp(long) || got == SandboxApp(long+"x") {
+		t.Fatalf("긴 이름: %q", got)
+	}
+	if _, err := sandbox.Build(sandbox.Config{App: got, ID: "ab12"}, time.Now()); err != nil {
+		t.Fatalf("샌드박스 이름 규칙에 맞아야 함: %v", err)
 	}
 }

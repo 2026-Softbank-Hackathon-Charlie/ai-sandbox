@@ -16,8 +16,9 @@ type rule struct {
 var rules = []rule{
 	// PEM 개인 키, 인증서
 	{regexp.MustCompile(`-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----`), Placeholder},
-	// 접속 문자열 안의 비밀번호: postgres://user:pass@host
-	{regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://[^:/@\s]+:)[^@\s]+@`), "${1}" + Placeholder + "@"},
+	// 접속 문자열 안의 비밀번호: postgres://user:pass@host. 사용자가 비어 있거나(:pass@) 비밀번호에 @가 있어도
+	// 호스트 앞의 마지막 @까지 지운다 (경로 /, ?, #은 넘지 않음).
+	{regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://[^:/@\s]*:)[^\s/?#]*@`), "${1}" + Placeholder + "@"},
 	// Authorization 헤더
 	{regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`), "${1} " + Placeholder},
 	// JWT (Kubernetes ServiceAccount 토큰 포함)

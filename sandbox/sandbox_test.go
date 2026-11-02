@@ -338,12 +338,12 @@ func TestCheckRBAC(t *testing.T) {
 }
 
 func TestProbePod(t *testing.T) {
-	p, err := ProbePod("sandbox-shop-ab12", "busybox:1.37", append(DefaultTargets, Target{"db", "10.0.1.5", 5432, ExpectBlocked}))
+	p, err := ProbePod("sandbox-shop-ab12", "busybox:1.37", append(DefaultTargets, Target{Name: "db", Host: "10.0.1.5", Port: 5432, Expect: ExpectBlocked}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	args := p.Spec.Containers[0].Args
-	if !slices.Equal(args[len(args)-3:], []string{"db", "10.0.1.5", "5432"}) {
+	if !slices.Equal(args[len(args)-4:], []string{"db", "10.0.1.5", "5432", "0"}) || !slices.Contains(args, "1") {
 		t.Fatalf("대상은 인자로만 넘겨야 함: %v", args)
 	}
 	if strings.Contains(args[1], "10.0.1.5") {
@@ -354,11 +354,11 @@ func TestProbePod(t *testing.T) {
 	}
 
 	for _, bad := range []Target{
-		{"db", "10.0.1.5; rm -rf /", 5432, ExpectBlocked},
-		{"db", "$(id)", 5432, ExpectBlocked},
-		{"db x", "10.0.1.5", 5432, ExpectBlocked},
-		{"db", "10.0.1.5", 0, ExpectBlocked},
-		{"db", "10.0.1.5", 5432, "maybe"},
+		{"db", "10.0.1.5; rm -rf /", 5432, ExpectBlocked, false},
+		{"db", "$(id)", 5432, ExpectBlocked, false},
+		{"db x", "10.0.1.5", 5432, ExpectBlocked, false},
+		{"db", "10.0.1.5", 0, ExpectBlocked, false},
+		{"db", "10.0.1.5", 5432, "maybe", false},
 	} {
 		if _, err := ProbePod("ns", "busybox", []Target{bad}); err == nil {
 			t.Errorf("거절해야 함: %+v", bad)
@@ -367,7 +367,7 @@ func TestProbePod(t *testing.T) {
 }
 
 func TestParseProbe(t *testing.T) {
-	targets := append(append([]Target{}, DefaultTargets...), Target{"db", "10.0.1.5", 5432, ExpectBlocked})
+	targets := append(append([]Target{}, DefaultTargets...), Target{Name: "db", Host: "10.0.1.5", Port: 5432, Expect: ExpectBlocked})
 	t.Run("모두 기대대로", func(t *testing.T) {
 		rs, err := ParseProbe("PROBE dns open\nPROBE metadata blocked\nPROBE apiserver blocked\nPROBE db blocked\nPROBE-END\n", targets)
 		if err != nil || !AllPass(rs) || len(rs) != 4 {
@@ -387,6 +387,12 @@ func TestParseProbe(t *testing.T) {
 		rs, _ := ParseProbe("PROBE dns blocked\nPROBE metadata blocked\nPROBE apiserver blocked\nPROBE db blocked\nPROBE-END\n", targets)
 		if rs[0].Pass {
 			t.Fatal("DNS가 막혀 있으면 검사 자체를 믿을 수 없음")
+		}
+	})
+	t.Run("증거 대상을 찾지 못하면 실패", func(t *testing.T) {
+		rs, _ := ParseProbe("PROBE dns open\nPROBE metadata blocked\nPROBE apiserver unresolved\nPROBE db blocked\nPROBE-END\n", targets)
+		if AllPass(rs) || rs[2].Pass || rs[2].Detail == "" {
+			t.Fatalf("%+v", rs[2])
 		}
 	})
 	t.Run("결과 빠짐", func(t *testing.T) {

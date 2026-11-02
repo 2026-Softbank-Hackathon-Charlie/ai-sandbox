@@ -78,6 +78,8 @@ func TestParseRejectsBrokenAIOutput(t *testing.T) {
 		// 고정 규칙
 		{"fence 비교 끄기", replace(t, v, `"fenceGate": true`, `"fenceGate": false`), "끌 수 없음"},
 		{"쓰기 보류 너무 김", replace(t, v, `"maxDowntime": "30s"`, `"maxDowntime": "5m"`), "5s~1m0s"},
+		{"쓰기 보류 0", replace(t, v, `"maxDowntime": "30s"`, `"maxDowntime": "0s"`), "plan.thresholds.maxDowntime"},
+		{"상한값 비움", replace(t, v, `"thresholds": { "maxLagBytes": 1048576, "catchupTimeout": "10m", "switchoverTimeout": "2m", "maxDowntime": "30s" }`, `"thresholds": {}`), "plan.thresholds.catchupTimeout"},
 		{"전환 시간 너무 김", replace(t, v, `"switchoverTimeout": "2m"`, `"switchoverTimeout": "30m"`), "switchoverTimeout"},
 		{"복제 지연 기준 너무 큼", replace(t, v, `"maxLagBytes": 1048576`, `"maxLagBytes": 999999999999`), "maxLagBytes"},
 		{"서버 파일 경로", replace(t, v, `"manifest": "attachment:target.yaml"`, `"manifest": "/etc/passwd"`), "서버 파일 경로"},
@@ -156,5 +158,19 @@ func TestEquivalentEmptyValues(t *testing.T) {
 	v = replace(t, v, `"target": "s3:moimroom-photos-eks" }`, `"target": "s3:moimroom-photos-eks", "rclone": "rclone", "flags": [] }`)
 	if _, is := Parse([]byte(v), d); len(is) > 0 {
 		t.Fatalf("같은 뜻의 값은 통과해야 함:\n%s", is.Error())
+	}
+}
+
+func TestDraftTablesKept(t *testing.T) {
+	d := draft(t)
+	d.Verify.Tables = []string{"app.orders", "app.payments"}
+	p := *d
+	p.Verify.Tables = []string{"app.orders"}
+	if is := CheckAgainstDraft(&p, d); !strings.Contains(is.Error(), `"app.payments"를 뺄 수 없음`) {
+		t.Fatalf("초안의 테이블을 빼면 걸려야 함:\n%s", is.Error())
+	}
+	p.Verify.Tables = []string{"app.orders", "app.payments", "app.items"}
+	if is := CheckAgainstDraft(&p, d); len(is) > 0 {
+		t.Fatalf("늘리는 것은 통과해야 함:\n%s", is.Error())
 	}
 }

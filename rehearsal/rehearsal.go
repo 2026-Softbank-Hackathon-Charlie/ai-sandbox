@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"sort"
 	"strings"
@@ -177,7 +178,7 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 	}
 
 	// 1. 샌드박스
-	sc, err := sandbox.ForCNPG(ctx, c.Admin, sandbox.Config{App: cur.Plan.Source.Namespace})
+	sc, err := sandbox.ForCNPG(ctx, c.Admin, sandbox.Config{App: SandboxApp(cur.Plan.Source.Namespace)})
 	if err != nil {
 		return a, nil, err
 	}
@@ -359,6 +360,17 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 	}
 	ses.Log(ctx, agentlog.Event{Type: agentlog.Decision, Status: "fix", Output: map[string]any{"attempt": n, "cause": d.Cause, "fix": d.Fix}})
 	return a, nx, nil
+}
+
+// SandboxApp은 샌드박스 이름에 넣을 앱 이름이다. 네임스페이스는 63자까지지만 샌드박스 앱 이름은 32자까지라,
+// 길면 앞 27자에 원래 이름의 해시 4자리를 붙인다 (같은 네임스페이스는 늘 같은 이름).
+func SandboxApp(namespace string) string {
+	if len(namespace) <= 32 {
+		return namespace
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(namespace))
+	return strings.TrimRight(namespace[:27], "-") + "-" + fmt.Sprintf("%08x", h.Sum32())[:4]
 }
 
 func okOr(err error) string {

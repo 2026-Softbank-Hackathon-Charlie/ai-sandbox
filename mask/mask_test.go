@@ -68,3 +68,16 @@ func TestSecretKey(t *testing.T) {
 		}
 	}
 }
+
+func TestStringDSNEdgeCases(t *testing.T) {
+	for in, want := range map[string]string{
+		"postgres://:s3cret@db:5432/app":        "postgres://:***@db:5432/app",
+		"postgres://app:p@ss@db/app":            "postgres://app:***@db/app",
+		"dsn=postgres://app:x@h1/a other@thing": "dsn=postgres://app:***@h1/a other@thing",
+		"http://host:8080/path@x":               "http://host:8080/path@x",
+	} {
+		if got := String(in); got != want {
+			t.Errorf("%q: got %q want %q", in, got, want)
+		}
+	}
+}
