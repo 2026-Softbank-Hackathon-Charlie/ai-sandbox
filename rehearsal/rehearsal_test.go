@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
 	"sigs.k8s.io/yaml"
 
+	"github.com/2026-Softbank-Hackathon-Charlie/migration-engine/pkg/engine"
 	eplan "github.com/2026-Softbank-Hackathon-Charlie/migration-engine/pkg/plan"
+	"github.com/2026-Softbank-Hackathon-Charlie/migration-engine/pkg/verify"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/agentlog"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/plan"
@@ -120,6 +123,140 @@ func TestSandboxPlanDropsProductionPaths(t *testing.T) {
 	}
 	if p.Plan.Gateway.Mode != "http" {
 		t.Fatal("원본 Plan이 바뀜")
+	}
+}
+
+func TestSandboxPlanVerifiesFixturesWithoutChangingProductionScope(t *testing.T) {
+	p := proposal(t)
+	p.Plan.Verify.Schemas = []string{"app", "audit", "app"}
+	p.Plan.Verify.Tables = []string{"app.orders"}
+	p.Plan.Verify.FenceGate = nil
+	sp := SandboxPlan(&p.Plan, "sandbox-test", "/tmp/k", "/tmp/target.yaml", "source", "target")
+	want := []string{"app.rehearsal_orders", "app.rehearsal_items", "audit.rehearsal_orders", "audit.rehearsal_items"}
+	if !reflect.DeepEqual(sp.Verify.Tables, want) {
+		t.Fatalf("fixture verification scope = %v, want %v", sp.Verify.Tables, want)
+	}
+	if !reflect.DeepEqual(sp.Verify.Schemas, []string{"app", "audit"}) {
+		t.Fatalf("schemas must be unique: %v", sp.Verify.Schemas)
+	}
+	if !reflect.DeepEqual(p.Plan.Verify.Tables, []string{"app.orders"}) || len(p.Plan.Verify.Schemas) != 3 {
+		t.Fatal("production verification scope changed")
+	}
+	if sp.Verify.FenceGate == nil || !*sp.Verify.FenceGate || p.Plan.Verify.FenceGate != nil {
+		t.Fatal("default fence gate must be enabled without changing production plan")
+	}
+	p.Plan.Verify.Schemas = nil
+	sp = SandboxPlan(&p.Plan, "sandbox-test", "/tmp/k", "/tmp/target.yaml", "source", "target")
+	if !reflect.DeepEqual(sp.Verify.Schemas, []string{"public"}) || sp.Verify.Tables[0] != "public.rehearsal_orders" {
+		t.Fatalf("default fixture schema = %+v", sp.Verify)
+	}
+}
+
+func TestRehearseRejectsInvalidLimitsBeforeOpeningSession(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		runs int
+		rows int
+	}{
+		{"negative runs", -1, 20},
+		{"negative rows", 1, -1},
+		{"empty items fixture", 1, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := proposal(t)
+			mem := &agentlog.Memory{}
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("invalid limits panicked instead of returning an error: %v", r)
+				}
+			}()
+			_, err := Rehearse(context.Background(), Config{Proposal: p, Draft: &p.Plan, Sink: mem, MaxRuns: tc.runs, Rows: tc.rows})
+			if err == nil || len(mem.Sessions) != 0 {
+				t.Fatalf("invalid limits opened a session: error=%v, sessions=%d", err, len(mem.Sessions))
+			}
+		})
+	}
+}
+
+func fixtureState() engine.State {
+	return engine.State{Outcome: engine.OutcomeSucceeded, Steps: map[string]*engine.StepRecord{
+		engine.StepSwitchover: {Status: engine.StatusSucceeded, Evidence: map[string]any{"fenceGate": map[string]any{
+			"ok": true,
+			"tables": []verify.TableResult{
+				{Table: "app.rehearsal_orders", SourceCount: 20, TargetCount: 20, Match: true},
+				{Table: "app.rehearsal_items", SourceCount: 15, TargetCount: 15, Match: true},
+			},
+		}}},
+		engine.StepVerify: {Status: engine.StatusSucceeded, Evidence: map[string]any{"report": &engine.Report{OK: true, Tables: []verify.MissingResult{
+			{Table: "app.rehearsal_orders", Checked: 20},
+			{Table: "app.rehearsal_items", Checked: 15},
+		}}}},
+	}}
+}
+
+func TestFixtureCoverageRequiresActualNonemptyEngineChecks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(engine.State)
+	}{
+		{"missing fence gate", func(s engine.State) { delete(s.Steps[engine.StepSwitchover].Evidence, "fenceGate") }},
+		{"empty fence tables", func(s engine.State) {
+			s.Steps[engine.StepSwitchover].Evidence["fenceGate"].(map[string]any)["tables"] = []verify.TableResult{}
+		}},
+		{"missing fence table", func(s engine.State) {
+			g := s.Steps[engine.StepSwitchover].Evidence["fenceGate"].(map[string]any)
+			g["tables"] = g["tables"].([]verify.TableResult)[:1]
+		}},
+		{"duplicate fence table", func(s engine.State) {
+			rs := s.Steps[engine.StepSwitchover].Evidence["fenceGate"].(map[string]any)["tables"].([]verify.TableResult)
+			rs[1] = rs[0]
+		}},
+		{"unexpected fence table", func(s engine.State) {
+			s.Steps[engine.StepSwitchover].Evidence["fenceGate"].(map[string]any)["tables"].([]verify.TableResult)[1].Table = "app.orders"
+		}},
+		{"empty source and target", func(s engine.State) {
+			r := &s.Steps[engine.StepSwitchover].Evidence["fenceGate"].(map[string]any)["tables"].([]verify.TableResult)[0]
+			r.SourceCount, r.TargetCount = 0, 0
+		}},
+		{"fence mismatch", func(s engine.State) {
+			s.Steps[engine.StepSwitchover].Evidence["fenceGate"].(map[string]any)["tables"].([]verify.TableResult)[0].Match = false
+		}},
+		{"missing report", func(s engine.State) { delete(s.Steps[engine.StepVerify].Evidence, "report") }},
+		{"empty report tables", func(s engine.State) { s.Steps[engine.StepVerify].Evidence["report"].(*engine.Report).Tables = nil }},
+		{"duplicate report table", func(s engine.State) {
+			rs := s.Steps[engine.StepVerify].Evidence["report"].(*engine.Report).Tables
+			rs[1] = rs[0]
+		}},
+		{"unexpected report table", func(s engine.State) {
+			s.Steps[engine.StepVerify].Evidence["report"].(*engine.Report).Tables[1].Table = "app.orders"
+		}},
+		{"unchecked rows", func(s engine.State) {
+			s.Steps[engine.StepVerify].Evidence["report"].(*engine.Report).Tables[0].Checked = 0
+		}},
+		{"skipped check", func(s engine.State) {
+			s.Steps[engine.StepVerify].Evidence["report"].(*engine.Report).Tables[0].Skipped = "no primary key"
+		}},
+		{"missing rows", func(s engine.State) {
+			s.Steps[engine.StepVerify].Evidence["report"].(*engine.Report).Tables[0].Missing = 1
+		}},
+		{"verification error", func(s engine.State) {
+			s.Steps[engine.StepVerify].Evidence["report"].(*engine.Report).Tables[0].Error = "query failed"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := fixtureState()
+			tc.edit(st)
+			if _, err := fixtureCoverage(st, []string{"app"}, 20); err == nil {
+				t.Fatal("incomplete fixture verification accepted")
+			}
+		})
+	}
+	got, err := fixtureCoverage(fixtureState(), []string{"app"}, 20)
+	if err != nil || !got.Synthetic || !reflect.DeepEqual(got.Tables, []TableCoverage{
+		{Table: "app.rehearsal_orders", SourceRows: 20, TargetRows: 20, CheckedRows: 20},
+		{Table: "app.rehearsal_items", SourceRows: 15, TargetRows: 15, CheckedRows: 15},
+	}) {
+		t.Fatalf("actual fixture coverage = %+v, error=%v", got, err)
 	}
 }
 

@@ -29,11 +29,12 @@ import (
 
 // reply는 가짜 API의 응답 하나다. tool이 있으면 tool_use 블록을 돌려준다.
 type reply struct {
-	text       string
-	tool       string
-	toolInput  string
-	stopReason string
-	category   string
+	text            string
+	tool            string
+	toolInput       string
+	stopReason      string
+	category        string
+	textFromRequest func(map[string]any) string
 }
 
 // fakeAPI는 Messages API 흉내를 낸다. 정해 둔 응답을 차례로 돌려주고, 받은 요청을 기록한다.
@@ -53,6 +54,9 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.requests = append(f.requests, req)
 	f.headers = append(f.headers, r.Header.Clone())
 	rp := f.replies[len(f.requests)-1]
+	if rp.textFromRequest != nil {
+		rp.text = rp.textFromRequest(req)
+	}
 	var content []any
 	stop := rp.stopReason
 	if rp.tool != "" {
@@ -238,6 +242,94 @@ func TestPlanRetrySendsIssues(t *testing.T) {
 	}
 	if checkErrors != 1 {
 		t.Fatalf("검사 실패도 기록에 남아야 함: %d", checkErrors)
+	}
+}
+
+func TestPlanEchoesSanitizedDraftAndRestoresImmutableCredentials(t *testing.T) {
+	for _, plain := range []bool{false, true} {
+		t.Run(map[bool]string{false: "environment references", true: "plaintext credentials"}[plain], func(t *testing.T) {
+			d := draft(t)
+			if plain {
+				d.Source.DSN = strings.Replace(d.Source.DSN, "${GKE_MOIMROOM_PGPASSWORD}", "source-plain-secret", 1)
+				d.Target.DSN = strings.Replace(d.Target.DSN, "${EKS_MOIMROOM_PGPASSWORD}", "target-plain-secret", 1)
+				d.Gateway.Token = "gateway-plain-secret"
+			}
+			var calls int
+			echo := func(req map[string]any) string {
+				calls++
+				messages := req["messages"].([]any)
+				content := messages[0].(map[string]any)["content"].([]any)
+				prompt := content[0].(map[string]any)["text"].(string)
+				_, raw, ok := strings.Cut(prompt, "<draft>\n")
+				if !ok {
+					t.Error("draft missing from actual API prompt")
+					return "{}"
+				}
+				raw, _, _ = strings.Cut(raw, "\n</draft>")
+				var safe eplan.Plan
+				if err := json.Unmarshal([]byte(raw), &safe); err != nil {
+					t.Errorf("draft prompt must be valid JSON: %v", err)
+					return "{}"
+				}
+				sent, _ := json.Marshal(req)
+				for _, secret := range []string{"source-plain-secret", "target-plain-secret", "gateway-plain-secret"} {
+					if strings.Contains(string(sent), secret) {
+						t.Error("plaintext credential escaped into an API request")
+					}
+				}
+				if !plain && (safe.Source.DSN != d.Source.DSN || safe.Gateway.Token != d.Gateway.Token) {
+					t.Error("safe symbolic references must survive unchanged")
+				}
+				var answer plan.Proposal
+				_ = json.Unmarshal([]byte(readFile(t, "../plan/testdata/proposal.json")), &answer)
+				thresholds := answer.Plan.Thresholds
+				answer.Plan = safe
+				answer.Plan.Thresholds = thresholds
+				answer.Plan.Target.Manifest = plan.ManifestRef
+				if calls == 1 {
+					answer.Plan.Target.DSN = strings.Replace(answer.Plan.Target.DSN, "moimroom-db-eks-rw", "changed-host", 1)
+				}
+				b, _ := json.Marshal(answer)
+				return string(b)
+			}
+			f := &fakeAPI{replies: []reply{{textFromRequest: echo}, {textFromRequest: echo}, {textFromRequest: echo}}}
+			a, _ := newAgent(t, f)
+			p, _, err := a.Plan(context.Background(), PlanInput{App: "moimroom", Draft: d})
+			if err != nil || p == nil {
+				t.Fatalf("safe echo must produce an executable proposal: %v", err)
+			}
+			if calls != 2 {
+				t.Fatal("changed immutable host must be rejected before restoring credentials")
+			}
+			if p.Plan.Source.DSN != d.Source.DSN || p.Plan.Target.DSN != d.Target.DSN || p.Plan.Gateway.Token != d.Gateway.Token {
+				t.Fatal("validated proposal must retain the caller's original immutable credentials")
+			}
+			if p.Plan.Verify.FenceGate == nil || !*p.Plan.Verify.FenceGate {
+				t.Fatal("the echoed draft must receive a safe fenceGate default")
+			}
+		})
+	}
+}
+
+func TestPlanRetryErrorMasksRestoredCredentialParseFailures(t *testing.T) {
+	const secret = "source%plain-secret"
+	d := draft(t)
+	d.Source.DSN = strings.Replace(d.Source.DSN, "${GKE_MOIMROOM_PGPASSWORD}", secret, 1)
+	answer := strings.Replace(readFile(t, "../plan/testdata/proposal.json"), "${GKE_MOIMROOM_PGPASSWORD}", "***", 1)
+	f := &fakeAPI{replies: []reply{{text: answer}, {text: answer}, {text: answer}}}
+	a, _ := newAgent(t, f)
+	_, _, err := a.Plan(context.Background(), PlanInput{App: "moimroom", Draft: d})
+	var retry *plan.RetryError
+	if !errors.As(err, &retry) || len(retry.Last) == 0 {
+		t.Fatalf("restored malformed credential must fail validation: %v", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Error("final error exposed a restored credential")
+	}
+	for _, issue := range retry.Last {
+		if strings.Contains(issue.Path, secret) || strings.Contains(issue.Message, secret) {
+			t.Error("structured retry issues exposed a restored credential")
+		}
 	}
 }
 
