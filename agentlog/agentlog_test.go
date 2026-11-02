@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -106,19 +107,98 @@ func TestPlatformSession(t *testing.T) {
 }
 
 func TestPlatformLogErrorsReportedOnFinish(t *testing.T) {
-	f := &fakePlatform{failLog: true}
+	for _, ok := range []bool{true, false} {
+		t.Run(map[bool]string{true: "succeeded", false: "failed"}[ok], func(t *testing.T) {
+			f := &fakePlatform{failLog: true}
+			p := platform(t, f)
+			s, err := p.Start(context.Background(), Start{Kind: KindPlan, Title: "t"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Log(context.Background(), Event{Type: ToolCall, Tool: "x"})
+			err = s.Finish(context.Background(), ok, "execution result")
+			if err == nil || !strings.Contains(err.Error(), "기록 일부 실패") {
+				t.Fatalf("delivery failures must remain observable: %v", err)
+			}
+			if f.calls[len(f.calls)-1].body["status"] != map[bool]string{true: "succeeded", false: "failed"}[ok] {
+				t.Fatal("log delivery failures must not change the execution status")
+			}
+		})
+	}
+}
+
+func TestPlatformFinishSurvivesParentCancellation(t *testing.T) {
+	for _, ok := range []bool{true, false} {
+		t.Run(map[bool]string{true: "succeeded", false: "failed"}[ok], func(t *testing.T) {
+			f := &fakePlatform{}
+			p := platform(t, f)
+			ctx, cancel := context.WithCancel(context.Background())
+			s, err := p.Start(ctx, Start{Kind: KindRehearsal, Title: "t"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cancel()
+			if err := s.Finish(ctx, ok, "execution result"); err != nil {
+				t.Fatalf("final status must survive parent cancellation: %v", err)
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			last := f.calls[len(f.calls)-1]
+			if !strings.HasSuffix(last.path, "/finish") || last.body["status"] != map[bool]string{true: "succeeded", false: "failed"}[ok] {
+				t.Fatalf("platform did not receive the final execution status: %+v", last)
+			}
+		})
+	}
+}
+
+func TestPlatformLogStillHonorsCancellation(t *testing.T) {
+	f := &fakePlatform{}
 	p := platform(t, f)
-	s, err := p.Start(context.Background(), Start{Kind: KindPlan, Title: "t"})
+	s, err := p.Start(context.Background(), Start{Kind: KindRehearsal, Title: "t"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.Log(context.Background(), Event{Type: ToolCall, Tool: "x"}) // 실패해도 멈추지 않는다
-	err = s.Finish(context.Background(), false, "실패")
-	if err == nil || !strings.Contains(err.Error(), "기록 일부 실패") {
-		t.Fatalf("남기지 못한 기록은 닫을 때 알려야 함: %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.Log(ctx, Event{Type: ToolCall, Tool: "cancelled"})
+	if err := s.Finish(ctx, false, "cancelled"); err == nil {
+		t.Fatal("cancelled event delivery must be reported")
 	}
-	if f.calls[len(f.calls)-1].body["status"] != "failed" {
-		t.Fatal("ok가 아니면 failed로 닫아야 함")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.calls) != 2 || !strings.HasSuffix(f.calls[1].path, "/finish") {
+		t.Fatalf("only finalization should survive cancellation: %+v", f.calls)
+	}
+}
+
+func TestPlatformFinishDetachedContextHasBoundedTimeout(t *testing.T) {
+	received := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(received)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	s := &platformSession{p: Platform{C: client.New(srv.URL, "test-token"), Timeout: 50 * time.Millisecond}, id: "ags_1"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	err := s.Finish(ctx, false, "cancelled")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("unresponsive finalization must use its own timeout: %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("finalization exceeded its bounded timeout")
+	}
+	select {
+	case <-received:
+	default:
+		t.Fatal("cancelled parent prevented the finalization request")
 	}
 }
 

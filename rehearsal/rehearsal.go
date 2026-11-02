@@ -75,6 +75,7 @@ type Attempt struct {
 	Outcome   string                `json:"outcome,omitempty"` // 엔진 결과
 	Steps     map[string]string     `json:"steps,omitempty"`   // 단계별 상태
 	Coverage  *Coverage             `json:"coverage,omitempty"`
+	Cleanup   *CleanupResult        `json:"cleanup,omitempty"`
 	Isolation []sandbox.CheckResult `json:"isolation,omitempty"`
 	Error     string                `json:"error,omitempty"`
 	Evidence  []string              `json:"evidence,omitempty"`
@@ -83,10 +84,18 @@ type Attempt struct {
 	DurationS float64               `json:"durationSec"`
 }
 
+// CleanupResult distinguishes an accepted deletion request from a cleanup failure.
+// A request does not prove that Kubernetes has finished deleting the namespace.
+type CleanupResult struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
 // Report는 리허설 전체 결과다.
 type Report struct {
 	Passed   bool      `json:"passed"`
 	Attempts []Attempt `json:"attempts"`
+	Warnings []string  `json:"warnings,omitempty"`
 	// Final은 마지막 계획(수정안 반영)이다. Changed면 플랫폼에 다시 올려야 한다.
 	Final        *plan.Proposal `json:"-"`
 	Changed      bool           `json:"changed"`
@@ -118,8 +127,9 @@ func (c *Config) defaults() {
 	}
 }
 
-// Rehearse는 리허설을 돌린다. 리허설이 기준을 통과하지 못한 것은 Report.Passed로 알리고,
-// 계속할 수 없는 문제(격리 실패, 샌드박스 생성 실패)는 오류로 돌려준다.
+// Rehearse reports execution and fixture verification through Report.Passed.
+// Session start or execution failures can return errors. Recording and cleanup
+// failures remain warnings and do not change the execution result.
 func Rehearse(ctx context.Context, c Config) (*Report, error) {
 	c.defaults()
 	if c.Proposal == nil || c.Draft == nil {
@@ -141,6 +151,9 @@ func Rehearse(ctx context.Context, c Config) (*Report, error) {
 	for n := 1; n <= c.MaxRuns; n++ {
 		a, next, err := runOnce(ctx, &c, ses, n, cur, n < c.MaxRuns)
 		rep.Attempts = append(rep.Attempts, a)
+		if a.Cleanup != nil && a.Cleanup.Status == "failed" {
+			rep.Warnings = append(rep.Warnings, fmt.Sprintf("sandbox cleanup %s: %s", a.Namespace, a.Cleanup.Error))
+		}
 		if c.OnAttempt != nil {
 			c.OnAttempt(a)
 		}
@@ -164,10 +177,29 @@ func Rehearse(ctx context.Context, c Config) (*Report, error) {
 	if rep.Changed {
 		sum += ", AI 수정안 반영"
 	}
-	if ferr := ses.Finish(ctx, rep.Passed, sum); ferr != nil && fatal == nil {
-		fatal = ferr
-	}
+	finishRehearsal(ctx, ses, rep, sum)
 	return rep, fatal
+}
+
+func finishRehearsal(ctx context.Context, ses agentlog.Session, rep *Report, summary string) {
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := ses.Finish(fctx, rep.Passed, summary); err != nil {
+		rep.Warnings = append(rep.Warnings, mask.String(fmt.Sprintf("session recording: %v", err)))
+	}
+}
+
+func cleanupAttempt(ctx context.Context, c *Config, ses agentlog.Session, a *Attempt) {
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+	defer cancel()
+	a.Cleanup = &CleanupResult{Status: "delete_requested"}
+	output := map[string]any{"namespace": a.Namespace}
+	if err := sandbox.Delete(dctx, c.Admin, a.Namespace); err != nil {
+		a.Cleanup.Status = "failed"
+		a.Cleanup.Error = mask.String(err.Error())
+		output["error"] = a.Cleanup.Error
+	}
+	ses.Log(dctx, agentlog.Event{Type: agentlog.ToolResult, Tool: "sandbox_delete", Status: a.Cleanup.Status, Output: output})
 }
 
 // runOnce는 새 샌드박스에서 한 번 돌린다. 실패하고 다시 돌릴 수 있으면 샌드박스를 지우기 전에 진단해서 다음 계획을 돌려준다.
@@ -195,12 +227,7 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 	a.Namespace = sb.Namespace
 	ses.Log(ctx, agentlog.Event{Type: agentlog.ToolResult, Tool: "sandbox_create", Status: "ok", Duration: time.Since(t0),
 		Output: map[string]any{"namespace": sb.Namespace, "expiresAt": sb.ExpiresAt, "networkPolicy": "기본 차단 + CNPG 오퍼레이터·API 서버", "quota": "CPU 4, 메모리 8Gi, Pod 20"}})
-	defer func() {
-		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
-		defer cancel()
-		err := sandbox.Delete(dctx, c.Admin, sb.Namespace)
-		ses.Log(dctx, agentlog.Event{Type: agentlog.ToolResult, Tool: "sandbox_delete", Status: okOr(err), Output: map[string]any{"namespace": sb.Namespace}})
-	}()
+	defer cleanupAttempt(ctx, c, ses, &a)
 
 	// 2. AI 권한(샌드박스 토큰)과 격리 검사
 	token, _, err := sandbox.Token(ctx, c.Admin, sb, 0, time.Now())
@@ -369,13 +396,6 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 	}
 	ses.Log(ctx, agentlog.Event{Type: agentlog.Decision, Status: "fix", Output: map[string]any{"attempt": n, "cause": d.Cause, "fix": d.Fix}})
 	return a, nx, nil
-}
-
-func okOr(err error) string {
-	if err != nil {
-		return "error"
-	}
-	return "ok"
 }
 
 func firstErr(err error, s string) string {

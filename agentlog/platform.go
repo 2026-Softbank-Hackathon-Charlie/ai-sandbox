@@ -83,7 +83,7 @@ func (s *platformSession) Log(ctx context.Context, e Event) {
 }
 
 func (s *platformSession) Finish(ctx context.Context, ok bool, summary string) error {
-	ctx, cancel := context.WithTimeout(ctx, s.p.timeout())
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.p.timeout())
 	defer cancel()
 	st := apiv1.AgentSessionStatus("succeeded")
 	if !ok {
