@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/platform/pkg/client"
 )
@@ -136,5 +137,16 @@ func TestTeeAndWriter(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "tool_call list_storage_classes") || strings.Contains(out, "abcdefghijklmnop") {
 		t.Fatalf("출력: %s", out)
+	}
+}
+
+func TestTruncateKeepsRunes(t *testing.T) {
+	s := strings.Repeat("가", 100) // 300바이트
+	out := Truncate(s, 50)
+	if len(out) > 50 || !utf8.ValidString(out) || !strings.HasSuffix(out, "…") {
+		t.Fatalf("한글을 반으로 자르면 안 됨: %q (%d바이트)", out, len(out))
+	}
+	if Truncate("짧음", 50) != "짧음" {
+		t.Fatal("짧으면 그대로")
 	}
 }

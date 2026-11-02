@@ -17,6 +17,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -45,6 +46,9 @@ type Config struct {
 	Proposal *plan.Proposal
 	Draft    *eplan.Plan
 	PlanRef  string
+	// PlanSession은 이 계획을 만든 계획 세션 ID다. 계획 세션은 Plan 제출 전에 열려 planRef가 없으므로,
+	// 리허설 세션(planRef 있음)의 첫 기록에 남겨 승인 화면에서 찾아갈 수 있게 한다.
+	PlanSession string
 
 	Diagnoser Diagnoser
 	Sink      agentlog.Sink
@@ -125,6 +129,9 @@ func Rehearse(ctx context.Context, c Config) (*Report, error) {
 		return nil, err
 	}
 	rep := &Report{Session: ses.ID()}
+	if c.PlanSession != "" {
+		ses.Log(ctx, agentlog.Event{Type: agentlog.Message, Tool: "plan", Output: map[string]any{"planRef": c.PlanRef, "planSession": c.PlanSession, "planId": c.Proposal.Plan.ID}})
+	}
 	cur := c.Proposal
 	var fatal error
 	for n := 1; n <= c.MaxRuns; n++ {
@@ -291,9 +298,18 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 	}
 	rctx, cancel := context.WithTimeoutCause(ctx, c.RunTimeout, errors.New("리허설 시간 상한"))
 	defer cancel()
+	// 감시는 엔진이 끝나면 바로 멈추고, 끝난 것을 확인한 뒤에 결과를 본다.
+	// 그래야 엔진이 끝난 뒤의 늦은 판정이 성공한 실행을 실패로 바꾸지 못한다.
+	wctx, stopWatch := context.WithCancel(rctx)
 	stuck := make(chan []string, 1)
-	go watchStuck(rctx, aiCS, sb.Namespace, c.FailFast, stuck, cancel)
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		watchStuck(wctx, aiCS, sb.Namespace, c.FailFast, stuck, cancel)
+	}()
 	runErr := eng.Run(rctx)
+	stopWatch()
+	<-watched
 	eng.Close()
 	st := eng.State()
 	a.Outcome = st.Outcome
@@ -303,8 +319,10 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 	}
 	select {
 	case ev := <-stuck:
-		a.Evidence = ev
-		runErr = fmt.Errorf("같은 경고가 %s 넘게 이어져 멈춤: %w", c.FailFast, runErr)
+		if st.Outcome != engine.OutcomeSucceeded {
+			a.Evidence = ev
+			runErr = fmt.Errorf("같은 경고가 %s 넘게 이어져 멈춤: %w", c.FailFast, runErr)
+		}
 	default:
 	}
 	if runErr == nil && st.Outcome == engine.OutcomeSucceeded {
@@ -462,7 +480,7 @@ func waitHealthy(ctx context.Context, dyn dynamic.Interface, ns, name string, ti
 	for {
 		obj, err := dyn.Resource(llm.CNPGClusterGVR).Namespace(ns).Get(wctx, name, metav1.GetOptions{})
 		if err == nil {
-			if phase, _, _ := unstructuredString(obj.Object, "status", "phase"); phase == "Cluster in healthy state" {
+			if phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase"); phase == "Cluster in healthy state" {
 				return nil
 			}
 		}
@@ -474,28 +492,32 @@ func waitHealthy(ctx context.Context, dyn dynamic.Interface, ns, name string, ti
 	}
 }
 
-func unstructuredString(obj map[string]any, path ...string) (string, bool, error) {
-	cur := any(obj)
-	for _, p := range path {
-		m, ok := cur.(map[string]any)
-		if !ok {
-			return "", false, nil
-		}
-		cur = m[p]
-	}
-	s, ok := cur.(string)
-	return s, ok, nil
-}
-
 // 진행을 막는 경고 이유. 이 경고가 FailFast 넘게 이어지면 기다려도 풀리지 않는 환경 문제로 본다.
 var stuckReasons = map[string]bool{
 	"ProvisioningFailed": true, "FailedScheduling": true, "FailedMount": true, "FailedAttachVolume": true,
 	"ErrImagePull": true, "ImagePullBackOff": true, "Failed": true, "BackOff": true, "FailedCreate": true,
 }
 
-// watchStuck은 샌드박스의 경고 이벤트를 보다가, 같은 경고가 window 넘게 이어지면 엔진을 멈춘다.
+// recurring은 경고 하나를 지켜본 기록이다. 시각은 모두 이 프로세스의 시계로 잰다(클러스터와 시계가 달라도 되게).
+type recurring struct {
+	since      time.Time // 처음 본 때
+	lastChange time.Time // 횟수나 마지막 시각이 마지막으로 바뀐 때
+	count      int32
+	last       time.Time
+}
+
+// watchStuck은 샌드박스의 경고 이벤트를 보다가, 같은 경고가 window 넘게 **계속 되풀이되면** 엔진을 멈춘다.
+// 이 실행 전부터 있던 경고는 보지 않고, window 동안 다시 일어나지 않은 경고는 풀린 것으로 보고 잊는다.
+// 잠깐 났다 사라진 경고 때문에 정상 실행을 멈추지 않기 위해서다.
 func watchStuck(ctx context.Context, cs kubernetes.Interface, ns string, window time.Duration, out chan<- []string, cancel context.CancelFunc) {
-	first := map[string]time.Time{}
+	seen := map[string]*recurring{}
+	started := time.Now()
+	ignore := map[string]bool{} // 이 실행 전에 이미 있던 경고
+	if list, err := cs.CoreV1().Events(ns).List(ctx, metav1.ListOptions{FieldSelector: "type=Warning"}); err == nil {
+		for _, e := range list.Items {
+			ignore[eventKey(e)+"@"+eventTime(e).String()] = true
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -506,21 +528,42 @@ func watchStuck(ctx context.Context, cs kubernetes.Interface, ns string, window 
 		if err != nil {
 			continue
 		}
+		now := time.Now()
 		for _, e := range list.Items {
-			if !stuckReasons[e.Reason] {
+			if !stuckReasons[e.Reason] || ignore[eventKey(e)+"@"+eventTime(e).String()] {
 				continue
 			}
-			key := e.Reason + "/" + e.InvolvedObject.Kind + "/" + e.InvolvedObject.Name
-			if _, ok := first[key]; !ok {
-				first[key] = time.Now()
+			key := eventKey(e)
+			r, ok := seen[key]
+			switch {
+			case !ok:
+				seen[key] = &recurring{since: now, lastChange: now, count: eventCount(e), last: eventTime(e)}
+				continue
+			case eventCount(e) != r.count || eventTime(e).After(r.last):
+				r.count, r.last, r.lastChange = eventCount(e), eventTime(e), now
 			}
-			if time.Since(first[key]) > window {
+			if now.Sub(r.lastChange) > window {
+				delete(seen, key) // 다시 일어나지 않았다: 풀린 것으로 본다
+				continue
+			}
+			if now.Sub(r.since) > window && r.lastChange.After(r.since) && now.Sub(started) > window {
 				out <- warningEvents(context.WithoutCancel(ctx), cs, ns)
 				cancel()
 				return
 			}
 		}
 	}
+}
+
+func eventCount(e corev1.Event) int32 {
+	if e.Series != nil {
+		return e.Series.Count
+	}
+	return e.Count
+}
+
+func eventKey(e corev1.Event) string {
+	return e.Reason + "/" + e.InvolvedObject.Kind + "/" + e.InvolvedObject.Name
 }
 
 // warningEvents는 네임스페이스의 경고 이벤트를 시간순 로그 줄로 돌려준다. 진단 AI에 넘기는 근거다.
@@ -547,6 +590,9 @@ func warningEvents(ctx context.Context, cs kubernetes.Interface, ns string) []st
 }
 
 func eventTime(e corev1.Event) time.Time {
+	if e.Series != nil && !e.Series.LastObservedTime.IsZero() {
+		return e.Series.LastObservedTime.Time
+	}
 	if !e.LastTimestamp.IsZero() {
 		return e.LastTimestamp.Time
 	}

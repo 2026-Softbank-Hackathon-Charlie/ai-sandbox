@@ -48,7 +48,8 @@ type PlanInput struct {
 }
 
 // Plan은 도구로 조사한 뒤 Plan과 대상 매니페스트를 낸다. 돌려주는 문자열은 에이전트 세션 ID다.
-// Plan은 아직 제출 전이므로 이 세션은 planRef 없이 열린다. 제출한 planRef는 세션 요약에 남긴다(호출하는 쪽).
+// Plan은 아직 제출 전이므로 이 세션은 planRef 없이 열린다. 호출하는 쪽이 제출한 planRef와 이 세션 ID를
+// 리허설 세션(planRef 있음)에 남겨 연결한다 (rehearsal.Config.PlanSession).
 func (a *Agent) Plan(ctx context.Context, in PlanInput) (*plan.Proposal, string, error) {
 	if in.Draft == nil {
 		return nil, "", fmt.Errorf("Plan 초안이 필요함")

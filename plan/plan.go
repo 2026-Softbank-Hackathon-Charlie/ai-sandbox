@@ -147,17 +147,22 @@ func CheckAgainstDraft(p, draft *eplan.Plan) Issues {
 		same(f.path, f.got, f.want)
 	}
 	same("plan.gateway", p.Gateway, draft.Gateway)
+	// 파일 이전은 초안 그대로여야 한다. 빼면 버킷이 옮겨지지 않고, flags를 바꾸면 복사 방식이 달라진다.
 	switch {
 	case draft.Files == nil && p.Files != nil:
 		is.add("plan.files", "초안에 없는 파일 이전을 넣을 수 없음")
+	case draft.Files != nil && p.Files == nil:
+		is.add("plan.files", "초안의 파일 이전을 뺄 수 없음 (버킷 %s → %s가 옮겨지지 않음)", draft.Files.Source, draft.Files.Target)
 	case draft.Files != nil && p.Files != nil:
 		same("plan.files.source", p.Files.Source, draft.Files.Source)
 		same("plan.files.target", p.Files.Target, draft.Files.Target)
-		same("plan.files.rclone", p.Files.Rclone, draft.Files.Rclone)
+		same("plan.files.rclone", orDefault(p.Files.Rclone, "rclone"), orDefault(draft.Files.Rclone, "rclone"))
+		same("plan.files.flags", nonNil(p.Files.Flags), nonNil(draft.Files.Flags))
 	}
 	same("plan.verify.writtenRecords", p.Verify.WrittenRecords, draft.Verify.WrittenRecords)
 	// 검증할 스키마를 줄이면 누락을 못 볼 수 있다. 테이블 필터(verify.tables)도 초안에 없으면 넣지 않는다.
-	same("plan.verify.schemas", p.Verify.Schemas, draft.Verify.Schemas)
+	// 없음(null)과 빈 목록은 엔진에서 같은 뜻(public)이므로 같게 본다.
+	same("plan.verify.schemas", nonNil(p.Verify.Schemas), nonNil(draft.Verify.Schemas))
 	if len(draft.Verify.Tables) == 0 && len(p.Verify.Tables) > 0 {
 		is.add("plan.verify.tables", "초안이 모든 테이블을 검증하면 범위를 줄일 수 없음")
 	}
@@ -191,6 +196,21 @@ func CheckRules(p *eplan.Plan) Issues {
 		is.add("plan.thresholds.maxLagBytes", "%d~%d여야 함 (받은 값 %d)", maxLagBytesRange[0], maxLagBytesRange[1], th.MaxLagBytes)
 	}
 	return is
+}
+
+func orDefault(s, d string) string {
+	if s == "" {
+		return d
+	}
+	return s
+}
+
+// nonNil은 없음(null)과 빈 목록을 같게 비교하려고 쓴다.
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 func show(v any) string {

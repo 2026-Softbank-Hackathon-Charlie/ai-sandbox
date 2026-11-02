@@ -301,3 +301,36 @@ func TestDiagnoseMasksAndValidates(t *testing.T) {
 		t.Fatalf("진단 세션은 planRef와 함께 열려야 함: %+v", s.Info)
 	}
 }
+
+// failingFinish는 세션을 닫을 때만 실패하는 Sink다 (플랫폼 기록 실패 흉내).
+type failingFinish struct{ agentlog.Memory }
+
+type failingSession struct{ *agentlog.MemorySession }
+
+func (f *failingFinish) Start(ctx context.Context, s agentlog.Start) (agentlog.Session, error) {
+	ses, _ := f.Memory.Start(ctx, s)
+	return failingSession{ses.(*agentlog.MemorySession)}, nil
+}
+
+func (s failingSession) Finish(context.Context, bool, string) error {
+	return errors.New("세션 닫기 실패")
+}
+
+func TestLogFailureDoesNotDiscardResult(t *testing.T) {
+	f := &fakeAPI{replies: []reply{{text: readFile(t, "../plan/testdata/proposal.json")}}}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	var logErr error
+	a := New(Config{
+		Sink:       &failingFinish{},
+		OnLogError: func(err error) { logErr = err },
+		Options:    []option.RequestOption{option.WithBaseURL(srv.URL), option.WithAPIKey("test-key"), option.WithMaxRetries(0)},
+	})
+	p, _, err := a.Plan(context.Background(), PlanInput{App: "moimroom", Draft: draft(t)})
+	if err != nil || p == nil {
+		t.Fatalf("검사를 통과한 결과는 기록 실패로 버리면 안 됨: %v", err)
+	}
+	if logErr == nil {
+		t.Fatal("기록 실패는 알려야 함")
+	}
+}
