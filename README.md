@@ -2,6 +2,25 @@
 
 HopCharlie의 AI(Plan 작성, 리허설 실패 진단, 수정안)와 샌드박스 격리를 맡는 레포입니다. 구현 현황과 실행 방법은 12장에 있습니다.
 
+## 버전 히스토리
+
+PR이 main에 들어간 순서입니다. 버전마다 무엇이 생기고 무엇으로 확인했는지는 [docs/HISTORY.md](docs/HISTORY.md)에 있습니다.
+
+| 버전 | PR | 머지 (KST) | 내용 | 테스트 함수 |
+| --- | --- | --- | --- | --- |
+| v0 | 직접 커밋 | 11/2 10:06 | 설계 초안 | - |
+| v1 | [#3](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/3) | 11/2 16:27 | 설계 문서를 EnginePlan 계약에 맞춤 | - |
+| v2 | [#4](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/4) | 11/2 18:39 | `plan`, `mask`: AI 계획 검사 | 14 |
+| v3 | [#5](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/5) | 11/2 18:44 | `sandbox`, `sandboxctl`: 샌드박스와 격리 검사 | 28 |
+| v4 | [#6](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/6) | 11/2 18:49 | `llm`, `agentlog`: 도구를 쓰는 AI 에이전트와 기록 | 40 |
+| v5 | [#7](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/7) | 11/2 18:52 | `rehearsal`, `hopai`: 실제 엔진 리허설과 전체 흐름 | 52 |
+| v6, v7 | [#8](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/8), [#9](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/9) | 11/2 18:54, 19:05 | 구현을 문서에 반영, `maxDowntime` 설명 | 52 |
+| v8 | [#10](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/10) | 11/2 19:53 | 보안 수정: 복제 출처, 이미지, 샌드박스 탈출 | 53 |
+| v9 | [#14](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/14) | 11/2 20:32 | 상한값 필수, 비밀값 가리기, 합성 데이터 검증 증거 | 65 |
+| v10 | [#15](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/15) | 11/2 20:40 | 리허설 경고·정리 결과 분리, CLI 종료 코드 | 73 |
+| v11 | [#11](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/11) | 11/2 20:45 | 리뷰 나머지 4건 | 75 |
+| v12 | [#16](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/16) | 11/3 11:19 | 리허설 리포트에 후보 digest (platform #24) | 78 |
+
 # HopCharlie AI·샌드박스 사용 설계 (D 영역 초안)
 
 작성: 태훈 · 2026-11-02 · 근거: HopCharlie 주제 정리의 2장(공통 결론), 3장 '확정된 내용' 열, 4-6·4-7장
@@ -281,6 +300,7 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 - **DB 지원 범위:** 현재 엔진은 CNPG replica·demote·promote를 사용한다. 다른 DB 이전 방식을 지원하려면 엔진 변경과 별도 합의가 필요하다. AI가 Plan에 이전 방식 enum을 새로 만들지 않는다.
 - **트래픽 게이트웨이 연결:** 현재 플랫폼의 Go 게이트웨이 계약을 사용한다. 각 환경 backend 주소와 샌드박스용 게이트웨이를 인계받아야 한다.
 - **AI 범위 (3장 7번):** 온보딩(Dockerfile·PR 생성)을 넣을지. 콘솔에서는 일단 뺐다.
+- **승인 게이트 (platform #24):** 리포트가 리허설한 후보를 `candidate`(Plan 본문과 `target.yaml`의 SHA-256)로 남기는 쪽은 끝났다([#16](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/16), 7장 10번). 플랫폼이 승인할 때 이 값과 `passed`를 확인하는 쪽이 남았다.
 - **계획 세션의 planRef:** 지금은 리허설 세션에 계획 세션 ID를 남겨 연결한다. 세션에 planRef를 나중에 붙이는 API가 플랫폼에 생기면 계획 세션을 Plan에 직접 연결할 수 있다 (platform 담당과 상의).
 - **리허설 범위:** 지금은 대상 클러스터 하나에 원본과 대상을 모두 만든다. 클러스터 사이 복제까지 시험하려면 양쪽에 샌드박스가 필요하다.
 - **샌드박스 관리 자격 증명:** 리허설은 대상 클러스터에서 네임스페이스 생성·삭제, 검사 Pod, port-forward 권한이 필요하다. 어느 계정으로 할지 A 영역과 정한다.
@@ -290,13 +310,13 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 
 | 패키지 | 내용 | 장 |
 |---|---|---|
-| `plan` | AI 출력(엔진 Plan + 매니페스트 + 근거) 검사, 진단 수정안 검사와 사본 적용 | 3 |
+| `plan` | AI 출력(엔진 Plan + 매니페스트 + 근거) 검사, 진단 수정안 검사와 사본 적용, 제출 본문과 후보 digest | 3, 7 |
 | `mask` | AI와 플랫폼에 보내기 전 비밀값 가리기 | 4 |
 | `agentlog` | 플랫폼 에이전트 세션 기록 (`/v1/agent/sessions`) | 4 |
 | `llm` | 도구를 쓰는 에이전트 (계획, 진단, 검사에 걸리면 대화를 이어 재요청), 읽기 전용 조사 도구 | 4, 5 |
 | `sandbox` | 샌드박스 생성·삭제, 1시간 토큰, 만료 정리, CNPG 모드, 격리 검사 | 6 |
-| `rehearsal` | 샌드박스에서 실제 엔진으로 리허설, 실패 시 진단과 재실행 | 7 |
-| `cmd/hopai` | 전체 흐름 (초안 → 계획 → 제출 → 리허설 → 첨부) | 2 |
+| `rehearsal` | 샌드박스에서 실제 엔진으로 리허설, 실패 시 진단과 재실행, 리포트(`candidate`, `coverage`, `cleanup`, `warnings`) | 7 |
+| `cmd/hopai` | 전체 흐름 (초안 → 계획 → 제출 → 리허설 → 후보 일치 확인 → 첨부) | 2 |
 | `cmd/sandboxctl` | 샌드박스를 손으로 만들고 검사하고 지우는 도구 | 6 |
 
 ### 실행
@@ -331,15 +351,21 @@ go test ./...
 REHEARSAL_KUBECONFIG=<kubeconfig> REHEARSAL_SC=standard go test -tags cluster -run Cluster -v -timeout 40m ./rehearsal/
 ```
 
-로컬 kind(kindnet, CNPG 1.25.1)에서 확인한 결과 (2026-11-02):
+로컬 kind(kindnet, CNPG 1.25.1)에서 확인한 결과 (2026-11-03, [#16](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/16) 머지 후 main 코드):
 
 | 경우 | 결과 |
 |---|---|
-| 대상 StorageClass `standard` | 격리 검사 10/10 → 임시 원본과 테스트 데이터 → 엔진 9단계 모두 성공, 쓰기 보류 8.7초, 전체 77초 |
-| 대상 StorageClass `gp3` (kind에 없음) | prepare에서 51초 만에 멈춤, 근거 `storageclass.storage.k8s.io "gp3" not found`, 쓰기 보류 전이라 원본 그대로 |
+| 대상 StorageClass `standard` | 격리 검사 10/10 → 임시 원본과 테스트 데이터(5,000행) → 엔진 9단계 모두 성공, 쓰기 보류 9.1초, 전체 82초 |
+| 대상 StorageClass `gp3` (kind에 없음) | prepare에서 55초 만에 멈춤, 근거 `storageclass.storage.k8s.io "gp3" not found`, 쓰기 보류 전이라 원본 그대로 |
+
+- 격리 검사 10개: 열려야 하는 2개(자기 네임스페이스 조회, DNS)와 막혀야 하는 8개(운영 Secret 읽기, 자기 NetworkPolicy 삭제, Role 수정, 토큰 발급, 운영 Deployment 삭제, hostNetwork·hostPath Pod 생성, 메타데이터 주소, CNPG 웹훅)가 모두 기대대로 나왔다. 호스트 Pod는 Pod Security가 막았고, CNPG Pod는 `baseline` 아래에서 정상으로 떴다. 증거 대상인 CNPG 웹훅은 이름을 찾은 뒤 막혔다.
+- 운영 DB 접속 검사는 이 테스트에 대상을 넣지 않아 빠졌다. `hopai`는 `-target`으로 넣는다.
+- 두 샌드박스 모두 끝나고 삭제 요청(`delete_requested`)이 들어갔다.
+- 이전 결과(11/2, [#8](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/8) 시점, Pod Security와 `host-pod-create` 전): 쓰기 보류 8.7초, 전체 77초 / `gp3` 51초.
 
 알려진 한계:
 
+- 실제 클러스터 확인은 로컬 kind뿐이다. EKS·GKE·k3s에서 NetworkPolicy와 Pod Security가 실제로 동작하는지는 A 영역과 같이 확인해야 한다(6장).
 - 쿠버네티스 경고 이벤트로 드러나지 않는 실패(예: 복제 인증서 오류)는 Plan의 `catchupTimeout`까지 기다린다.
 - AI가 실제로 계획과 진단을 하는 흐름(`hopai run`)과 플랫폼 세션 기록은 가짜 API로만 확인했다. 실제 API 키와 플랫폼으로 돌려 봐야 한다.
 - 파일(rclone), 게이트웨이와 카나리, 부하(k6)는 리허설하지 않는다.
