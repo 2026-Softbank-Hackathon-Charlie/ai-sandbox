@@ -351,7 +351,7 @@ go test ./...
 REHEARSAL_KUBECONFIG=<kubeconfig> REHEARSAL_SC=standard go test -tags cluster -run Cluster -v -timeout 40m ./rehearsal/
 ```
 
-로컬 kind(kindnet, CNPG 1.25.1)에서 확인한 결과 (2026-11-02):
+로컬 kind(kindnet, CNPG 1.25.1)에서 확인한 결과 (2026-11-02, [#8](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/8) 시점. 격리 검사가 10개 항목이던 때):
 
 | 경우 | 결과 |
 |---|---|
@@ -360,6 +360,7 @@ REHEARSAL_KUBECONFIG=<kubeconfig> REHEARSAL_SC=standard go test -tags cluster -r
 
 알려진 한계:
 
+- 위 kind 결과 뒤에 격리 검사가 바뀌었다. [#10](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/10)에서 `host-pod-create`가 더해져 11개 항목이 되었고, Pod Security `baseline`이 걸렸다. [#11](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/11)부터는 증거 대상(API 서버, CNPG 웹훅)을 찾지 못하면 실패한다. baseline 아래에서 CNPG Pod가 뜨는지, 격리 검사가 11/11인지 kind에서 다시 확인해야 한다.
 - 쿠버네티스 경고 이벤트로 드러나지 않는 실패(예: 복제 인증서 오류)는 Plan의 `catchupTimeout`까지 기다린다.
 - AI가 실제로 계획과 진단을 하는 흐름(`hopai run`)과 플랫폼 세션 기록은 가짜 API로만 확인했다. 실제 API 키와 플랫폼으로 돌려 봐야 한다.
 - 파일(rclone), 게이트웨이와 카나리, 부하(k6)는 리허설하지 않는다.

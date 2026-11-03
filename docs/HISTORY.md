@@ -4,8 +4,8 @@ main에 들어간 순서대로 ai-sandbox가 어떻게 자랐는지 정리했습
 
 | 버전 | PR | 머지 (KST) | 작성 | 종류 | 패키지 | 테스트 함수 | 한 줄 요약 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| [v0](#v0--설계-초안) | 직접 커밋 | 11/2 10:06 | 이태훈 | 문서 | - | 0 | AI·샌드박스 설계 초안 |
-| [v1](#v1--pr-3-engineplan-계약에-맞춘-설계-문서) | [#3](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/3) | 11/2 16:27 | 김동윤 | 문서 | - | 0 | 설계 문서를 플랫폼 EnginePlan 계약에 맞춤 |
+| [v0](#v0--설계-초안) | 직접 커밋 | 11/2 10:06 | 이태훈 | 문서 | - | - | AI·샌드박스 설계 초안 |
+| [v1](#v1--pr-3-engineplan-계약에-맞춘-설계-문서) | [#3](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/3) | 11/2 16:27 | 김동윤 | 문서 | - | - | 설계 문서를 플랫폼 EnginePlan 계약에 맞춤 |
 | [v2](#v2--pr-4-엔진-plan과-대상-매니페스트-검사) | [#4](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/4) | 11/2 18:39 | 이태훈 | 기능 | 2 | 14 | AI 계획 검사 (`plan`, `mask`) |
 | [v3](#v3--pr-5-샌드박스-생성삭제와-격리-검증) | [#5](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/5) | 11/2 18:44 | 이태훈 | 기능 | 4 | 28 | 샌드박스와 격리 검사 (`sandbox`, `sandboxctl`) |
 | [v4](#v4--pr-6-도구를-쓰는-ai-에이전트와-세션-기록) | [#6](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/6) | 11/2 18:49 | 이태훈 | 기능 | 6 | 40 | 도구를 쓰는 AI 에이전트와 기록 (`llm`, `agentlog`) |
@@ -156,6 +156,8 @@ v2~v5에서 구현한 내용을 설계 문서에 반영했습니다. v1(#3)의 �
 | `spec.imageName`에 아무 이미지나 쓸 수 있었음 | `ghcr.io/cloudnative-pg/postgresql:<버전>`(digest 고정 포함)만 받음 |
 | AI 계정이 hostNetwork·hostPath Pod로 샌드박스를 벗어날 수 있었음 | 네임스페이스에 Pod Security `baseline`을 걸고, 격리 검사에 `host-pod-create` 항목 추가 |
 
+- **확인:** `go test ./...`와 새 테스트(다른 복제 출처, 임의 이미지, 호스트 Pod 생성 등)는 통과했습니다. 실제 클러스터에서는 아직입니다. 격리 검사가 11개 항목이 되었으므로 kind에서 baseline 아래 CNPG Pod가 뜨는지, 11/11이 나오는지 다시 봐야 합니다.
+
 ---
 
 ## v9 · PR #14: AI Plan 입력과 합성 데이터 검증의 빈틈
@@ -188,9 +190,11 @@ v2~v5에서 구현한 내용을 설계 문서에 반영했습니다. v1(#3)의 �
 | 격리 검사의 증거 대상(API 서버, CNPG 웹훅)을 못 찾아도 '막힘'으로 기록됨 | 증거 대상은 먼저 찾고, 못 찾으면 검사 실패 |
 | 리허설에 실패해도 수정안을 첨부·재제출함 | 리허설을 통과했을 때만 올림. 리포트는 늘 첨부 |
 | DSN 비밀번호 가리기가 빈 사용자 이름과 `@`가 든 비밀번호를 놓침 | 정규식을 넓힘 |
-| 원본 네임스페이스가 길면 샌드박스 생성이 실패함 | 앞 27자 + 해시 4자리로 줄임 |
+| 원본 네임스페이스가 32자를 넘으면 샌드박스 생성이 실패함 | 앞 27자 + 해시 4자리로 줄임 |
 
 v9·v10과 같은 파일을 고쳐 충돌이 났고, main을 합쳐 풀었습니다(force push 없음).
+
+- **확인:** 4건마다 테스트가 있고 `go test ./...`는 통과했습니다. 실제 클러스터에서는 아직입니다. 이제 CNPG 웹훅 서비스를 찾지 못하는 클러스터에서는 격리 검사가 실패하므로, kind에서 11/11인지 확인해야 합니다.
 
 ---
 
