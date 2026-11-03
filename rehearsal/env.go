@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -17,6 +18,8 @@ import (
 	"sigs.k8s.io/yaml"
 
 	eplan "github.com/2026-Softbank-Hackathon-Charlie/migration-engine/pkg/plan"
+
+	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/sandbox"
 )
 
 // DBInfo는 원본 DSN에서 읽은 DB 이름과 사용자다. 비밀번호는 읽지 않는다.
@@ -122,8 +125,68 @@ func TargetManifest(manifest string, p *eplan.Plan, ns string) (string, error) {
 		}
 	}
 	spec["externalClusters"] = ext
+	// requests만 적은 자원은 limits도 같게 둔다. 샌드박스 LimitRange의 기본 limits(500m, 512Mi)가 requests보다 작으면
+	// Pod가 거절되기 때문이다. 운영 매니페스트는 바꾸지 않는다.
+	if res, _ := spec["resources"].(map[string]any); res != nil {
+		req, _ := res["requests"].(map[string]any)
+		lim, _ := res["limits"].(map[string]any)
+		for k, v := range req {
+			if _, ok := lim[k]; !ok {
+				if lim == nil {
+					lim = map[string]any{}
+					res["limits"] = lim
+				}
+				lim[k] = v
+			}
+		}
+	}
 	out, err := yaml.Marshal(doc)
 	return string(out), err
+}
+
+// SandboxConfig는 대상 매니페스트를 리허설할 수 있게 샌드박스 Quota를 잡는다. 기본값(임시 원본, 검사 Pod, 작업 Pod 몫)에
+// 대상 클러스터 몫을 더한다. 대상 몫은 인스턴스마다 limits(없으면 requests, 그것도 없으면 LimitRange 기본값)이고,
+// CNPG가 인스턴스를 붙일 때 띄우는 작업 Pod 하나를 더 센다. 운영에 맞게 정한 자원을 샌드박스 때문에 줄이지 않게 하려는 것이다.
+func SandboxConfig(app, manifest string) (sandbox.Config, error) {
+	c := sandbox.Config{App: app}
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(manifest), &doc); err != nil {
+		return c, fmt.Errorf("대상 매니페스트를 읽을 수 없음: %w", err)
+	}
+	spec, _ := doc["spec"].(map[string]any)
+	pods := int64(1)
+	if n, ok := spec["instances"].(float64); ok && n > 0 {
+		pods = int64(n)
+	}
+	pods++ // 붙일 때 뜨는 작업 Pod
+	res, _ := spec["resources"].(map[string]any)
+	need := func(name, def string) (resource.Quantity, error) {
+		q := resource.MustParse(def)
+		for _, k := range []string{"requests", "limits"} { // limits가 있으면 limits를 쓴다
+			m, _ := res[k].(map[string]any)
+			if v, ok := m[name]; ok {
+				p, err := resource.ParseQuantity(fmt.Sprint(v))
+				if err != nil {
+					return q, fmt.Errorf("resources.%s.%s %v를 읽을 수 없음: %w", k, name, v, err)
+				}
+				q = p
+			}
+		}
+		q.Mul(pods)
+		return q, nil
+	}
+	cpu, err := need("cpu", sandbox.DefaultContainerCPU)
+	if err != nil {
+		return c, err
+	}
+	mem, err := need("memory", sandbox.DefaultContainerMemory)
+	if err != nil {
+		return c, err
+	}
+	cpu.Add(resource.MustParse(sandbox.DefaultCPU))
+	mem.Add(resource.MustParse(sandbox.DefaultMemory))
+	c.CPU, c.Memory = cpu.String(), mem.String()
+	return c, nil
 }
 
 // TokenKubeconfig는 관리자 설정의 주소와 CA만 가져오고 인증은 샌드박스 토큰 하나로 하는 kubeconfig 파일을 쓴다.

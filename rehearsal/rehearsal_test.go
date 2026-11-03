@@ -316,3 +316,57 @@ func TestSandboxApp(t *testing.T) {
 		t.Fatalf("샌드박스 이름 규칙에 맞아야 함: %v", err)
 	}
 }
+
+func TestTargetManifestFillsLimitsFromRequests(t *testing.T) {
+	// requests만 적은 CPU는 샌드박스에서 limits도 같게 둔다. LimitRange 기본 limits(500m)가 더 작으면 Pod가 거절된다.
+	p := proposal(t)
+	out, err := TargetManifest(p.Manifest, &p.Plan, "sandbox-moimroom-ab12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	_ = yaml.Unmarshal([]byte(out), &doc)
+	lim := doc["spec"].(map[string]any)["resources"].(map[string]any)["limits"].(map[string]any)
+	if lim["cpu"] != "100m" || lim["memory"] != "512Mi" {
+		t.Fatalf("limits: %+v", lim)
+	}
+	if !strings.Contains(p.Manifest, "limits: {memory: 512Mi}") {
+		t.Fatal("운영 매니페스트가 바뀜")
+	}
+}
+
+func TestSandboxConfigFitsTargetManifest(t *testing.T) {
+	// 인스턴스 2개 + 작업 Pod 1개 = 3개 몫을 기본값에 더한다. CPU는 requests 100m(limits 없음), 메모리는 limits 512Mi.
+	c, err := SandboxConfig("moimroom", proposal(t).Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CPU != "4300m" || c.Memory != "9728Mi" {
+		t.Fatalf("Quota: CPU %s, 메모리 %s", c.CPU, c.Memory)
+	}
+	// 운영에 맞춘 큰 자원도 샌드박스에서 돌 수 있어야 한다
+	big := "spec:\n  instances: 3\n  resources:\n    requests: {cpu: \"4\", memory: 16Gi}\n"
+	c, err = SandboxConfig("moimroom", big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CPU != "20" || c.Memory != "72Gi" {
+		t.Fatalf("큰 매니페스트 Quota: CPU %s, 메모리 %s", c.CPU, c.Memory)
+	}
+	if _, err := sandbox.Build(c, time.Now()); err != nil {
+		t.Fatalf("샌드박스 설정으로 쓸 수 있어야 함: %v", err)
+	}
+}
+
+func TestLogIsolationNamesPodSecurity(t *testing.T) {
+	mem := &agentlog.Memory{}
+	s, _ := mem.Start(context.Background(), agentlog.Start{Kind: agentlog.KindRehearsal})
+	logIsolation(context.Background(), s, []sandbox.CheckResult{
+		{Name: "host-pod-create", Command: "kubectl run", Expect: "blocked", Got: "blocked", Pass: true, Detail: sandbox.HostPodByRBAC},
+		{Name: "host-pod-admission", Command: "kubectl run", Expect: "blocked", Got: "blocked", Pass: true, Detail: sandbox.HostPodByPodSecurity},
+	})
+	ev := mem.Sessions[0].Events
+	if ev[0].Output != sandbox.HostPodByRBAC || ev[1].Output != sandbox.HostPodByPodSecurity {
+		t.Fatalf("무엇이 막았는지 남겨야 함: %+v %+v", ev[0], ev[1])
+	}
+}

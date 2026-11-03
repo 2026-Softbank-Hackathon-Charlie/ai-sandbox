@@ -117,6 +117,10 @@ func TestParseRejectsBrokenAIOutput(t *testing.T) {
 		{"storage 없음", replace(t, v, `  storage:\n    size: 5Gi\n    storageClass: gp3\n`, ``), "spec.storage: 있어야 함"},
 		{"다른 볼륨에서 복제", replace(t, v, `    storageClass: gp3\n`, `    storageClass: gp3\n    pvcTemplate: {dataSource: {kind: PersistentVolumeClaim, name: other}}\n`), "spec.storage.pvcTemplate"},
 		{"크기 너무 큼", replace(t, v, `size: 5Gi`, `size: 1Ei`), "spec.storage.size"},
+		{"크기를 숫자로", replace(t, v, `size: 5Gi`, `size: 10`), "문자열이어야"},
+		{"control-plane 노드에 올리기", replace(t, v, `  instances: 2\n`, `  instances: 2\n  affinity: {nodeSelector: {node-role.kubernetes.io/control-plane: \"\"}}\n`), "control-plane 노드"},
+		{"모든 taint 견디기", replace(t, v, `  instances: 2\n`, `  instances: 2\n  affinity: {tolerations: [{operator: Exists}]}\n`), "tolerations[0].key"},
+		{"넓은 nodeAffinity", replace(t, v, `  instances: 2\n`, `  instances: 2\n  affinity: {nodeAffinity: {}}\n`), "spec.affinity.nodeAffinity: 쓸 수 없는 키"},
 		{"StorageClass를 숫자로", replace(t, v, `storageClass: gp3`, `storageClass: 123`), "StorageClass 이름"},
 		{"CPU 음수", replace(t, v, `requests: {cpu: 100m`, `requests: {cpu: \"-1\"`), "spec.resources.requests.cpu"},
 		{"GPU 요청", replace(t, v, `limits: {memory: 512Mi}`, `limits: {memory: 512Mi, nvidia.com/gpu: 1}`), "nvidia.com/gpu: 쓸 수 없는 키"},
@@ -125,7 +129,7 @@ func TestParseRejectsBrokenAIOutput(t *testing.T) {
 
 		// 하위 키
 		{"복제 늦추기", replace(t, v, `source: moimroom-db-gke}\n  externalClusters`, `source: moimroom-db-gke, minApplyDelay: 1h}\n  externalClusters`), "spec.replica.minApplyDelay"},
-		{"SQL을 로그로", replace(t, v, `  instances: 2\n`, `  instances: 2\n  postgresql: {parameters: {log_statement: all}}\n`), "parameters.log_statement: 쓸 수 없는 설정"},
+		{"SQL을 로그로", replace(t, v, `  instances: 2\n`, `  instances: 2\n  postgresql: {parameters: {log_statement: all}}\n`), "parameters.log_statement: 쓸 수 없는 키"},
 		{"설정 값을 숫자로", replace(t, v, `  instances: 2\n`, `  instances: 2\n  postgresql: {parameters: {max_connections: 200}}\n`), "값은 문자열"},
 		{"모니터링 쿼리", replace(t, v, `  instances: 2\n`, `  instances: 2\n  monitoring: {customQueriesSecret: [{name: x, key: q}]}\n`), "spec.monitoring: 쓸 수 없는 키"},
 		{"복제 암호화 끄기", replace(t, v, `sslmode: verify-full}`, `sslmode: disable}`), "sslmode"},
@@ -261,5 +265,15 @@ func TestCheckAgainstDraftDoesNotDiscloseOriginalSecrets(t *testing.T) {
 	is := CheckAgainstDraft(&p, d)
 	if len(is) == 0 || strings.Contains(is.Error(), "unlabelled-original-secret") || strings.Contains(is.Error(), "replacement-secret") {
 		t.Fatalf("mismatch issue must identify the path without secret values: %v", is)
+	}
+}
+
+func TestManifestAllowsDedicatedNodes(t *testing.T) {
+	// DB 전용 노드(taint)에 올리고 Pod를 나눠 두는 설정은 받는다. 문서 끝 표시(...) 뒤에 주석만 있어도 문서 하나다.
+	v := read(t, "proposal.json")
+	v = replace(t, v, `  instances: 2\n`, `  instances: 2\n  affinity:\n    nodeSelector: {dedicated: db}\n    tolerations: [{key: dedicated, operator: Equal, value: db, effect: NoSchedule}]\n    enablePodAntiAffinity: true\n    podAntiAffinityType: preferred\n    topologyKey: kubernetes.io/hostname\n`)
+	v = replace(t, v, `sslmode: verify-full}\n"`, `sslmode: verify-full}\n...\n# 끝\n"`)
+	if _, is := Parse([]byte(v), draft(t)); len(is) > 0 {
+		t.Fatalf("전용 노드 설정이 걸림:\n%s", is.Error())
 	}
 }

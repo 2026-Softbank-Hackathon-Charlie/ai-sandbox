@@ -25,11 +25,20 @@ var (
 )
 
 // AI가 쓸 수 있는 CNPG Cluster spec 키. 계정, 슈퍼유저, 백업 대상처럼 권한이나 데이터 위치를 바꾸는 키는 뺐다.
-// affinity(노드 선택)와 monitoring(사용자 쿼리를 메트릭으로 내보냄)도 이전에 필요 없어 뺐다.
+// monitoring(사용자 쿼리를 메트릭으로 내보냄)도 이전에 필요 없어 뺐다.
 var manifestSpecKeys = []string{
-	"instances", "imageName", "storage", "walStorage", "resources",
+	"instances", "imageName", "storage", "walStorage", "resources", "affinity",
 	"smartShutdownTimeout", "bootstrap", "replica", "externalClusters", "postgresql",
 }
+
+// affinity는 DB 전용 노드(taint)에 올리고 Pod를 나눠 두는 데 필요한 것만 받는다.
+// nodeAffinity·additionalPodAffinity처럼 표현이 넓은 키는 받지 않는다.
+var (
+	affinityKeys   = []string{"nodeSelector", "tolerations", "enablePodAntiAffinity", "podAntiAffinityType", "topologyKey"}
+	tolerationKeys = []string{"key", "operator", "value", "effect", "tolerationSeconds"}
+	// controlPlaneLabels는 control-plane 노드를 가리키는 라벨·taint 키다. DB를 여기에 올리지 않는다.
+	controlPlaneLabels = []string{"node-role.kubernetes.io/control-plane", "node-role.kubernetes.io/master"}
+)
 
 // AI가 정할 수 있는 PostgreSQL 설정. 성능과 WAL 보존에 관한 것만 받는다.
 // log_*처럼 데이터를 로그로 내보내거나, CNPG가 관리하는 복제·보안 설정은 뺐다.
@@ -41,11 +50,12 @@ var pgParameterKeys = []string{
 }
 
 // 매니페스트 크기와 자원 상한 (제안값, 11/6에 확정한다).
-const (
-	maxManifestBytes = 64 << 10
-	maxStorageSize   = "2Ti"
-	maxCPU           = "16"
-	maxMemory        = "64Gi"
+const maxManifestBytes = 64 << 10
+
+var (
+	maxStorageSize = resource.MustParse("2Ti")
+	maxCPU         = resource.MustParse("16")
+	maxMemory      = resource.MustParse("64Gi")
 )
 
 // CheckManifest는 대상 매니페스트가 이 Plan의 대상 클러스터를 원본의 복제본으로 만드는지 본다.
@@ -61,11 +71,7 @@ func CheckManifest(manifest string, p *eplan.Plan) Issues {
 		is.add("", "YAML 객체 하나여야 함: %v", err)
 		return is
 	}
-	for _, k := range sortedKeys(doc) {
-		if !slices.Contains(manifestTopKeys, k) {
-			is.add(k, "쓸 수 없는 키 (허용: %s)", strings.Join(manifestTopKeys, ", "))
-		}
-	}
+	is = append(is, checkKeys("", doc, manifestTopKeys, "")...)
 	if v := strOf(doc, "apiVersion"); v != "postgresql.cnpg.io/v1" {
 		is.add("apiVersion", "postgresql.cnpg.io/v1이어야 함 (받은 값 %q)", v)
 	}
@@ -77,11 +83,7 @@ func CheckManifest(manifest string, p *eplan.Plan) Issues {
 		is.add("metadata", "있어야 함")
 		meta = map[string]any{}
 	}
-	for _, k := range sortedKeys(meta) {
-		if !slices.Contains(manifestMetaKeys, k) {
-			is.add("metadata."+k, "쓸 수 없는 키 (허용: name, namespace). annotations, finalizers, ownerReferences로 대상 DB가 멈추거나 지워질 수 있음")
-		}
-	}
+	is = append(is, checkKeys("metadata", meta, manifestMetaKeys, "annotations, finalizers, ownerReferences로 대상 DB가 멈추거나 지워질 수 있음")...)
 	if n := strOf(meta, "name"); n != p.Target.Cluster {
 		is.add("metadata.name", "Plan의 target.cluster %q와 같아야 함 (받은 값 %q)", p.Target.Cluster, n)
 	}
@@ -93,16 +95,7 @@ func CheckManifest(manifest string, p *eplan.Plan) Issues {
 		is.add("spec", "있어야 함")
 		return is
 	}
-	keys := make([]string, 0, len(spec))
-	for k := range spec {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		if !slices.Contains(manifestSpecKeys, k) {
-			is.add("spec."+k, "쓸 수 없는 키 (허용: %s)", strings.Join(manifestSpecKeys, ", "))
-		}
-	}
+	is = append(is, checkKeys("spec", spec, manifestSpecKeys, "")...)
 	if v, ok := spec["instances"]; ok && !intIn(v, 1, 5) {
 		is.add("spec.instances", "1~5인 정수여야 함 (받은 값 %v)", v)
 	}
@@ -115,6 +108,9 @@ func CheckManifest(manifest string, p *eplan.Plan) Issues {
 	}
 	if v, ok := spec["resources"]; ok {
 		is = append(is, checkResources(v)...)
+	}
+	if v, ok := spec["affinity"]; ok {
+		is = append(is, checkAffinity(v)...)
 	}
 	// 대상은 원본의 복제본으로 시작해야 한다. 아니면 빈 DB가 생기고 동기화가 성립하지 않는다.
 	rep, _ := spec["replica"].(map[string]any)
@@ -132,11 +128,7 @@ func CheckManifest(manifest string, p *eplan.Plan) Issues {
 			is.add("spec.replica.self", "대상 클러스터 %q여야 함 (받은 값 %q)", p.Target.Cluster, self)
 		}
 		// minApplyDelay, enabled, promotionToken은 복제를 늦추거나 끄거나 승격 시점을 바꾼다. 승격은 엔진이 정한다.
-		for _, k := range sortedKeys(rep) {
-			if !slices.Contains([]string{"self", "primary", "source"}, k) {
-				is.add("spec.replica."+k, "쓸 수 없는 키 (허용: self, primary, source). 복제 지연과 승격은 엔진이 정함")
-			}
-		}
+		is = append(is, checkKeys("spec.replica", rep, []string{"self", "primary", "source"}, "복제 지연과 승격은 엔진이 정함")...)
 	}
 	if v, ok := spec["postgresql"]; ok {
 		is = append(is, checkPostgresql(v)...)
@@ -145,11 +137,7 @@ func CheckManifest(manifest string, p *eplan.Plan) Issues {
 	if b == nil {
 		is.add("spec.bootstrap", "pg_basebackup으로 원본 %q에서 시작해야 함 (받은 값 %v)", p.Source.Cluster, spec["bootstrap"])
 	} else {
-		for _, k := range sortedKeys(b) {
-			if k != "pg_basebackup" {
-				is.add("spec.bootstrap."+k, "복제본은 pg_basebackup으로만 시작함")
-			}
-		}
+		is = append(is, checkKeys("spec.bootstrap", b, []string{"pg_basebackup"}, "복제본은 pg_basebackup으로만 시작함")...)
 		if bb, ok := b["pg_basebackup"].(map[string]any); ok {
 			is = append(is, checkBasebackup(bb, p)...)
 		} else {
@@ -171,12 +159,7 @@ var cnpgImage = regexp.MustCompile(`^ghcr\.io/cloudnative-pg/postgresql(:[0-9]+(
 
 // checkBasebackup은 대상이 원본에서, 원본의 앱 계정 그대로 시작하는지 본다 (migration-engine examples/cnpg).
 func checkBasebackup(bb map[string]any, p *eplan.Plan) Issues {
-	var is Issues
-	for _, k := range sortedKeys(bb) {
-		if !slices.Contains([]string{"source", "database", "owner", "secret"}, k) {
-			is.add("spec.bootstrap.pg_basebackup."+k, "쓸 수 없는 키 (허용: source, database, owner, secret)")
-		}
-	}
+	is := checkKeys("spec.bootstrap.pg_basebackup", bb, []string{"source", "database", "owner", "secret"}, "")
 	if src := strOf(bb, "source"); src != p.Source.Cluster {
 		is.add("spec.bootstrap.pg_basebackup.source", "원본 클러스터 %q여야 함 (받은 값 %q)", p.Source.Cluster, src)
 	}
@@ -229,11 +212,7 @@ func checkExternalClusters(spec map[string]any, p *eplan.Plan) Issues {
 			is.add(path+".name", "%q가 두 번 나옴", name)
 		}
 		seen[name] = true
-		for _, k := range sortedKeys(m) {
-			if !slices.Contains([]string{"name", "connectionParameters", "sslKey", "sslCert", "sslRootCert"}, k) {
-				is.add(path+"."+k, "쓸 수 없는 키 (허용: name, connectionParameters, sslKey, sslCert, sslRootCert)")
-			}
-		}
+		is = append(is, checkKeys(path, m, []string{"name", "connectionParameters", "sslKey", "sslCert", "sslRootCert"}, "")...)
 		is = append(is, checkConnection(path+".connectionParameters", m["connectionParameters"], ep)...)
 		for k, want := range map[string]string{"sslKey": name + "-replication", "sslCert": name + "-replication", "sslRootCert": name + "-ca"} {
 			v, ok := m[k]
@@ -265,11 +244,7 @@ func checkConnection(path string, v any, ep eplan.Endpoint) Issues {
 		is.add(path, "%s DSN을 읽을 수 없음: %v", ep.Env, err)
 		return is
 	}
-	for _, k := range sortedKeys(cp) {
-		if !slices.Contains([]string{"host", "port", "user", "dbname", "sslmode"}, k) {
-			is.add(path+"."+k, "쓸 수 없는 키 (허용: host, port, user, dbname, sslmode)")
-		}
-	}
+	is = append(is, checkKeys(path, cp, []string{"host", "port", "user", "dbname", "sslmode"}, "")...)
 	if h := strOf(cp, "host"); h != u.Hostname() {
 		is.add(path+".host", "%s DSN의 호스트 %q여야 함 (받은 값 %q)", ep.Env, u.Hostname(), h)
 	}
@@ -285,6 +260,26 @@ func checkConnection(path string, v any, ep eplan.Endpoint) Issues {
 	}
 	if db, ok := cp["dbname"]; ok && db != "postgres" {
 		is.add(path+".dbname", "postgres여야 함 (받은 값 %v)", db)
+	}
+	return is
+}
+
+// checkKeys는 m의 키가 allowed 안에 있는지 본다. why가 있으면 메시지에 이유를 붙인다.
+func checkKeys(path string, m map[string]any, allowed []string, why string) Issues {
+	var is Issues
+	for _, k := range sortedKeys(m) {
+		if slices.Contains(allowed, k) {
+			continue
+		}
+		msg := "쓸 수 없는 키 (허용: " + strings.Join(allowed, ", ") + ")"
+		if why != "" {
+			msg += ". " + why
+		}
+		p := k
+		if path != "" {
+			p = path + "." + k
+		}
+		is.add(p, "%s", msg)
 	}
 	return is
 }
@@ -313,15 +308,15 @@ func checkStorage(path string, v any, required bool) Issues {
 		is.add(path, "객체여야 함 (size, storageClass)")
 		return is
 	}
-	for _, k := range sortedKeys(m) {
-		if k != "size" && k != "storageClass" {
-			is.add(path+"."+k, "쓸 수 없는 키 (허용: size, storageClass)")
-		}
-	}
-	if s, ok := m["size"]; !ok {
-		is.add(path+".size", "있어야 함")
-	} else {
+	is = append(is, checkKeys(path, m, []string{"size", "storageClass"}, "")...)
+	// CNPG의 size는 문자열이다. 숫자 10은 YAML에서는 읽히지만 적용할 때 거절되고, 뜻도 10바이트다.
+	switch s := m["size"].(type) {
+	case nil:
+		is.add(path+".size", "있어야 함 (예: \"10Gi\")")
+	case string:
 		is = append(is, checkQuantity(path+".size", s, maxStorageSize)...)
+	default:
+		is.add(path+".size", "문자열이어야 함 (예: \"10Gi\") (받은 값 %v)", s)
 	}
 	if sc, ok := m["storageClass"]; ok {
 		if s, _ := sc.(string); !k8sName.MatchString(s) {
@@ -339,33 +334,92 @@ func checkResources(v any) Issues {
 		is.add("spec.resources", "객체여야 함 (requests, limits)")
 		return is
 	}
-	for _, k := range sortedKeys(m) {
+	is = append(is, checkKeys("spec.resources", m, []string{"requests", "limits"}, "")...)
+	for _, k := range []string{"requests", "limits"} {
 		path := "spec.resources." + k
-		if k != "requests" && k != "limits" {
-			is.add(path, "쓸 수 없는 키 (허용: requests, limits)")
+		raw, ok := m[k]
+		if !ok {
 			continue
 		}
-		r, _ := m[k].(map[string]any)
+		r, _ := raw.(map[string]any)
 		if r == nil {
 			is.add(path, "객체여야 함 (cpu, memory)")
 			continue
 		}
-		for _, name := range sortedKeys(r) {
-			switch name {
-			case "cpu":
-				is = append(is, checkQuantity(path+".cpu", r[name], maxCPU)...)
-			case "memory":
-				is = append(is, checkQuantity(path+".memory", r[name], maxMemory)...)
-			default:
-				is.add(path+"."+name, "쓸 수 없는 키 (허용: cpu, memory)")
+		is = append(is, checkKeys(path, r, []string{"cpu", "memory"}, "")...)
+		if v, ok := r["cpu"]; ok {
+			is = append(is, checkQuantity(path+".cpu", v, maxCPU)...)
+		}
+		if v, ok := r["memory"]; ok {
+			is = append(is, checkQuantity(path+".memory", v, maxMemory)...)
+		}
+	}
+	return is
+}
+
+// checkAffinity는 DB를 어느 노드에 올릴지만 정하는지 본다. control-plane 노드와, 모든 taint를 견디는 설정은 받지 않는다.
+func checkAffinity(v any) Issues {
+	var is Issues
+	m, _ := v.(map[string]any)
+	if m == nil {
+		is.add("spec.affinity", "객체여야 함")
+		return is
+	}
+	is = append(is, checkKeys("spec.affinity", m, affinityKeys, "")...)
+	if raw, ok := m["nodeSelector"]; ok {
+		sel, _ := raw.(map[string]any)
+		if sel == nil {
+			is.add("spec.affinity.nodeSelector", "객체여야 함")
+		}
+		for _, k := range sortedKeys(sel) {
+			if _, isStr := sel[k].(string); !isStr {
+				is.add("spec.affinity.nodeSelector."+k, "값은 문자열이어야 함")
 			}
+			if slices.Contains(controlPlaneLabels, k) {
+				is.add("spec.affinity.nodeSelector."+k, "control-plane 노드에는 DB를 올리지 않음")
+			}
+		}
+	}
+	if raw, ok := m["tolerations"]; ok {
+		list, isList := raw.([]any)
+		if !isList {
+			is.add("spec.affinity.tolerations", "목록이어야 함")
+		}
+		for i, e := range list {
+			path := fmt.Sprintf("spec.affinity.tolerations[%d]", i)
+			t, _ := e.(map[string]any)
+			if t == nil {
+				is.add(path, "객체여야 함")
+				continue
+			}
+			is = append(is, checkKeys(path, t, tolerationKeys, "")...)
+			key := strOf(t, "key")
+			if key == "" {
+				is.add(path+".key", "있어야 함 (key 없이 operator: Exists면 모든 taint를 견딤)")
+			}
+			if slices.Contains(controlPlaneLabels, key) {
+				is.add(path+".key", "control-plane 노드에는 DB를 올리지 않음")
+			}
+		}
+	}
+	if raw, ok := m["enablePodAntiAffinity"]; ok {
+		if _, isBool := raw.(bool); !isBool {
+			is.add("spec.affinity.enablePodAntiAffinity", "true 또는 false여야 함 (받은 값 %v)", raw)
+		}
+	}
+	if raw, ok := m["podAntiAffinityType"]; ok && raw != "preferred" && raw != "required" {
+		is.add("spec.affinity.podAntiAffinityType", "preferred 또는 required여야 함 (받은 값 %v)", raw)
+	}
+	if raw, ok := m["topologyKey"]; ok {
+		if s, _ := raw.(string); s == "" {
+			is.add("spec.affinity.topologyKey", "노드 라벨 이름이어야 함 (받은 값 %v)", raw)
 		}
 	}
 	return is
 }
 
 // checkQuantity는 쿠버네티스 수량(500m, 1Gi, 2)이 0보다 크고 max 이하인지 본다.
-func checkQuantity(path string, v any, max string) Issues {
+func checkQuantity(path string, v any, max resource.Quantity) Issues {
 	var is Issues
 	var s string
 	switch x := v.(type) {
@@ -375,8 +429,8 @@ func checkQuantity(path string, v any, max string) Issues {
 		s = strconv.FormatFloat(x, 'f', -1, 64)
 	}
 	q, err := resource.ParseQuantity(s)
-	if err != nil || q.Sign() <= 0 || q.Cmp(resource.MustParse(max)) > 0 {
-		is.add(path, "0보다 크고 %s 이하인 수량이어야 함 (받은 값 %v)", max, v)
+	if err != nil || q.Sign() <= 0 || q.Cmp(max) > 0 {
+		is.add(path, "0보다 크고 %s 이하인 수량이어야 함 (받은 값 %v)", max.String(), v)
 	}
 	return is
 }
@@ -389,11 +443,7 @@ func checkPostgresql(v any) Issues {
 		is.add("spec.postgresql", "객체여야 함 (parameters)")
 		return is
 	}
-	for _, k := range sortedKeys(pg) {
-		if k != "parameters" {
-			is.add("spec.postgresql."+k, "postgresql 아래에는 parameters만 쓸 수 있음")
-		}
-	}
+	is = append(is, checkKeys("spec.postgresql", pg, []string{"parameters"}, "")...)
 	raw, ok := pg["parameters"]
 	if !ok {
 		return is
@@ -403,14 +453,10 @@ func checkPostgresql(v any) Issues {
 		is.add("spec.postgresql.parameters", "객체여야 함")
 		return is
 	}
+	is = append(is, checkKeys("spec.postgresql.parameters", params, pgParameterKeys, "데이터를 로그로 내보내거나 복제·보안을 바꾸는 설정은 받지 않음")...)
 	for _, k := range sortedKeys(params) {
-		path := "spec.postgresql.parameters." + k
-		if !slices.Contains(pgParameterKeys, k) {
-			is.add(path, "쓸 수 없는 설정 (허용: %s)", strings.Join(pgParameterKeys, ", "))
-			continue
-		}
-		if s, _ := params[k].(string); s == "" {
-			is.add(path, "값은 문자열이어야 함 (예: \"200\") (받은 값 %v)", params[k])
+		if s, _ := params[k].(string); slices.Contains(pgParameterKeys, k) && s == "" {
+			is.add("spec.postgresql.parameters."+k, "값은 문자열이어야 함 (예: \"200\") (받은 값 %v)", params[k])
 		}
 	}
 	return is
@@ -453,16 +499,40 @@ func manifestPathAllowed(seg []string) bool {
 		return len(seg) == 2
 	case "resources":
 		return len(seg) >= 3
+	case "affinity":
+		// 대상 노드의 taint·라벨에 맞추는 수정. affinity가 없던 매니페스트에도 넣을 수 있게 통째로도 받고,
+		// 나머지 검사는 적용한 뒤 checkAffinity가 한다.
+		return len(seg) == 2 || seg[2] == "nodeSelector" || seg[2] == "tolerations"
 	}
 	return false
 }
 
 // docEnd는 YAML 문서 끝 표시(...)다. 이 뒤에는 --- 없이도 새 문서가 올 수 있다.
-var docEnd = regexp.MustCompile(`(?m)^\.\.\.([ \t#\r]|$)`)
+var docEnd = regexp.MustCompile(`^\.\.\.([ \t#]|$)`)
+
+// moreDocuments는 문서가 둘 이상인지 본다. 끝 표시(...) 뒤에 빈 줄과 주석만 있으면 문서 하나다.
+// 이 검사와 엔진은 첫 문서만 읽지만, 첨부로 남은 파일을 다른 도구가 읽으면 뒤 문서도 적용될 수 있다.
+func moreDocuments(s string) bool {
+	if strings.Contains(s, "\n---") {
+		return true
+	}
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if !docEnd.MatchString(strings.TrimRight(line, "\r")) {
+			continue
+		}
+		for _, rest := range lines[i+1:] {
+			if r := strings.TrimSpace(rest); r != "" && !strings.HasPrefix(r, "#") {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
 
 func parseYAMLObject(s string) (map[string]any, error) {
-	// 이 검사와 엔진은 첫 문서만 읽지만, 첨부로 남은 파일을 다른 도구가 읽으면 뒤 문서도 적용될 수 있다.
-	if strings.Contains(s, "\n---") || docEnd.MatchString(s) {
+	if moreDocuments(s) {
 		return nil, fmt.Errorf("문서가 여러 개임")
 	}
 	var doc map[string]any

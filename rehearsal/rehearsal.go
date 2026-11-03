@@ -225,7 +225,11 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 	}
 
 	// 1. 샌드박스
-	sc, err := sandbox.ForCNPG(ctx, c.Admin, sandbox.Config{App: SandboxApp(cur.Plan.Source.Namespace)})
+	base, err := SandboxConfig(SandboxApp(cur.Plan.Source.Namespace), cur.Manifest)
+	if err != nil {
+		return a, nil, err
+	}
+	sc, err := sandbox.ForCNPG(ctx, c.Admin, base)
 	if err != nil {
 		return a, nil, err
 	}
@@ -238,7 +242,7 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 	}
 	a.Namespace = sb.Namespace
 	ses.Log(ctx, agentlog.Event{Type: agentlog.ToolResult, Tool: "sandbox_create", Status: "ok", Duration: time.Since(t0),
-		Output: map[string]any{"namespace": sb.Namespace, "expiresAt": sb.ExpiresAt, "networkPolicy": "기본 차단 + CNPG 오퍼레이터·API 서버", "quota": "CPU 4, 메모리 8Gi, Pod 20"}})
+		Output: map[string]any{"namespace": sb.Namespace, "expiresAt": sb.ExpiresAt, "networkPolicy": "기본 차단 + CNPG 오퍼레이터·API 서버", "quota": fmt.Sprintf("CPU %s, 메모리 %s, Pod 20", base.CPU, base.Memory)}})
 	defer cleanupAttempt(ctx, c, ses, &a)
 
 	// 2. AI 권한(샌드박스 토큰)과 격리 검사
@@ -447,7 +451,7 @@ func logIsolation(ctx context.Context, ses agentlog.Session, rs []sandbox.CheckR
 }
 
 func isolationGuard(r sandbox.CheckResult) string {
-	if r.Name == "host-pod-create" && r.Detail != "" {
+	if (r.Name == "host-pod-create" || r.Name == "host-pod-admission") && r.Detail != "" {
 		return r.Detail
 	}
 	if strings.HasPrefix(r.Command, "kubectl") {

@@ -32,6 +32,13 @@ const (
 
 	namePrefix = "sandbox-"
 
+	// DefaultCPU, DefaultMemory는 샌드박스 Quota 기본값(데모 값)이다. 리허설은 대상 매니페스트만큼 더 잡는다.
+	DefaultCPU    = "4"
+	DefaultMemory = "8Gi"
+	// DefaultContainerCPU, DefaultContainerMemory는 자원을 적지 않은 컨테이너에 LimitRange가 주는 limits다.
+	DefaultContainerCPU    = "500m"
+	DefaultContainerMemory = "512Mi"
+
 	// PodSecurityEnforce, PodSecurityLevel은 샌드박스 네임스페이스에 거는 Pod Security Admission 기준이다.
 	// CNPG 인스턴스 Pod도 뜰 수 있게 restricted가 아니라 baseline을 쓴다.
 	PodSecurityEnforce = "pod-security.kubernetes.io/enforce"
@@ -121,10 +128,10 @@ func (c Config) withDefaults() (Config, error) {
 		c.TTL = time.Hour
 	}
 	if c.CPU == "" {
-		c.CPU = "4"
+		c.CPU = DefaultCPU
 	}
 	if c.Memory == "" {
-		c.Memory = "8Gi"
+		c.Memory = DefaultMemory
 	}
 	if c.Pods == 0 {
 		c.Pods = 20
@@ -271,7 +278,7 @@ func Build(c Config, now time.Time) (Objects, error) {
 			ObjectMeta: meta("sandbox-defaults"),
 			Spec: corev1.LimitRangeSpec{Limits: []corev1.LimitRangeItem{{
 				Type:           corev1.LimitTypeContainer,
-				Default:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("512Mi")},
+				Default:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(DefaultContainerCPU), corev1.ResourceMemory: resource.MustParse(DefaultContainerMemory)},
 				DefaultRequest: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("128Mi")},
 			}}},
 		},
