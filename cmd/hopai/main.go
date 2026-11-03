@@ -203,6 +203,11 @@ func printRehearsalWarnings(w io.Writer, rep *rehearsal.Report) {
 }
 
 func reportRehearsal(w io.Writer, rep *rehearsal.Report, err error, ref string, revision int64) int {
+	if rep != nil && rep.Passed && errors.Is(err, errCandidate) {
+		// 리포트에는 passed가 남으므로 리허설 실패로 안내하면 원인을 잘못 읽는다.
+		fmt.Fprintf(w, "리허설은 통과했지만 플랫폼에 올라간 후보가 리허설한 것과 다릅니다 (%v). Plan %s는 승인하지 마세요\n", err, ref)
+		return 1
+	}
 	if rep == nil || !rep.Passed || err != nil {
 		fmt.Fprintf(w, "리허설을 통과하지 못했습니다. Plan %s는 승인하지 마세요\n", ref)
 		return 1
@@ -230,10 +235,13 @@ func submit(ctx context.Context, pc *client.Client, p *plan.Proposal) (*apiv1.Pl
 	return rec, plan.SHA256Hex(raw), err
 }
 
+// errCandidate는 플랫폼에 올라간 Plan이나 첨부가 리허설한 후보와 다를 때다.
+var errCandidate = errors.New("후보 불일치")
+
 // matchCandidate는 리허설한 후보가 플랫폼에 올라간 Plan 본문(submitted)과 target.yaml 첨부와 같은지 본다.
 func matchCandidate(c plan.Digest, submitted string, rec *apiv1.PlanRecord) error {
 	if c.PlanSHA256 != submitted {
-		return fmt.Errorf("리허설한 Plan(%.12s)과 제출한 Plan %s(%.12s)이 다름", c.PlanSHA256, rec.Ref, submitted)
+		return fmt.Errorf("%w: 리허설한 Plan(%.12s)과 제출한 Plan %s(%.12s)이 다름", errCandidate, c.PlanSHA256, rec.Ref, submitted)
 	}
 	attached := ""
 	if rec.Attachments != nil {
@@ -244,7 +252,7 @@ func matchCandidate(c plan.Digest, submitted string, rec *apiv1.PlanRecord) erro
 		}
 	}
 	if c.ManifestSHA256 != attached {
-		return fmt.Errorf("리허설한 매니페스트(%.12s)와 Plan %s의 %s 첨부(%.12s)가 다름", c.ManifestSHA256, rec.Ref, plan.ManifestName, attached)
+		return fmt.Errorf("%w: 리허설한 매니페스트(%.12s)와 Plan %s의 %s 첨부(%.12s)가 다름", errCandidate, c.ManifestSHA256, rec.Ref, plan.ManifestName, attached)
 	}
 	return nil
 }

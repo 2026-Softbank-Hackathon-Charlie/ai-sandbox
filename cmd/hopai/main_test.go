@@ -25,6 +25,7 @@ func TestReportRehearsalSeparatesWarningsFromExecution(t *testing.T) {
 		{"execution failed with warning", `{"passed":false,"warnings":["cleanup failed password=do-not-print"]}`, nil, 1, true},
 		{"fatal", `{"passed":true}`, errors.New("execution interrupted"), 1, false},
 		{"no report", "null", nil, 1, false},
+		{"candidate mismatch", `{"passed":true}`, matchCandidate(plan.Digest{PlanSHA256: "ppp"}, "other", &apiv1.PlanRecord{Ref: "pln_test"}), 1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var rep *rehearsal.Report
@@ -49,6 +50,11 @@ func TestReportRehearsalSeparatesWarningsFromExecution(t *testing.T) {
 			}
 			if !strings.Contains(text, "pln_test") || tc.code == 0 && !strings.Contains(text, "revision 4") {
 				t.Fatalf("review candidate missing: %s", text)
+			}
+			// 리허설은 통과했는데 후보만 다르면 리허설 실패로 안내하지 않는다.
+			failed := tc.code != 0 && !errors.Is(tc.err, errCandidate)
+			if strings.Contains(text, "통과하지 못했습니다") != failed {
+				t.Fatalf("candidate mismatch must not read as a failed rehearsal: %s", text)
 			}
 		})
 	}
