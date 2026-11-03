@@ -48,7 +48,7 @@ Plan 계약 갱신: 2026-11-02 · [platform OpenAPI](https://github.com/2026-Sof
 | 3 | 제출 | `hopai` (agent 토큰) | 검사를 통과한 Plan | `pending_approval` Plan, 첨부 `target.yaml` | — |
 | 4 | 리허설 | 엔진, 대상 클러스터 샌드박스 (`rehearsal` 세션) | Plan, 매니페스트, 테스트 데이터 | 단계별 결과, 격리 검사, 근거 | 5로 |
 | 5 | 진단·수정안 | AI (샌드박스 조회 도구, `diagnose` 세션) | 이번 리허설 로그만 (가린 뒤) | 원인, 근거, 수정안 | 사본에 적용해 4를 새 샌드박스에서 다시 (최대 3회) |
-| 6 | 첨부 | `hopai` | 고친 매니페스트, 리허설 리포트 | 첨부 갱신 (revision 오름) | — |
+| 6 | 첨부 | `hopai` | 리허설 리포트, 통과했으면 고친 매니페스트 | 첨부 갱신 (revision 오름) | 통과하지 못하면 리포트만 올리고 종료 코드 1 |
 | 7 | 승인 | 운영자 (콘솔) | Plan, 첨부, AI 세션 기록 | 화면의 revision으로 승인 / 반려 | — |
 | 8 | 실행 | 플랫폼과 엔진 | 승인된 Plan | 이전 결과, 증거 | 원복 경계에 따라 원복 또는 정지 (8장) |
 
@@ -204,7 +204,7 @@ AI의 출력은 엔진 Plan, 대상 CNPG 매니페스트, 근거를 묶은 JSON�
 - 플랫폼에 보내기 전에 문자열의 비밀값과 비밀처럼 보이는 키(token, password 등) 아래 값을 가린다. 플랫폼도 저장 전에 가린다.
 - 기록 요청이 실패해도 작업은 멈추지 않는다. 검사를 통과한 결과는 그대로 쓰고, 남기지 못한 기록은 경고로 알린다(`OnLogError`).
 - 계획 세션은 Plan 제출 전에 열리므로 planRef가 없다. 그래서 리허설 세션(planRef 있음)의 첫 기록에 planRef와 계획 세션 ID를 남겨, 승인 화면에서 계획 세션을 찾아갈 수 있게 한다. 리허설과 진단 세션은 planRef와 함께 열린다.
-- 토큰은 `ANTHROPIC_API_KEY`, 플랫폼 agent 토큰은 환경 변수로만 읽는다.
+- Anthropic API 키(`ANTHROPIC_API_KEY`)와 플랫폼 agent 토큰은 환경 변수로만 읽는다.
 
 ## 5. 도구 허용 목록
 
@@ -264,7 +264,7 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 6. 엔진 단계 이벤트는 `engine.<단계>` 도구 호출·결과로 리허설 세션에 남는다.
 7. 통과 기준: 엔진 결과 `succeeded`와 실제 합성 데이터 검증 증거가 모두 필요하다. 각 스키마의 `rehearsal_orders/items`를 명시적으로 비교하고, fence 비교와 verify 결과에서 모든 fixture의 행 수가 예상값과 일치하며 0보다 커야 한다. 누락·중복·빈 검증은 실패다. 각 시도의 `coverage`에 실제 원본·대상·검사 행 수를 남긴다. 운영 Plan의 테이블 필터는 유지되며, 이 coverage는 합성 데이터에 대한 것이다.
 8. 실패하면 샌드박스가 살아 있는 동안 AI가 진단한다(샌드박스 조회 도구: `sandbox_events`, `sandbox_cnpg_status`, `sandbox_pvcs`, 대상 환경의 `list_storage_classes`, `node_capacity`). 수정안이 검사를 통과하면 새 샌드박스에서 다시 돌린다. 최대 3회다.
-9. 끝나면 샌드박스 삭제를 요청한다. 각 시도의 `cleanup.status`는 `delete_requested`(요청 수락) 또는 `failed`이며, 요청 수락을 namespace 삭제 완료로 간주하지 않는다. 삭제 실패의 원인은 마스킹하여 보고서와 경고에 남긴다. 고친 매니페스트와 리허설 리포트(`rehearsal-report.json`)를 Plan 첨부로 올린다. Plan 값(`plan-param`)이 바뀌었으면 Plan을 새로 제출하고, 앞의 Plan은 운영자가 반려한다(agent 토큰은 반려할 수 없다).
+9. 끝나면 샌드박스 삭제를 요청한다. 각 시도의 `cleanup.status`는 `delete_requested`(요청 수락) 또는 `failed`이며, 요청 수락을 namespace 삭제 완료로 간주하지 않는다. 삭제 실패의 원인은 마스킹하여 보고서와 경고에 남긴다. 리허설 리포트(`rehearsal-report.json`)는 결과와 상관없이 Plan 첨부로 올린다. 수정안은 **리허설을 통과했을 때만** 반영한다. 고친 매니페스트는 `target.yaml` 첨부로 올리고, Plan 값(`plan-param`)이 바뀌었으면 Plan을 새로 제출한다. 앞의 Plan은 운영자가 반려한다(agent 토큰은 반려할 수 없다). 통과하지 못한 수정안이 승인 대상 revision이 되지 않게 하기 위해서다.
 10. 리포트에는 형식 버전 `schemaVersion: hopcharlie.rehearsal/v1`과 리허설한 후보 `candidate`가 들어간다(각 시도에도 `candidate`가 있다). `candidate.planSha256`은 `POST /v1/plans`로 보낸 본문의 SHA-256이고, `candidate.manifestSha256`은 `target.yaml` 첨부 내용의 SHA-256이다(매니페스트가 없는 Plan이면 비어 있다). 플랫폼 승인 게이트(platform #24)는 이 값을 저장된 Plan 본문과 첨부의 sha256과 비교한다. revision은 넣지 않는다. 리포트를 첨부하면 revision이 올라가서 자기 참조가 되기 때문이다. `hopai`는 리포트를 올리기 전에 같은 비교를 하고, 다르면 종료 코드 1로 끝난다. 해시는 입력이 같다는 것만 보장하며, 리허설을 실제로 했다는 것은 이 runner를 믿는 데 기댄다.
 
 `passed`는 엔진 실행과 합성 데이터 검증 결과다. 이벤트 전송·세션 종료 기록·정리 실패는 별도의 `warnings`에 남기며 성공한 실행 결과를 뒤집지 않는다. CLI는 경고를 출력하고 같은 실행 판정으로 종료한다. 실행 실패·취소나 필수 Plan/리포트 첨부 실패는 종료 코드 1이다. 세션을 처음 열지 못하면 실행하지 않는다. 취소 후에도 정리는 최대 60초, 최종 세션 기록은 별도의 제한 시간(기본 5초) 안에서 시도한다. 기록 실패 시 플랫폼 세션이 갱신되지 않았을 수 있으므로 보고서의 경고를 확인한다. `cleanup.status: failed`인 namespace는 운영자가 확인하고 `sandboxctl sweep` 등으로 정리해야 한다.
@@ -290,7 +290,9 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 
 ## 10. 날짜별 (D 영역)
 
-| 날짜 | 목표 | 상태 |
+목표일보다 먼저 끝난 항목도 상태에 완료로 적는다 (11/3 기준).
+
+| 목표일 | 목표 | 상태 |
 |---|---|---|
 | 11/2 (월) | 조사 도구, 계획 프롬프트 | 완료 (`get_app`, `list_storage_classes`, `node_capacity`, `get_cnpg_cluster`) |
 | 11/3 (화) | Plan 검사, 재요청, 고정 검사 | 완료 (엔진 Plan 기준) |
