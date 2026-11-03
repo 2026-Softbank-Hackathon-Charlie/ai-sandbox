@@ -2,7 +2,10 @@ package dbstats
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,5 +56,23 @@ func TestMeasureLive(t *testing.T) {
 		t.Errorf("window만큼 재야 함: %v", s.WindowSeconds)
 	case s.WALBytesPerSecond <= 0:
 		t.Errorf("쓰는 동안의 WAL 속도가 0보다 커야 함: %v", s.WALBytesPerSecond)
+	}
+}
+
+// TestMeasureLiveAuth는 실제 서버가 비밀번호를 거절할 때 ErrAuth로 구분하는지 본다.
+func TestMeasureLiveAuth(t *testing.T) {
+	dsn := os.Getenv("DBSTATS_TEST_DSN")
+	if dsn == "" {
+		t.Skip("DBSTATS_TEST_DSN이 없음")
+	}
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WRONG_PGPASSWORD", "wrong-password")
+	bad := fmt.Sprintf("postgres://%s:${WRONG_PGPASSWORD}@%s:%d/%s?sslmode=disable", cfg.User, cfg.Host, cfg.Port, cfg.Database)
+	_, err = Measure(context.Background(), bad, time.Second)
+	if !errors.Is(err, ErrAuth) || strings.Contains(err.Error(), "wrong-password") {
+		t.Fatalf("인증 거절은 ErrAuth로, 비밀번호 없이: %v", err)
 	}
 }
