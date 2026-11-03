@@ -9,6 +9,7 @@
 //	ANTHROPIC_API_KEY   Claude API 키
 //	PLATFORM_URL        플랫폼 API 주소
 //	PLATFORM_TOKEN      플랫폼 agent 토큰 (Plan 제출, 첨부, 에이전트 세션. 승인은 못 함)
+//	<원본>_PGPASSWORD   원본 DSN의 ${VAR}. 있으면 계획 전에 원본을 실측해 접속 수·초기 복사 시간을 검사한다
 //
 // 예:
 //
@@ -39,6 +40,7 @@ import (
 	"github.com/2026-Softbank-Hackathon-Charlie/platform/pkg/client"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/agentlog"
+	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/dbstats"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/llm"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/mask"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/plan"
@@ -65,6 +67,7 @@ func main() {
 	fs.Var(&targets, "target", "샌드박스에서 막혀야 하는 곳 <이름>=<호스트>:<포트> (예: 운영 DB, 여러 번)")
 	rows := fs.Int("rows", 20000, "리허설 테스트 데이터 행 수")
 	maxRuns := fs.Int("max-runs", 3, "리허설 최대 실행 횟수")
+	noMeasure := fs.Bool("no-measure", false, "원본 실측을 건너뜀 (접속 수·초기 복사 검사 없이 계획)")
 	out := fs.String("out", "", "리포트 JSON을 쓸 파일 (비우면 표준 출력)")
 	must(fs.Parse(os.Args[2:]))
 	for name, v := range map[string]string{"-app": *app, "-from": *from, "-to": *to, "-sandbox-kubeconfig": *sbKube} {
@@ -97,7 +100,20 @@ func main() {
 	b, _ := json.Marshal(d)
 	must(json.Unmarshal(b, &draft))
 
-	// 2. AI 계획
+	// 2. 원본 실측. 플랫폼은 이전을 시작할 때 같은 값을 재고 부족하면 막는다(409 capacity_insufficient).
+	// 승인 뒤에 막히지 않도록 계획에 쓴다. 못 재면 용량 검사 없이 계획하고, 플랫폼이 시작할 때 잰다.
+	var stats *plan.SourceStats
+	if !*noMeasure {
+		if s, err := dbstats.Measure(ctx, draft.Source.DSN, 0); err != nil {
+			fmt.Fprintf(os.Stderr, "경고: %v. 접속 수·초기 복사 검사 없이 계획합니다\n", err)
+		} else {
+			stats = s
+			fmt.Fprintf(os.Stderr, "원본 실측: 세션 %d (대상 max_connections %d 이상 필요), 크기 %d바이트, 변경 %.0f바이트/초\n",
+				s.Sessions, s.RequiredConnections(), s.Bytes, s.WALBytesPerSecond)
+		}
+	}
+
+	// 3. AI 계획
 	clusters := map[string]llm.Cluster{}
 	for _, e := range envs {
 		cfg, err := restConfig(e.path, e.context)
@@ -113,15 +129,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, "경고: 에이전트 기록 일부를 플랫폼에 남기지 못함:", err)
 	}})
 	scope := llm.PlanScope{App: *app, Namespace: draft.Source.Namespace, Envs: []string{*from, *to}}
-	prop, planSession, err := agent.Plan(ctx, llm.PlanInput{App: *app, Draft: &draft, Tools: llm.PlanTools(scope, pc, clusters)})
+	prop, planSession, err := agent.Plan(ctx, llm.PlanInput{App: *app, Draft: &draft, Tools: llm.PlanTools(scope, pc, clusters), Source: stats})
 	must(err)
 
-	// 3. 제출과 첨부
+	// 4. 제출과 첨부
 	rec, submitted, err := submit(ctx, pc, prop)
 	must(err)
 	fmt.Fprintf(os.Stderr, "Plan %s 제출 (revision %d, 계획 세션 %s)\n", rec.Ref, rec.Revision, planSession)
 
-	// 4. 리허설
+	// 5. 리허설
 	adminCfg, err := restConfig(*sbKube, *sbCtx)
 	must(err)
 	admin, err := kubernetes.NewForConfig(adminCfg)
@@ -149,8 +165,11 @@ func main() {
 	})
 
 	printRehearsalWarnings(os.Stderr, rep)
-	// 5. 수정안 반영과 리포트 첨부
+	// 6. 수정안 반영과 리포트 첨부
 	result := map[string]any{"planRef": rec.Ref, "planSession": planSession}
+	if stats != nil {
+		result["sourceStats"] = stats
+	}
 	if rep != nil {
 		result["rehearsal"] = rep
 		// 수정안은 리허설을 통과했을 때만 올린다. 통과하지 못한 수정안이 승인 대상 revision이 되면 안 된다.

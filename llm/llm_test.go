@@ -426,3 +426,29 @@ func TestLogFailureDoesNotDiscardResult(t *testing.T) {
 		t.Fatal("기록 실패는 알려야 함")
 	}
 }
+
+func TestPlanUsesSourceStats(t *testing.T) {
+	v := readFile(t, "../plan/testdata/proposal.json")
+	withConns := strings.Replace(v, `instances: 2\n`, `instances: 2\n  postgresql:\n    parameters:\n      max_connections: \"200\"\n`, 1)
+	if withConns == v {
+		t.Fatal("max_connections를 넣을 자리가 없음")
+	}
+	f := &fakeAPI{replies: []reply{{text: v}, {text: withConns}}}
+	a, _ := newAgent(t, f)
+	stats := &plan.SourceStats{Sessions: 80, MaxConnections: 200, Bytes: 2 << 30, WALBytesPerSecond: 1 << 20}
+	p, _, err := a.Plan(context.Background(), PlanInput{App: "moimroom", Draft: draft(t), Source: stats})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Source != stats {
+		t.Fatal("결과에 실측값이 붙어 있어야 수정안 검사에도 쓰임")
+	}
+	first, _ := json.Marshal(f.requests[0]["messages"])
+	if !strings.Contains(string(first), "source_stats") || !strings.Contains(string(first), `requiredMaxConnections\": 96`) {
+		t.Fatalf("실측값과 요구 접속 수가 AI에 전달돼야 함: %s", first)
+	}
+	second, _ := json.Marshal(f.requests[1]["messages"])
+	if !strings.Contains(string(second), "max_connections") || !strings.Contains(string(second), "96 이상") {
+		t.Fatalf("max_connections가 없으면 다시 물어야 함: %s", second)
+	}
+}
