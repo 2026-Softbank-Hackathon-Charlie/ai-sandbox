@@ -351,16 +351,21 @@ go test ./...
 REHEARSAL_KUBECONFIG=<kubeconfig> REHEARSAL_SC=standard go test -tags cluster -run Cluster -v -timeout 40m ./rehearsal/
 ```
 
-로컬 kind(kindnet, CNPG 1.25.1)에서 확인한 결과 (2026-11-02, [#8](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/8) 시점. 격리 검사가 10개 항목이던 때):
+로컬 kind(kindnet, CNPG 1.25.1)에서 확인한 결과 (2026-11-03, [#16](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/16) 머지 후 main 코드):
 
 | 경우 | 결과 |
 |---|---|
-| 대상 StorageClass `standard` | 격리 검사 10/10 → 임시 원본과 테스트 데이터 → 엔진 9단계 모두 성공, 쓰기 보류 8.7초, 전체 77초 |
-| 대상 StorageClass `gp3` (kind에 없음) | prepare에서 51초 만에 멈춤, 근거 `storageclass.storage.k8s.io "gp3" not found`, 쓰기 보류 전이라 원본 그대로 |
+| 대상 StorageClass `standard` | 격리 검사 10/10 → 임시 원본과 테스트 데이터(5,000행) → 엔진 9단계 모두 성공, 쓰기 보류 9.1초, 전체 82초 |
+| 대상 StorageClass `gp3` (kind에 없음) | prepare에서 55초 만에 멈춤, 근거 `storageclass.storage.k8s.io "gp3" not found`, 쓰기 보류 전이라 원본 그대로 |
+
+- 격리 검사 10개: 열려야 하는 2개(자기 네임스페이스 조회, DNS)와 막혀야 하는 8개(운영 Secret 읽기, 자기 NetworkPolicy 삭제, Role 수정, 토큰 발급, 운영 Deployment 삭제, hostNetwork·hostPath Pod 생성, 메타데이터 주소, CNPG 웹훅)가 모두 기대대로 나왔다. 호스트 Pod는 Pod Security가 막았고, CNPG Pod는 `baseline` 아래에서 정상으로 떴다. 증거 대상인 CNPG 웹훅은 이름을 찾은 뒤 막혔다.
+- 운영 DB 접속 검사는 이 테스트에 대상을 넣지 않아 빠졌다. `hopai`는 `-target`으로 넣는다.
+- 두 샌드박스 모두 끝나고 삭제 요청(`delete_requested`)이 들어갔다.
+- 이전 결과(11/2, [#8](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/8) 시점, Pod Security와 `host-pod-create` 전): 쓰기 보류 8.7초, 전체 77초 / `gp3` 51초.
 
 알려진 한계:
 
-- 위 kind 결과 뒤에 격리 검사가 바뀌었다. [#10](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/10)에서 `host-pod-create`가 더해져 11개 항목이 되었고, Pod Security `baseline`이 걸렸다. [#11](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/11)부터는 증거 대상(API 서버, CNPG 웹훅)을 찾지 못하면 실패한다. baseline 아래에서 CNPG Pod가 뜨는지, 격리 검사가 11/11인지 kind에서 다시 확인해야 한다.
+- 실제 클러스터 확인은 로컬 kind뿐이다. EKS·GKE·k3s에서 NetworkPolicy와 Pod Security가 실제로 동작하는지는 A 영역과 같이 확인해야 한다(6장).
 - 쿠버네티스 경고 이벤트로 드러나지 않는 실패(예: 복제 인증서 오류)는 Plan의 `catchupTimeout`까지 기다린다.
 - AI가 실제로 계획과 진단을 하는 흐름(`hopai run`)과 플랫폼 세션 기록은 가짜 API로만 확인했다. 실제 API 키와 플랫폼으로 돌려 봐야 한다.
 - 파일(rclone), 게이트웨이와 카나리, 부하(k6)는 리허설하지 않는다.
