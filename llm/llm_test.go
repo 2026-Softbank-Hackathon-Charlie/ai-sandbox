@@ -435,7 +435,7 @@ func TestPlanUsesSourceStats(t *testing.T) {
 	}
 	f := &fakeAPI{replies: []reply{{text: v}, {text: withConns}}}
 	a, _ := newAgent(t, f)
-	stats := &plan.SourceStats{Sessions: 80, MaxConnections: 200, Bytes: 2 << 30, WALBytesPerSecond: 1 << 20}
+	stats := &plan.SourceStats{Sessions: 80, MaxConnections: 200, MaxWorkerProcesses: 8, Bytes: 2 << 30, WALBytesPerSecond: 1 << 20}
 	p, _, err := a.Plan(context.Background(), PlanInput{App: "moimroom", Draft: draft(t), Source: stats})
 	if err != nil {
 		t.Fatal(err)
@@ -444,11 +444,24 @@ func TestPlanUsesSourceStats(t *testing.T) {
 		t.Fatal("결과에 실측값이 붙어 있어야 수정안 검사에도 쓰임")
 	}
 	first, _ := json.Marshal(f.requests[0]["messages"])
-	if !strings.Contains(string(first), "source_stats") || !strings.Contains(string(first), `requiredMaxConnections\": 96`) {
+	if !strings.Contains(string(first), "source_stats") || !strings.Contains(string(first), `requiredMaxConnections\": 200`) {
 		t.Fatalf("실측값과 요구 접속 수가 AI에 전달돼야 함: %s", first)
 	}
 	second, _ := json.Marshal(f.requests[1]["messages"])
-	if !strings.Contains(string(second), "max_connections") || !strings.Contains(string(second), "96 이상") {
+	if !strings.Contains(string(second), "max_connections") || !strings.Contains(string(second), "200 이상") {
 		t.Fatalf("max_connections가 없으면 다시 물어야 함: %s", second)
+	}
+}
+
+func TestPlanInfeasibleSourceSkipsAI(t *testing.T) {
+	f := &fakeAPI{}
+	a, sink := newAgent(t, f)
+	big := &plan.SourceStats{Sessions: 10, MaxConnections: 100, Bytes: 200 << 30, WALBytesPerSecond: 1 << 20}
+	_, _, err := a.Plan(context.Background(), PlanInput{App: "moimroom", Draft: draft(t), Source: big})
+	if !errors.Is(err, ErrInfeasible) || !strings.Contains(err.Error(), "catchupTimeout 상한") {
+		t.Fatalf("계획 불가 이유를 바로 돌려줘야 함: %v", err)
+	}
+	if len(f.requests) != 0 || len(sink.Sessions) != 0 {
+		t.Fatalf("AI를 부르지 않아야 함: 요청 %d번, 세션 %d개", len(f.requests), len(sink.Sessions))
 	}
 }

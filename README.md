@@ -164,7 +164,7 @@ AI의 출력은 엔진 Plan, 대상 CNPG 매니페스트, 근거를 묶은 JSON�
 | 매니페스트 spec | 키는 허용 목록만 (슈퍼유저, 백업 대상, 관리 계정, monitoring 금지). `replica`는 self·primary·source만(primary·source는 원본). 시작은 `bootstrap.pg_basebackup` 필수(source는 원본, secret은 `<원본>-app`, database·owner는 원본 DSN과 같음). `storage`(필수)·`walStorage`는 size(문자열, 0보다 크고 2Ti 이하)·storageClass만. `affinity`는 DB 전용 노드용 nodeSelector·tolerations(key 필수)·Pod 분산 설정만, control-plane 노드는 금지. `resources`는 requests·limits의 cpu(16 이하)·memory(64Gi 이하)만. `postgresql`은 성능·WAL 보존 설정(`max_connections`, `shared_buffers`, `wal_keep_size` 등)만, 값은 문자열. instances 1~5 정수, smartShutdownTimeout 0~600 정수. `imageName`은 `ghcr.io/cloudnative-pg/postgresql` 이미지만 |
 | 복제 접속 | `externalClusters`는 원본·대상 이름만 쓰고 host·port는 Plan의 해당 DSN과 같음, user는 `streaming_replica`, sslmode는 require·verify-ca·verify-full만, dbname은 postgres만, 인증서 시크릿은 `<이름>-replication`·`<이름>-ca`만(비밀번호 키 금지) |
 | 근거 | notes는 1~10개, 각 500자 이하, 빈 글 금지 (승인 화면과 AI 활동 기록에 그대로 보임) |
-| 용량 (원본을 실측했을 때) | 대상을 새로 만들면 `postgresql.parameters.max_connections`를 정해야 하고 원본 클라이언트 세션 수 × 1.2 이상이어야 함. `catchupTimeout`은 원본 전체를 100 MiB/s(제안값)로 복사하는 시간보다 길어야 하고, 원본 변경 속도가 이 복사 속도 이상이면 거절. 플랫폼이 이전을 시작할 때 같은 기준(platform `internal/preflight/capacity`)으로 재고 막으므로, 승인 뒤에 막히지 않게 계획 단계에서 먼저 본다. 진단 수정안에도 같은 실측값으로 다시 본다 |
+| 용량 (원본을 실측했을 때) | 대상을 새로 만들면 `postgresql.parameters.max_connections`를 정해야 하고, 원본 max_connections 이상(대상은 원본을 따라가는 hot standby라 작으면 뜨지 않음)이면서 원본 클라이언트 세션 수 × 1.2 이상(플랫폼 기준)이어야 함. `max_worker_processes`도 원본 이상(정하지 않으면 CNPG 기본값 32). `catchupTimeout`은 원본 전체를 100 MiB/s(제안값)로 복사하는 시간보다 길어야 함. 원본 변경 속도가 이 복사 속도 이상이거나 복사가 catchupTimeout 상한(15m)보다 오래 걸리면 AI를 부르지 않고 바로 멈춤(`llm.ErrInfeasible`). 플랫폼이 이전을 시작할 때 같은 기준(platform `internal/preflight/capacity`)으로 재고 막으므로, 승인 뒤에 막히지 않게 계획 단계에서 먼저 본다. 진단 수정안에도 같은 실측값으로 다시 본다 |
 
 수정안(진단 결과)은 두 종류다.
 
@@ -222,7 +222,7 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 | `get_cnpg_cluster` | 이번 이전의 두 환경, 앱 네임스페이스만. spec 중 instances, image, storage, resources, bootstrap, replica만 돌려줌 | 같음 |
 | 진단 도구 | 리허설 샌드박스 네임스페이스만 (7장) | 샌드박스 토큰 |
 
-원본 실측(`dbstats`)은 AI 도구가 아니다. `hopai`가 계획 전에 한 번 돌리고 숫자만 AI에 보여 준다. 원본 DSN에 읽기 전용(`default_transaction_read_only`)으로 붙어 클라이언트 세션 수, max_connections, DB 크기, 5초 동안의 WAL 생성 속도를 읽는다. 오류에는 주소나 서버 메시지를 담지 않는다. 비밀번호(`<원본>_PGPASSWORD`)가 없거나 접속하지 못하면 경고만 내고 용량 검사 없이 계획한다(`-no-measure`로 끌 수 있음).
+원본 실측(`dbstats`)은 AI 도구가 아니다. `hopai`가 계획 전에 한 번 돌리고 숫자만 AI에 보여 준다. 원본 DSN에 읽기 전용(`default_transaction_read_only`)으로 붙어 클라이언트 세션 수, max_connections, max_worker_processes, DB 크기, 5초 동안의 WAL 생성 속도를 읽는다. 실측하지 못하면 경고만 내고 용량 검사 없이 계획한다(`-no-measure`로 끌 수 있음). 경고에는 이유를 구분해 적는다: 비밀번호 환경 변수가 비어 있음(변수 이름), DSN 형식 오류, 인증 거절, 닿지 못함(DB 주소가 `*.ts.net`이라 실행기가 tailnet에 있어야 함), 값 일부를 읽지 못함. 주소, 비밀번호, 서버 메시지는 담지 않는다.
 
 ## 6. 샌드박스
 
@@ -324,7 +324,7 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 |---|---|---|
 | `plan` | AI 출력(엔진 Plan + 매니페스트 + 근거) 검사, 진단 수정안 검사와 사본 적용, 제출 본문과 후보 digest | 3, 7 |
 | `mask` | AI와 플랫폼에 보내기 전 비밀값 가리기 | 4 |
-| `dbstats` | 계획 전 원본 실측 (세션 수, max_connections, 크기, WAL 속도) | 3, 5 |
+| `dbstats` | 계획 전 원본 실측 (세션 수, max_connections, max_worker_processes, 크기, WAL 속도) | 3, 5 |
 | `agentlog` | 플랫폼 에이전트 세션 기록 (`/v1/agent/sessions`) | 4 |
 | `llm` | 도구를 쓰는 에이전트 (계획, 진단, 검사에 걸리면 대화를 이어 재요청), 읽기 전용 조사 도구 | 4, 5 |
 | `sandbox` | 샌드박스 생성·삭제, 1시간 토큰, 만료 정리, CNPG 모드, 격리 검사 | 6 |

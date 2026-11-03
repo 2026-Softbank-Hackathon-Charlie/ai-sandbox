@@ -108,8 +108,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "경고: %v. 접속 수·초기 복사 검사 없이 계획합니다\n", err)
 		} else {
 			stats = s
-			fmt.Fprintf(os.Stderr, "원본 실측: 세션 %d (대상 max_connections %d 이상 필요), 크기 %d바이트, 변경 %.0f바이트/초\n",
-				s.Sessions, s.RequiredConnections(), s.Bytes, s.WALBytesPerSecond)
+			fmt.Fprintf(os.Stderr, "원본 실측: 세션 %d, max_connections %d (대상 %d 이상 필요), max_worker_processes %d, 크기 %d바이트, 변경 %.0f바이트/초\n",
+				s.Sessions, s.MaxConnections, s.RequiredConnections(), s.MaxWorkerProcesses, s.Bytes, s.WALBytesPerSecond)
 		}
 	}
 

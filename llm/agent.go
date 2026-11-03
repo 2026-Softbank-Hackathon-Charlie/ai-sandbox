@@ -85,6 +85,8 @@ var (
 	ErrNoAnswer = errors.New("AI가 호출 상한 안에 답하지 않음")
 	// ErrBlocked는 도구가 허용 범위 밖의 요청을 막았을 때 돌려준다. 'blocked' 이벤트로 남는다.
 	ErrBlocked = errors.New("허용 범위 밖이라 막음")
+	// ErrInfeasible은 원본 실측값으로 보아 어떤 Plan도 검사를 통과할 수 없을 때다. AI를 부르지 않는다.
+	ErrInfeasible = errors.New("지금 상한값으로는 계획할 수 없음")
 )
 
 // Tool은 AI가 쓸 수 있는 도구 하나다. Run 안에서 허용 범위를 다시 검사한다.
