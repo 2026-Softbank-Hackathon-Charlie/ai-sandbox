@@ -72,6 +72,7 @@ type Config struct {
 type Attempt struct {
 	N         int                   `json:"n"`
 	Namespace string                `json:"namespace"`
+	Candidate plan.Digest           `json:"candidate"` // 이 회차에 돌린 계획
 	Passed    bool                  `json:"passed"`
 	Outcome   string                `json:"outcome,omitempty"` // 엔진 결과
 	Steps     map[string]string     `json:"steps,omitempty"`   // 단계별 상태
@@ -92,11 +93,17 @@ type CleanupResult struct {
 	Error  string `json:"error,omitempty"`
 }
 
+// ReportSchema는 rehearsal-report.json의 형식 버전이다. 플랫폼 승인 게이트(platform #24)가 이 값으로 읽는 법을 고른다.
+const ReportSchema = "hopcharlie.rehearsal/v1"
+
 // Report는 리허설 전체 결과다.
 type Report struct {
-	Passed   bool      `json:"passed"`
-	Attempts []Attempt `json:"attempts"`
-	Warnings []string  `json:"warnings,omitempty"`
+	SchemaVersion string `json:"schemaVersion"`
+	Passed        bool   `json:"passed"`
+	// Candidate는 Passed를 정한 마지막 회차의 계획이다. 승인할 Plan 본문과 target.yaml 첨부의 해시가 이 값과 같아야 한다.
+	Candidate plan.Digest `json:"candidate"`
+	Attempts  []Attempt   `json:"attempts"`
+	Warnings  []string    `json:"warnings,omitempty"`
 	// Final은 마지막 계획(수정안 반영)이다. Changed면 플랫폼에 다시 올려야 한다.
 	Final        *plan.Proposal `json:"-"`
 	Changed      bool           `json:"changed"`
@@ -143,7 +150,7 @@ func Rehearse(ctx context.Context, c Config) (*Report, error) {
 	if err != nil {
 		return nil, err
 	}
-	rep := &Report{Session: ses.ID()}
+	rep := &Report{SchemaVersion: ReportSchema, Session: ses.ID()}
 	if c.PlanSession != "" {
 		ses.Log(ctx, agentlog.Event{Type: agentlog.Message, Tool: "plan", Output: map[string]any{"planRef": c.PlanRef, "planSession": c.PlanSession, "planId": c.Proposal.Plan.ID}})
 	}
@@ -169,6 +176,7 @@ func Rehearse(ctx context.Context, c Config) (*Report, error) {
 	}
 	last := rep.Attempts[len(rep.Attempts)-1]
 	rep.Passed = last.Passed && fatal == nil
+	rep.Candidate = last.Candidate
 	rep.Final = cur
 	rep.Changed = cur != c.Proposal
 	if rep.Changed && cur.Manifest != c.Proposal.Manifest {
@@ -208,6 +216,9 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 	start := time.Now()
 	a = Attempt{N: n}
 	defer func() { a.DurationS = time.Since(start).Seconds() }()
+	if a.Candidate, fatal = cur.Digest(); fatal != nil {
+		return a, nil, fmt.Errorf("계획 해시 계산 실패: %w", fatal)
+	}
 	failf := func(format string, args ...any) {
 		a.Error = mask.String(fmt.Sprintf(format, args...))
 		ses.Log(ctx, agentlog.Event{Type: agentlog.Error, Status: fmt.Sprintf("attempt %d", n), Output: a.Error})

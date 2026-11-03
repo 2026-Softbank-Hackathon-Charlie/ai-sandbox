@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/2026-Softbank-Hackathon-Charlie/platform/pkg/apiv1"
+
+	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/plan"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/rehearsal"
 )
 
@@ -48,5 +51,28 @@ func TestReportRehearsalSeparatesWarningsFromExecution(t *testing.T) {
 				t.Fatalf("review candidate missing: %s", text)
 			}
 		})
+	}
+}
+
+func TestMatchCandidate(t *testing.T) {
+	att := func(sum string) *apiv1.PlanRecord {
+		list := []apiv1.PlanAttachment{{Name: "rehearsal-report.json", Sha256: "rrr"}, {Name: plan.ManifestName, Sha256: sum}}
+		return &apiv1.PlanRecord{Ref: "pln_test", Attachments: &list}
+	}
+	c := plan.Digest{PlanSHA256: "ppp", ManifestSHA256: "mmm"}
+	if err := matchCandidate(c, "ppp", att("mmm")); err != nil {
+		t.Fatalf("같은 후보인데 걸림: %v", err)
+	}
+	if err := matchCandidate(c, "other", att("mmm")); err == nil || !strings.Contains(err.Error(), "제출한 Plan") {
+		t.Fatalf("다른 Plan 본문을 놓침: %v", err)
+	}
+	if err := matchCandidate(c, "ppp", att("old")); err == nil || !strings.Contains(err.Error(), plan.ManifestName) {
+		t.Fatalf("리허설하지 않은 매니페스트 첨부를 놓침: %v", err)
+	}
+	if err := matchCandidate(c, "ppp", &apiv1.PlanRecord{Ref: "pln_test"}); err == nil {
+		t.Fatal("매니페스트 첨부가 없는데 통과함")
+	}
+	if err := matchCandidate(plan.Digest{PlanSHA256: "ppp"}, "ppp", &apiv1.PlanRecord{Ref: "pln_test"}); err != nil {
+		t.Fatalf("매니페스트 없는 Plan인데 걸림: %v", err)
 	}
 }

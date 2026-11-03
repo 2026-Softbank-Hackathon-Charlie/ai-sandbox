@@ -73,6 +73,10 @@ func TestRehearseFinalizesAfterCancellation(t *testing.T) {
 	if rep == nil || rep.Passed || !errors.Is(err, context.Canceled) || !ses.Done || ses.OK {
 		t.Fatalf("canceled execution = report:%+v, error:%v, session:%+v", rep, err, ses)
 	}
+	// 실패한 리포트도 어느 후보를 돌렸는지 남긴다. 승인 게이트가 passed와 함께 본다.
+	if want, _ := p.Digest(); rep.SchemaVersion != ReportSchema || rep.Candidate != want || rep.Attempts[0].Candidate != want || want.PlanSHA256 == "" {
+		t.Fatalf("report must name the rehearsed candidate: schema=%q candidate=%+v want=%+v", rep.SchemaVersion, rep.Candidate, want)
+	}
 	if ses.finishCtxErr != nil || ses.finishLimit <= 0 || ses.finishLimit > 5*time.Second {
 		t.Fatalf("finish must use a fresh bounded context: error=%v limit=%v", ses.finishCtxErr, ses.finishLimit)
 	}

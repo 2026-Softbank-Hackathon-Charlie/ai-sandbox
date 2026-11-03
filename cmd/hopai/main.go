@@ -117,7 +117,7 @@ func main() {
 	must(err)
 
 	// 3. 제출과 첨부
-	rec, err := submit(ctx, pc, prop)
+	rec, submitted, err := submit(ctx, pc, prop)
 	must(err)
 	fmt.Fprintf(os.Stderr, "Plan %s 제출 (revision %d, 계획 세션 %s)\n", rec.Ref, rec.Revision, planSession)
 
@@ -157,15 +157,21 @@ func main() {
 		if rep.Changed && rep.Passed && rerr == nil {
 			if !samePlan(&rep.Final.Plan, &prop.Plan) {
 				// 제출한 Plan은 고칠 수 없으므로 새로 제출한다. 앞의 Plan은 운영자가 반려한다(agent 토큰은 반려 못 함).
-				nrec, err := submit(ctx, pc, rep.Final)
+				nrec, nsub, err := submit(ctx, pc, rep.Final)
 				must(err)
 				fmt.Fprintf(os.Stderr, "Plan 값이 바뀌어 새 Plan %s 제출. 앞의 Plan %s는 반려해 주세요\n", nrec.Ref, rec.Ref)
 				result["supersedes"], result["planRef"] = rec.Ref, nrec.Ref
-				rec = nrec
+				rec, submitted = nrec, nsub
 			} else {
 				_, err := pc.PutPlanAttachment(ctx, rec.Ref, plan.ManifestName, []byte(rep.Final.Manifest))
 				must(err)
 			}
+		}
+		// 승인 게이트(platform #24)가 비교할 값을 올리기 전에 같은지 본다. 다르면 리포트는 남기되 승인 대상이 아니다.
+		if rep.Passed && rerr == nil {
+			cur, err := pc.GetPlan(ctx, rec.Ref)
+			must(err)
+			rerr = matchCandidate(rep.Candidate, submitted, cur)
 		}
 		rb, _ := json.MarshalIndent(rep, "", "  ")
 		_, err := pc.PutPlanAttachment(ctx, rec.Ref, "rehearsal-report.json", rb)
@@ -205,21 +211,42 @@ func reportRehearsal(w io.Writer, rep *rehearsal.Report, err error, ref string, 
 	return 0
 }
 
-func submit(ctx context.Context, pc *client.Client, p *plan.Proposal) (*apiv1.PlanRecord, error) {
-	raw, err := json.Marshal(p.Plan)
+// submit은 Plan을 제출하고 매니페스트를 첨부한다. 돌려주는 해시는 실제로 보낸 본문의 것이다.
+func submit(ctx context.Context, pc *client.Client, p *plan.Proposal) (*apiv1.PlanRecord, string, error) {
+	raw, err := p.SubmitBody()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	rec, err := pc.SubmitPlan(ctx, raw)
 	if err != nil {
-		return nil, fmt.Errorf("Plan 제출 실패: %w", err)
+		return nil, "", fmt.Errorf("Plan 제출 실패: %w", err)
 	}
-	if p.Plan.Target.Manifest == plan.ManifestRef {
+	if p.ManifestAttached() {
 		if _, err := pc.PutPlanAttachment(ctx, rec.Ref, plan.ManifestName, []byte(p.Manifest)); err != nil {
-			return nil, fmt.Errorf("매니페스트 첨부 실패: %w", err)
+			return nil, "", fmt.Errorf("매니페스트 첨부 실패: %w", err)
 		}
 	}
-	return pc.GetPlan(ctx, rec.Ref)
+	rec, err = pc.GetPlan(ctx, rec.Ref)
+	return rec, plan.SHA256Hex(raw), err
+}
+
+// matchCandidate는 리허설한 후보가 플랫폼에 올라간 Plan 본문(submitted)과 target.yaml 첨부와 같은지 본다.
+func matchCandidate(c plan.Digest, submitted string, rec *apiv1.PlanRecord) error {
+	if c.PlanSHA256 != submitted {
+		return fmt.Errorf("리허설한 Plan(%.12s)과 제출한 Plan %s(%.12s)이 다름", c.PlanSHA256, rec.Ref, submitted)
+	}
+	attached := ""
+	if rec.Attachments != nil {
+		for _, a := range *rec.Attachments {
+			if a.Name == plan.ManifestName {
+				attached = a.Sha256
+			}
+		}
+	}
+	if c.ManifestSHA256 != attached {
+		return fmt.Errorf("리허설한 매니페스트(%.12s)와 Plan %s의 %s 첨부(%.12s)가 다름", c.ManifestSHA256, rec.Ref, plan.ManifestName, attached)
+	}
+	return nil
 }
 
 func samePlan(a, b *eplan.Plan) bool {
