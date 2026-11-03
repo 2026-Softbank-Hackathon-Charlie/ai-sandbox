@@ -77,7 +77,9 @@ func TestParseRejectsBrokenAIOutput(t *testing.T) {
 
 		// 고정 규칙
 		{"fence 비교 끄기", replace(t, v, `"fenceGate": true`, `"fenceGate": false`), "끌 수 없음"},
-		{"쓰기 보류 너무 김", replace(t, v, `"maxDowntime": "30s"`, `"maxDowntime": "5m"`), "5s~1m0s"},
+		{"쓰기 보류 너무 김", replace(t, v, `"maxDowntime": "30s"`, `"maxDowntime": "5m"`), "5s~50s"},
+		// 게이트웨이는 55s(-max-hold) 기다린 쓰기에 503을 준다. 예산이 그에 가까우면 예산 안에서도 실패한다.
+		{"쓰기 보류가 게이트웨이 상한에 닿음", replace(t, v, `"maxDowntime": "30s"`, `"maxDowntime": "55s"`), "5s~50s"},
 		{"전환 시간 너무 김", replace(t, v, `"switchoverTimeout": "2m"`, `"switchoverTimeout": "30m"`), "switchoverTimeout"},
 		{"복제 지연 기준 너무 큼", replace(t, v, `"maxLagBytes": 1048576`, `"maxLagBytes": 999999999999`), "maxLagBytes"},
 		{"서버 파일 경로", replace(t, v, `"manifest": "attachment:target.yaml"`, `"manifest": "/etc/passwd"`), "서버 파일 경로"},

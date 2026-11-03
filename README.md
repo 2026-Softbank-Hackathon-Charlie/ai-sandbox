@@ -159,7 +159,7 @@ AI의 출력은 엔진 Plan, 대상 CNPG 매니페스트, 근거를 묶은 JSON�
 |---|---|
 | 초안과 같아야 함 | id, source 전체, target의 env·context·namespace·cluster·dsn, gateway, files 전체(위치, rclone, flags. 빼거나 더할 수 없음), verify의 schemas·writtenRecords (없음과 빈 목록은 같게 봄). AI가 데이터나 비밀번호를 다른 곳으로 보내지 못하게 한다 |
 | 고정 규칙 | `verify.fenceGate` 생략은 `true`로 정규화하고 `false`는 거절. `target.manifest`는 비우거나 `attachment:target.yaml`. 검증 테이블은 초안보다 줄일 수 없음(기존 필터의 테이블도 유지) |
-| 상한값 범위 (제안값) | 네 값 모두 필수이며 0은 거절. maxDowntime(쓰기 보류) 5s~60s (게이트웨이는 90s(`-max-hold`) 넘게 붙잡힌 쓰기에 503을 돌려주므로, 그 전에 끝나 실패한 요청이 없게 한다), switchoverTimeout 30s~3m, catchupTimeout 1m~15m, maxLagBytes 1 KiB~64 MiB |
+| 상한값 범위 (제안값) | 네 값 모두 필수이며 0은 거절. maxDowntime(쓰기 보류) 5s~50s (게이트웨이는 55s(`-max-hold`, 앞단 ALB의 유휴 타임아웃 60s보다 짧게) 넘게 붙잡힌 쓰기에 503을 돌려주므로, 그 전에 끝나 실패한 요청이 없게 한다), switchoverTimeout 30s~3m, catchupTimeout 1m~15m, maxLagBytes 1 KiB~64 MiB |
 | 매니페스트 | `postgresql.cnpg.io/v1` Cluster 하나, 이름·네임스페이스는 Plan의 대상과 같음, `spec.replica.primary`는 원본 클러스터, 시작은 `pg_basebackup`만(source는 원본, secret은 `<원본>-app`, database·owner는 원본 DSN과 같음), `externalClusters`는 원본·대상 이름만 쓰고 host·port는 Plan의 해당 DSN과 같아야 하며 user는 `streaming_replica`, 인증서 시크릿은 `<이름>-replication`·`<이름>-ca`만(비밀번호 키 금지), `imageName`은 `ghcr.io/cloudnative-pg/postgresql` 이미지만, spec 키는 허용 목록만 (슈퍼유저, 백업 대상, 관리 계정 키 금지), instances 1~5 |
 
 수정안(진단 결과)은 두 종류다.
