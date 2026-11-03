@@ -88,12 +88,13 @@ var hostRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.-]{0,251}[a-zA-Z0-9])?$
 var nameRe = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
 
 // CheckIsolation은 AI 토큰(aiCS)과 관리자 권한(adminCS)으로 차단 테스트를 돌린다.
-// 관리자 권한은 검사 Pod를 띄우고 로그를 읽는 데만 쓴다.
+// 관리자 권한은 검사 Pod를 띄우고 로그를 읽고, Pod Security를 dry-run으로 확인하는 데만 쓴다.
 func CheckIsolation(ctx context.Context, adminCS, aiCS kubernetes.Interface, sb *Sandbox, c IsolationConfig) ([]CheckResult, error) {
 	if c.ProdNamespace == "" {
 		return nil, fmt.Errorf("운영 네임스페이스를 정해야 함")
 	}
 	results := checkRBAC(ctx, aiCS, sb.Namespace, c.ProdNamespace)
+	results = append(results, checkPodSecurity(ctx, adminCS, sb.Namespace))
 	net, err := checkNetwork(ctx, adminCS, sb.Namespace, c)
 	if err != nil {
 		return results, err
@@ -128,18 +129,13 @@ func checkRBAC(ctx context.Context, ai kubernetes.Interface, sbNS, prodNS string
 		{"own-token-create", "kubectl create token -n " + sbNS + " " + AIServiceAccount, sbNS, "", "serviceaccounts/token", "create"},
 		{"prod-deploy-delete", "kubectl delete deployment -n " + prodNS + " --all", prodNS, "apps", "deployments", "delete"},
 	} {
-		res, sub, _ := strings.Cut(q.res, "/")
-		ssar, err := ai.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, &authzv1.SelfSubjectAccessReview{
-			Spec: authzv1.SelfSubjectAccessReviewSpec{ResourceAttributes: &authzv1.ResourceAttributes{
-				Namespace: q.ns, Group: q.group, Resource: res, Subresource: sub, Verb: q.verb,
-			}},
-		}, metav1.CreateOptions{})
+		allowed, reason, err := canI(ctx, ai, q.ns, q.group, q.res, q.verb)
 		r := CheckResult{Name: q.name, Command: q.cmd, Expect: ExpectBlocked}
 		switch {
 		case err != nil:
 			r.Got, r.Detail = "error", err.Error()
-		case ssar.Status.Allowed:
-			r.Got, r.Detail = ExpectOpen, ssar.Status.Reason
+		case allowed:
+			r.Got, r.Detail = ExpectOpen, reason
 		default:
 			r.Got = ExpectBlocked
 		}
@@ -147,7 +143,7 @@ func checkRBAC(ctx context.Context, ai kubernetes.Interface, sbNS, prodNS string
 		out = append(out, r)
 	}
 
-	// AI 계정은 Pod를 만들 수 있으므로, 노드 네트워크·파일시스템을 쓰는 Pod는 Pod Security가 막아야 한다.
+	// 노드 네트워크·파일시스템을 쓰는 Pod는 RBAC(Pod 생성 권한 없음)나 Pod Security가 막아야 한다.
 	// dry-run으로 보내 실제로는 아무것도 만들지 않는다.
 	out = append(out, checkHostPod(ctx, ai, sbNS))
 
@@ -174,20 +170,62 @@ func HostPod(namespace string) *corev1.Pod {
 	}
 }
 
+// 호스트 Pod 검사에서 무엇이 막았는지 (CheckResult.Detail)
+const (
+	HostPodByRBAC        = "RBAC: Pod 생성 권한 없음"
+	HostPodByPodSecurity = "Pod Security: 노드 네트워크·파일시스템을 쓰는 Pod 금지"
+)
+
+// canI는 API 서버에 이 계정이 할 수 있는지 묻는다 (SelfSubjectAccessReview). res는 "serviceaccounts/token"처럼 하위 리소스를 붙일 수 있다.
+func canI(ctx context.Context, cs kubernetes.Interface, ns, group, res, verb string) (bool, string, error) {
+	res, sub, _ := strings.Cut(res, "/")
+	ssar, err := cs.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, &authzv1.SelfSubjectAccessReview{
+		Spec: authzv1.SelfSubjectAccessReviewSpec{ResourceAttributes: &authzv1.ResourceAttributes{
+			Namespace: ns, Group: group, Resource: res, Subresource: sub, Verb: verb,
+		}},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		return false, "", err
+	}
+	return ssar.Status.Allowed, ssar.Status.Reason, nil
+}
+
+// checkHostPod는 AI 계정으로 호스트 Pod를 만들 수 없는지 본다. Pod 생성 권한이 없으면 RBAC가 막은 것이고,
+// 권한이 있으면 dry-run으로 보내 Pod Security가 거절하는지 본다.
 func checkHostPod(ctx context.Context, ai kubernetes.Interface, sbNS string) CheckResult {
 	r := CheckResult{Name: "host-pod-create", Command: "kubectl run -n " + sbNS + " --dry-run=server (hostNetwork, hostPath /)", Expect: ExpectBlocked}
-	_, err := ai.CoreV1().Pods(sbNS).Create(ctx, HostPod(sbNS), metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
+	allowed, _, err := canI(ctx, ai, sbNS, "", "pods", "create")
 	switch {
-	case err == nil:
-		r.Got = ExpectOpen
-	// Quota 초과도 Forbidden이므로, Pod Security가 막은 것만 막힘으로 친다
-	case apierrors.IsForbidden(err) && strings.Contains(err.Error(), "PodSecurity"):
-		r.Got = ExpectBlocked
-	default:
+	case err != nil:
 		r.Got, r.Detail = "error", err.Error()
+	case !allowed:
+		r.Got, r.Detail = ExpectBlocked, HostPodByRBAC
+	default:
+		r.Got, r.Detail = podSecurityOutcome(ai.CoreV1().Pods(sbNS).Create(ctx, HostPod(sbNS), metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}}))
 	}
 	r.Pass = r.Got == ExpectBlocked
 	return r
+}
+
+// checkPodSecurity는 관리자 계정으로 같은 호스트 Pod를 dry-run 한다. 관리자는 RBAC를 통과하므로 Pod Security만 막을 수 있다.
+// AI 계정에 Pod 생성 권한이 없어도 샌드박스의 Pod Security(baseline)가 실제로 동작하는지 따로 증명한다.
+func checkPodSecurity(ctx context.Context, admin kubernetes.Interface, sbNS string) CheckResult {
+	r := CheckResult{Name: "host-pod-admission", Command: "kubectl run -n " + sbNS + " --dry-run=server (관리자 계정, hostNetwork, hostPath /)", Expect: ExpectBlocked}
+	r.Got, r.Detail = podSecurityOutcome(admin.CoreV1().Pods(sbNS).Create(ctx, HostPod(sbNS), metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}}))
+	r.Pass = r.Got == ExpectBlocked
+	return r
+}
+
+// podSecurityOutcome은 호스트 Pod dry-run 결과를 읽는다. Quota 초과도 Forbidden이므로 Pod Security가 막은 것만 막힘으로 친다.
+func podSecurityOutcome(_ *corev1.Pod, err error) (string, string) {
+	switch {
+	case err == nil:
+		return ExpectOpen, ""
+	case apierrors.IsForbidden(err) && strings.Contains(err.Error(), "PodSecurity"):
+		return ExpectBlocked, HostPodByPodSecurity
+	default:
+		return "error", err.Error()
+	}
 }
 
 func rbacOutcome(err error) (string, string) {

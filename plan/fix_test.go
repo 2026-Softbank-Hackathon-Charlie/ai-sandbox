@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -51,6 +52,11 @@ func TestParseDiagnosisRejects(t *testing.T) {
 		{"값 없음", `, "value": "standard"`, ``, "값이 있어야"},
 		{"없는 키 replace", `"/spec/storage/storageClass"`, `"/spec/walStorage/size"`, "중간 키"},
 		{"모르는 키", `"evidence"`, `"evidence": [], "run"`, "unknown field"},
+		{"빈 근거", `["Warning  ProvisioningFailed  persistentvolumeclaim/moimroom-db-eks-1  storageclass.storage.k8s.io \"gp3\" not found"]`, `[" "]`, "evidence[0]: 비어 있음"},
+		{"원인 너무 김", `"cause": "매니페스트의 StorageClass gp3가 대상 클러스터에 없어 moimroom-db-eks의 PVC가 Pending"`, `"cause": "` + strings.Repeat("가", 1001) + `"`, "1000자 이하"},
+		{"StorageClass를 숫자로", `"value": "standard"`, `"value": 123`, "StorageClass 이름"},
+		{"모든 taint 견디기", `"op": "replace", "path": "/spec/storage/storageClass", "value": "standard"`, `"op": "add", "path": "/spec/affinity", "value": {"tolerations": [{"operator": "Exists"}]}`, "tolerations[0].key"},
+		{"크기를 비우기", `"/spec/storage/storageClass", "value": "standard"`, `"/spec/storage/size", "value": ""`, "spec.storage.size"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -152,5 +158,21 @@ func TestManifestFixRejectsForeignImage(t *testing.T) {
 	}
 	if _, is := (Fix{Kind: KindManifestPatch, Patch: []Op{{"replace", "/spec/imageName", []byte(`"ghcr.io/cloudnative-pg/postgresql:17.6"`)}}}).Apply(proposal(t), draft(t)); len(is) > 0 {
 		t.Fatalf("CNPG 이미지 버전 바꾸기는 통과해야 함:\n%s", is.Error())
+	}
+}
+
+func TestManifestFixAddsTolerations(t *testing.T) {
+	// 대상 노드에 taint가 있어 Pending이면, affinity가 없던 매니페스트에도 tolerations를 넣을 수 있다.
+	p, is := Parse([]byte(read(t, "proposal.json")), draft(t))
+	if len(is) > 0 {
+		t.Fatal(is.Error())
+	}
+	f := Fix{Kind: KindManifestPatch, Patch: []Op{{Op: "add", Path: "/spec/affinity", Value: json.RawMessage(`{"tolerations": [{"key": "dedicated", "operator": "Equal", "value": "db", "effect": "NoSchedule"}]}`)}}}
+	next, is := f.Apply(p, draft(t))
+	if len(is) > 0 {
+		t.Fatal(is.Error())
+	}
+	if !strings.Contains(next.Manifest, "dedicated") {
+		t.Fatalf("tolerations가 들어가지 않음:\n%s", next.Manifest)
 	}
 }

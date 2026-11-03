@@ -27,10 +27,17 @@ const (
 	// AnnoExpires는 만료 시각(RFC 3339)이다. 남은 샌드박스는 Sweep이 이 값을 보고 지운다.
 	AnnoExpires = "hopcharlie/expires-at"
 
-	// AIServiceAccount는 AI 도구(sandbox_apply, sandbox_smoke)가 쓰는 계정이다.
+	// AIServiceAccount는 샌드박스 토큰의 계정이다. 리허설, 엔진, AI 진단 도구가 이 토큰으로만 샌드박스를 다룬다.
 	AIServiceAccount = "ai-sandbox"
 
 	namePrefix = "sandbox-"
+
+	// DefaultCPU, DefaultMemory는 샌드박스 Quota 기본값(데모 값)이다. 리허설은 대상 매니페스트만큼 더 잡는다.
+	DefaultCPU    = "4"
+	DefaultMemory = "8Gi"
+	// DefaultContainerCPU, DefaultContainerMemory는 자원을 적지 않은 컨테이너에 LimitRange가 주는 limits다.
+	DefaultContainerCPU    = "500m"
+	DefaultContainerMemory = "512Mi"
 
 	// PodSecurityEnforce, PodSecurityLevel은 샌드박스 네임스페이스에 거는 Pod Security Admission 기준이다.
 	// CNPG 인스턴스 Pod도 뜰 수 있게 restricted가 아니라 baseline을 쓴다.
@@ -113,21 +120,29 @@ func (c Config) withDefaults() (Config, error) {
 	if !sandboxID.MatchString(c.ID) {
 		return c, fmt.Errorf("ID는 소문자·숫자 4자리여야 함 (받은 값 %q)", c.ID)
 	}
+	// 음수 TTL은 만들자마자 만료돼 Sweep이 리허설 도중에 지울 수 있다.
+	if c.TTL < 0 || c.Pods < 0 {
+		return c, fmt.Errorf("TTL과 Pod 수는 0(기본값) 이상이어야 함 (받은 값 %s, %d)", c.TTL, c.Pods)
+	}
 	if c.TTL == 0 {
 		c.TTL = time.Hour
 	}
 	if c.CPU == "" {
-		c.CPU = "4"
+		c.CPU = DefaultCPU
 	}
 	if c.Memory == "" {
-		c.Memory = "8Gi"
+		c.Memory = DefaultMemory
 	}
 	if c.Pods == 0 {
 		c.Pods = 20
 	}
 	for _, q := range []string{c.CPU, c.Memory} {
-		if _, err := resource.ParseQuantity(q); err != nil {
+		v, err := resource.ParseQuantity(q)
+		if err != nil {
 			return c, fmt.Errorf("자원 값 %q를 읽을 수 없음: %w", q, err)
+		}
+		if v.Sign() <= 0 {
+			return c, fmt.Errorf("자원 값 %q는 0보다 커야 함", q)
 		}
 	}
 	return c, nil
@@ -157,37 +172,19 @@ type Objects struct {
 	LimitRange     *corev1.LimitRange
 }
 
-// aiRules는 AI 계정이 자기 네임스페이스 안에서 할 수 있는 일이다.
-// Helm 설치·삭제와 스모크 테스트에 필요한 만큼만 준다. Role, RoleBinding, NetworkPolicy,
-// ResourceQuota, LimitRange, serviceaccounts/token, pods/exec는 주지 않는다. 격리를 스스로 풀 수 없게 하기 위해서다.
-// secrets는 Helm이 릴리스 기록을 secret으로 남기기 때문에 필요하다. 샌드박스에는 테스트 데이터만 있다.
+// aiRules는 샌드박스 토큰으로 하는 일만큼만 준다. 리허설과 엔진이 CNPG Cluster를 만들고 고치고,
+// 진단 도구와 멈춤 감지가 Pod·PVC·이벤트를 읽고, 리허설이 임시 원본의 앱 계정 secret을 이름으로 읽는다.
+// Pod, Service, Job처럼 워크로드를 만드는 권한은 주지 않는다. Service externalIPs로 클러스터의 다른 트래픽을
+// 가로채거나(CVE-2020-8554), 다른 계정으로 Pod를 띄우는 길을 막기 위해서다. Role, RoleBinding, NetworkPolicy,
+// ResourceQuota, LimitRange, serviceaccounts/token, pods/exec도 주지 않는다. 격리를 스스로 풀 수 없게 하기 위해서다.
 var aiRules = []rbacv1.PolicyRule{
-	{
-		APIGroups: []string{""},
-		Resources: []string{"pods", "services", "configmaps", "secrets", "persistentvolumeclaims", "serviceaccounts"},
-		Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
-	},
-	{APIGroups: []string{""}, Resources: []string{"pods/log", "events"}, Verbs: []string{"get", "list", "watch"}},
-	{
-		APIGroups: []string{"apps"},
-		Resources: []string{"deployments", "statefulsets", "replicasets"},
-		Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
-	},
-	{
-		APIGroups: []string{"batch"},
-		Resources: []string{"jobs", "cronjobs"},
-		Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
-	},
-	{
-		APIGroups: []string{"policy"},
-		Resources: []string{"poddisruptionbudgets"},
-		Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
-	},
 	{
 		APIGroups: []string{"postgresql.cnpg.io"},
 		Resources: []string{"clusters"},
 		Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 	},
+	{APIGroups: []string{""}, Resources: []string{"pods", "persistentvolumeclaims", "events"}, Verbs: []string{"get", "list", "watch"}},
+	{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get"}},
 }
 
 // Build는 설정으로 리소스를 만든다. 클러스터에는 아무것도 보내지 않는다.
@@ -281,7 +278,7 @@ func Build(c Config, now time.Time) (Objects, error) {
 			ObjectMeta: meta("sandbox-defaults"),
 			Spec: corev1.LimitRangeSpec{Limits: []corev1.LimitRangeItem{{
 				Type:           corev1.LimitTypeContainer,
-				Default:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("512Mi")},
+				Default:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(DefaultContainerCPU), corev1.ResourceMemory: resource.MustParse(DefaultContainerMemory)},
 				DefaultRequest: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("128Mi")},
 			}}},
 		},

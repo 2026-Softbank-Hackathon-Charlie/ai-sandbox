@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	eplan "github.com/2026-Softbank-Hackathon-Charlie/migration-engine/pkg/plan"
 )
@@ -53,10 +54,10 @@ func ParseDiagnosis(raw []byte, p *Proposal, draft *eplan.Plan) (*Diagnosis, Iss
 	var is Issues
 	if strings.TrimSpace(d.Cause) == "" {
 		is.add("cause", "원인이 비어 있음")
+	} else if n := utf8.RuneCountInString(d.Cause); n > maxCauseLen {
+		is.add("cause", "%d자 이하여야 함 (받은 길이 %d자)", maxCauseLen, n)
 	}
-	if len(d.Evidence) == 0 {
-		is.add("evidence", "로그에서 찾은 근거가 하나 이상 있어야 함")
-	}
+	is = append(is, checkTexts("evidence", "로그에서 찾은 근거", d.Evidence, maxEvidenceLen)...)
 	if _, fis := d.Fix.Apply(p, draft); len(fis) > 0 {
 		for _, x := range fis {
 			x.Path = joinPath("fix", x.Path)

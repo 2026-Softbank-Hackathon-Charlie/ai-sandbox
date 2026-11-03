@@ -22,6 +22,19 @@ import (
 
 var now = time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
 
+func TestBuildRejectsBadValues(t *testing.T) {
+	for _, c := range []Config{
+		{App: "shop", ID: "ab12", CPU: "-1"},
+		{App: "shop", ID: "ab12", Memory: "0"},
+		{App: "shop", ID: "ab12", Pods: -5},
+		{App: "shop", ID: "ab12", TTL: -time.Hour},
+	} {
+		if _, err := Build(c, now); err == nil {
+			t.Errorf("통과하면 안 되는 설정: %+v", c)
+		}
+	}
+}
+
 func TestBuild(t *testing.T) {
 	o, err := Build(Config{App: "shop", ID: "ab12"}, now)
 	if err != nil {
@@ -54,6 +67,15 @@ func TestBuild(t *testing.T) {
 		}
 		if slices.Contains(r.Verbs, "*") || slices.Contains(r.Verbs, "escalate") || slices.Contains(r.Verbs, "bind") {
 			t.Errorf("Role에 넓은 동사가 있음: %v", r.Verbs)
+		}
+		// 만들고 고칠 수 있는 것은 CNPG Cluster뿐이다. Pod·Service를 만들 수 있으면 다른 계정으로 Pod를 띄우거나
+		// Service externalIPs로 클러스터 트래픽을 가로챌 수 있다.
+		writes := slices.ContainsFunc(r.Verbs, func(v string) bool { return v != "get" && v != "list" && v != "watch" })
+		if writes && (!slices.Equal(r.APIGroups, []string{"postgresql.cnpg.io"}) || !slices.Equal(r.Resources, []string{"clusters"})) {
+			t.Errorf("CNPG Cluster 말고 쓰기 권한이 있음: %+v", r)
+		}
+		if slices.Contains(r.Resources, "secrets") && !slices.Equal(r.Verbs, []string{"get"}) {
+			t.Errorf("secret은 이름으로 읽기만: %v", r.Verbs)
 		}
 	}
 
@@ -259,6 +281,31 @@ func aiFake() *fake.Clientset {
 	return cs
 }
 
+// allowPodCreate는 권한 확인 요청 중 Pod 생성만 허용으로 답하게 한다.
+func allowPodCreate(cs *fake.Clientset) {
+	cs.PrependReactor("create", "selfsubjectaccessreviews", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		r := a.(k8stesting.CreateAction).GetObject().(*authzv1.SelfSubjectAccessReview)
+		ra := r.Spec.ResourceAttributes
+		r.Status.Allowed = ra.Resource == "pods" && ra.Subresource == "" && ra.Verb == "create"
+		return true, r, nil
+	})
+}
+
+func TestCheckPodSecurity(t *testing.T) {
+	t.Run("관리자도 호스트 Pod를 만들 수 없으면 통과", func(t *testing.T) {
+		r := checkPodSecurity(context.Background(), aiFake(), "sandbox-shop-ab12")
+		if !r.Pass || r.Name != "host-pod-admission" || r.Detail != HostPodByPodSecurity {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("Pod Security가 꺼져 있으면 실패", func(t *testing.T) {
+		r := checkPodSecurity(context.Background(), fake.NewClientset(), "sandbox-shop-ab12")
+		if r.Pass || r.Got != ExpectOpen {
+			t.Fatalf("%+v", r)
+		}
+	})
+}
+
 func TestCheckRBAC(t *testing.T) {
 	forbidden := apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "", errors.New("no"))
 	t.Run("막혀 있으면 통과", func(t *testing.T) {
@@ -307,6 +354,7 @@ func TestCheckRBAC(t *testing.T) {
 	})
 	t.Run("호스트 Pod를 만들 수 있으면 실패", func(t *testing.T) {
 		ai := aiFake()
+		allowPodCreate(ai)
 		ai.PrependReactor("list", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) { return true, nil, forbidden })
 		ai.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) { return true, &corev1.Pod{}, nil })
 		rs := checkRBAC(context.Background(), ai, "sandbox-shop-ab12", "shop")
@@ -315,8 +363,29 @@ func TestCheckRBAC(t *testing.T) {
 			t.Fatalf("%+v", r)
 		}
 	})
+	t.Run("Pod 생성 권한이 없으면 RBAC가 막은 것", func(t *testing.T) {
+		// 권한 확인 요청으로 판정하므로, 실제 생성 요청은 보내지 않는다
+		ai := aiFake()
+		ai.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			t.Error("권한이 없으면 Pod 생성을 시도하지 않아야 함")
+			return true, nil, nil
+		})
+		r := checkHostPod(context.Background(), ai, "sandbox-shop-ab12")
+		if !r.Pass || r.Got != ExpectBlocked || r.Detail != HostPodByRBAC {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("Pod 생성 권한이 있으면 Pod Security가 막아야 함", func(t *testing.T) {
+		ai := aiFake()
+		allowPodCreate(ai)
+		r := checkHostPod(context.Background(), ai, "sandbox-shop-ab12")
+		if !r.Pass || r.Got != ExpectBlocked || r.Detail != HostPodByPodSecurity {
+			t.Fatalf("%+v", r)
+		}
+	})
 	t.Run("Quota 거절은 막힘으로 치지 않음", func(t *testing.T) {
 		ai := aiFake()
+		allowPodCreate(ai)
 		ai.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "x", errors.New("exceeded quota: sandbox-quota"))
 		})
