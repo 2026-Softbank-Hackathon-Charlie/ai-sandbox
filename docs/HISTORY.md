@@ -2,23 +2,25 @@
 
 ai-sandbox에 main으로 합쳐진 순서대로 무엇이 생겼는지 정리했습니다. 화면이 없는 레포라 스크린샷 대신 버전마다 **무엇이 달라졌나**와 **어떻게 확인했나**를 적었습니다.
 
-| 버전 | PR | 머지 (KST) | 작성 | 내용 | 테스트 수 |
-| --- | --- | --- | --- | --- | --- |
-| [v0](#v0--설계-초안) | 직접 커밋 | 11/2 10:06 | 이태훈 | 설계 초안 (코드 없음) | - |
-| [v1](#v1--설계-문서를-플랫폼-형식에-맞춤) | [#3](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/3) | 11/2 16:27 | 김동윤 | 설계 문서의 계획 예시를 실제 플랫폼 형식에 맞춤 (코드 변화 없음) | - |
-| [v2](#v2--ai-계획-검사) | [#4](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/4) | 11/2 18:39 | 이태훈 | AI가 만든 이전 계획을 규칙으로 검사 | 14 |
-| [v3](#v3--샌드박스) | [#5](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/5) | 11/2 18:44 | 이태훈 | AI 전용 격리 공간(샌드박스)과 격리 검사 | 28 |
-| [v4](#v4--ai-에이전트와-활동-기록) | [#6](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/6) | 11/2 18:49 | 이태훈 | 직접 조사해서 계획을 만드는 AI, 모든 활동을 콘솔에 기록 | 40 |
-| [v5](#v5--리허설과-전체-실행-명령) | [#7](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/7) | 11/2 18:52 | 이태훈 | 승인 전에 샌드박스에서 실제로 미리 돌려 보는 리허설 | 52 |
-| [v6](#v6--설계-문서-갱신) | [#8](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/8) | 11/2 18:54 | 이태훈 | 구현한 내용을 설계 문서에 반영 (코드 변화 없음) | 52 |
-| [v7](#v7--maxdowntime-설명) | [#9](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/9) | 11/2 19:05 | 이태훈 | `maxDowntime`이 무슨 뜻인지 풀어 씀 (코드 변화 없음) | 52 |
-| [v8](#v8--보안-구멍-3개-막기) | [#10](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/10) | 11/2 19:53 | 이태훈 | 보안 구멍 3개 막기 | 53 |
-| [v9](#v9--ai-계획과-데이터-검증의-빈틈) | [#14](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/14) | 11/2 20:32 | 김동윤 | AI 계획과 데이터 검증의 빈틈 막기 | 65 |
-| [v10](#v10--리허설-결과-정리) | [#15](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/15) | 11/2 20:40 | 김동윤 | 리허설 결과가 실제 상황과 다르게 보이던 문제 정리 | 73 |
-| [v11](#v11--리뷰-나머지-4건) | [#11](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/11) | 11/2 20:45 | 이태훈 | 리뷰에서 나온 나머지 4건 수정 | 75 |
-| [v12](#v12--승인할-때-같은-계획인지-확인) | [#16](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/16) | 11/3 11:19 | 이태훈 | 승인하려는 계획이 리허설한 계획과 같은지 확인 | 78 |
+| 버전 | PR | 머지 | 내용 | 테스트 |
+| --- | --- | --- | --- | --- |
+| [v0](#v0--설계-초안) | 직접 커밋 | 11/2 10:06 | 설계 초안 (코드 없음) | - |
+| [v1](#v1--설계-문서를-플랫폼-형식에-맞춤) | [#3](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/3) | 11/2 16:27 | 계획 예시를 플랫폼 형식에 맞춤 (코드 변화 없음) | - |
+| [v2](#v2--ai-계획-검사) | [#4](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/4) | 11/2 18:39 | AI가 만든 이전 계획을 규칙으로 검사 | 14 |
+| [v3](#v3--샌드박스) | [#5](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/5) | 11/2 18:44 | AI 전용 격리 공간(샌드박스)과 격리 검사 | 28 |
+| [v4](#v4--ai-에이전트와-활동-기록) | [#6](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/6) | 11/2 18:49 | 직접 조사해 계획을 만드는 AI, 활동 기록 | 40 |
+| [v5](#v5--리허설과-전체-실행-명령) | [#7](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/7) | 11/2 18:52 | 승인 전에 미리 돌려 보는 리허설 | 52 |
+| [v6](#v6--설계-문서-갱신) | [#8](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/8) | 11/2 18:54 | 구현 내용을 설계 문서에 반영 (코드 변화 없음) | 52 |
+| [v7](#v7--maxdowntime-설명) | [#9](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/9) | 11/2 19:05 | `maxDowntime` 뜻 풀어 쓰기 (코드 변화 없음) | 52 |
+| [v8](#v8--보안-구멍-3개-막기) | [#10](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/10) | 11/2 19:53 | 보안 구멍 3개 막기 | 53 |
+| [v9](#v9--ai-계획과-데이터-검증의-빈틈) | [#14](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/14) | 11/2 20:32 | AI 계획과 데이터 검증의 빈틈 막기 | 65 |
+| [v10](#v10--리허설-결과-정리) | [#15](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/15) | 11/2 20:40 | 리허설 결과 표시 정리 | 73 |
+| [v11](#v11--리뷰-나머지-4건) | [#11](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/11) | 11/2 20:45 | 리뷰에서 나온 나머지 4건 수정 | 75 |
+| [v12](#v12--승인할-때-같은-계획인지-확인) | [#16](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/16) | 11/3 11:19 | 승인할 때 리허설한 계획과 같은지 확인 | 78 |
+| [v13](#v13--버전-히스토리-문서) | [#17](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/17) | 11/3 14:33 | 버전 히스토리 문서, kind 재확인 (코드 변화 없음) | 78 |
+| [v14](#v14--히스토리를-쉬운-말로) | [#18](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/18) | 11/3 14:55 | 히스토리를 쉬운 말로 다시 씀 (코드 변화 없음) | 78 |
 
-- "테스트 수"는 그 버전에 들어 있던 테스트 함수 개수입니다.
+- 머지 시각은 한국 시간이고, "테스트"는 그 버전에 들어 있던 테스트 함수 개수입니다.
 - 닫힌 PR #1, #2는 플랫폼의 계획 형식이 정해진 뒤 #4~#8로 나눠 다시 올렸습니다.
 - 이슈 #12는 #14로, #13은 #15로 닫혔습니다.
 - 11/3에 v12 코드로 실제 클러스터 리허설을 다시 돌렸습니다: [11/3 kind 재확인](#113-kind-재확인)
@@ -38,7 +40,7 @@ ai-sandbox에 main으로 합쳐진 순서대로 무엇이 생겼는지 정리했
 
 ## v0 · 설계 초안
 
-직접 커밋 `02212f4` · 이태훈 · 11/2 10:06 · README 164줄
+직접 커밋 `02212f4` · 11/2 10:06 · README 164줄
 
 D 영역(AI·샌드박스) 설계를 처음 문서로 적었습니다. 중심 원칙은 **"AI는 계획과 수정안만 만들고, 운영을 실제로 바꾸는 일은 사람이 승인한 뒤 엔진만 한다"** 입니다. 이 원칙 아래 계획 검사, AI가 쓸 수 있는 도구 목록, 샌드박스, 리허설, 데모 실패 시나리오를 정리했습니다.
 
@@ -46,7 +48,7 @@ D 영역(AI·샌드박스) 설계를 처음 문서로 적었습니다. 중심 �
 
 ## v1 · 설계 문서를 플랫폼 형식에 맞춤
 
-[PR #3](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/3) · 김동윤 · 11/2 16:27 · README +97 −31
+[PR #3](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/3) · 11/2 16:27 · README +97 −31
 
 **무엇이 달라졌나**
 
@@ -64,7 +66,7 @@ D 영역(AI·샌드박스) 설계를 처음 문서로 적었습니다. 중심 �
 
 ## v2 · AI 계획 검사
 
-[PR #4](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/4) · 이태훈 · 11/2 18:39 · 14파일 +1,100 · 패키지 `plan`, `mask`
+[PR #4](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/4) · 11/2 18:39 · 14파일 +1,100 · 패키지 `plan`, `mask`
 
 **무엇이 달라졌나**
 
@@ -84,7 +86,7 @@ AI가 만든 계획을 그대로 믿지 않고, 정해진 규칙으로 검사해
 
 ## v3 · 샌드박스
 
-[PR #5](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/5) · 이태훈 · 11/2 18:44 · 7파일 +1,493 · 패키지 `sandbox`, `cmd/sandboxctl`
+[PR #5](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/5) · 11/2 18:44 · 7파일 +1,493 · 패키지 `sandbox`, `cmd/sandboxctl`
 
 **무엇이 달라졌나**
 
@@ -104,7 +106,7 @@ AI와 리허설이 쓸 격리 공간을 만들고, 정말 밖으로 나갈 수 �
 
 ## v4 · AI 에이전트와 활동 기록
 
-[PR #6](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/6) · 이태훈 · 11/2 18:49 · 13파일 +1,664 · 패키지 `llm`, `agentlog`
+[PR #6](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/6) · 11/2 18:49 · 13파일 +1,664 · 패키지 `llm`, `agentlog`
 
 **무엇이 달라졌나**
 
@@ -120,7 +122,7 @@ AI가 도구를 써서 직접 조사하고 계획을 만듭니다. 그 과정은
 
 ## v5 · 리허설과 전체 실행 명령
 
-[PR #7](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/7) · 이태훈 · 11/2 18:52 · 12파일 +1,721 · 패키지 `rehearsal`, `cmd/hopai`
+[PR #7](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/7) · 11/2 18:52 · 12파일 +1,721 · 패키지 `rehearsal`, `cmd/hopai`
 
 **무엇이 달라졌나**
 
@@ -148,7 +150,7 @@ AI가 도구를 써서 직접 조사하고 계획을 만듭니다. 그 과정은
 
 ## v6 · 설계 문서 갱신
 
-[PR #8](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/8) · 이태훈 · 11/2 18:54 · README +169 −60
+[PR #8](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/8) · 11/2 18:54 · README +169 −60
 
 v2~v5에서 만든 내용을 설계 문서(README)에 반영했습니다. v1에서 정리한 플랫폼 형식 설명은 그대로 두고, 전체 흐름, 검사 규칙, 에이전트와 도구, 샌드박스, 리허설, 실행 방법, kind 확인 결과를 고쳤습니다.
 
@@ -156,7 +158,7 @@ v2~v5에서 만든 내용을 설계 문서(README)에 반영했습니다. v1에�
 
 ## v7 · maxDowntime 설명
 
-[PR #9](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/9) · 이태훈 · 11/2 19:05 · README +4 −3
+[PR #9](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/9) · 11/2 19:05 · README +4 −3
 
 `maxDowntime`은 '서비스가 멈추는 시간'으로 오해하기 쉽습니다. 실제로는 **전환할 때 쓰기를 잠깐 붙잡아 두는 시간의 상한**이라고 풀어 썼습니다. 이전은 무중단이고, 그동안 읽기는 계속됩니다.
 
@@ -167,7 +169,7 @@ v2~v5에서 만든 내용을 설계 문서(README)에 반영했습니다. v1에�
 
 ## v8 · 보안 구멍 3개 막기
 
-[PR #10](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/10) · 이태훈 · 11/2 19:53 · 9파일 +268 −13
+[PR #10](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/10) · 11/2 19:53 · 9파일 +268 −13
 
 **무엇이 달라졌나**
 
@@ -187,7 +189,7 @@ v2~v5에서 만든 내용을 설계 문서(README)에 반영했습니다. v1에�
 
 ## v9 · AI 계획과 데이터 검증의 빈틈
 
-[PR #14](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/14) · 김동윤 · 11/2 20:32 · 13파일 +602 −41 · 이슈 #12
+[PR #14](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/14) · 11/2 20:32 · 13파일 +602 −41 · 이슈 #12
 
 **무엇이 달라졌나**
 
@@ -199,7 +201,7 @@ v2~v5에서 만든 내용을 설계 문서(README)에 반영했습니다. v1에�
 
 ## v10 · 리허설 결과 정리
 
-[PR #15](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/15) · 김동윤 · 11/2 20:40 · 7파일 +358 −32 · 이슈 #13
+[PR #15](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/15) · 11/2 20:40 · 7파일 +358 −32 · 이슈 #13
 
 **무엇이 달라졌나**
 
@@ -214,7 +216,7 @@ v2~v5에서 만든 내용을 설계 문서(README)에 반영했습니다. v1에�
 
 ## v11 · 리뷰 나머지 4건
 
-[PR #11](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/11) · 이태훈 · 11/2 20:45 · 8파일 +81 −21
+[PR #11](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/11) · 11/2 20:45 · 8파일 +81 −21
 
 **무엇이 달라졌나**
 
@@ -235,7 +237,7 @@ v9·v10과 같은 파일을 고쳐 충돌이 났고, main을 합쳐 풀었습니
 
 ## v12 · 승인할 때 같은 계획인지 확인
 
-[PR #16](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/16) · 이태훈 · 11/3 11:19 · 7파일 +200 −14 · platform #24의 ai-sandbox 쪽
+[PR #16](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/16) · 11/3 11:19 · 7파일 +200 −14 · platform #24의 ai-sandbox 쪽
 
 **무엇이 달라졌나**
 
@@ -256,6 +258,22 @@ v9·v10과 같은 파일을 고쳐 충돌이 났고, main을 합쳐 풀었습니
 ```
 
 **남은 일:** 플랫폼이 승인할 때 이 값을 확인하는 부분(platform #24).
+
+---
+
+## v13 · 버전 히스토리 문서
+
+[PR #17](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/17) · 11/3 14:33 · README, `docs/HISTORY.md`
+
+이 문서와 README의 버전 표를 추가했습니다. 리뷰에서 README의 kind 결과가 v8 이전 값이라는 게 나와서, 리허설을 다시 돌려 결과를 반영했습니다(아래 11/3 kind 재확인). 코드는 바뀌지 않았습니다.
+
+---
+
+## v14 · 히스토리를 쉬운 말로
+
+[PR #18](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/18) · 11/3 14:55 · README, `docs/HISTORY.md`
+
+이 문서를 버전마다 "무엇이 달라졌나"와 "어떻게 확인했나"로 나누고, 필드·패키지 이름 대신 하는 일을 풀어 썼습니다. 위의 "먼저 알아 두면 좋은 말" 표도 이때 넣었습니다. 코드는 바뀌지 않았습니다.
 
 ---
 
