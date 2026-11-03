@@ -447,8 +447,8 @@ func logIsolation(ctx context.Context, ses agentlog.Session, rs []sandbox.CheckR
 }
 
 func isolationGuard(r sandbox.CheckResult) string {
-	if r.Name == "host-pod-create" {
-		return "Pod Security: 노드 네트워크·파일시스템을 쓰는 Pod 금지"
+	if r.Name == "host-pod-create" && r.Detail != "" {
+		return r.Detail
 	}
 	if strings.HasPrefix(r.Command, "kubectl") {
 		return "RBAC: 샌드박스 계정 권한 밖"

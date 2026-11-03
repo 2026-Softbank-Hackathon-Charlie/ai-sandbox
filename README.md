@@ -160,7 +160,10 @@ AI의 출력은 엔진 Plan, 대상 CNPG 매니페스트, 근거를 묶은 JSON�
 | 초안과 같아야 함 | id, source 전체, target의 env·context·namespace·cluster·dsn, gateway, files 전체(위치, rclone, flags. 빼거나 더할 수 없음), verify의 schemas·writtenRecords (없음과 빈 목록은 같게 봄). AI가 데이터나 비밀번호를 다른 곳으로 보내지 못하게 한다 |
 | 고정 규칙 | `verify.fenceGate` 생략은 `true`로 정규화하고 `false`는 거절. `target.manifest`는 비우거나 `attachment:target.yaml`. 검증 테이블은 초안보다 줄일 수 없음(기존 필터의 테이블도 유지) |
 | 상한값 범위 (제안값) | 네 값 모두 필수이며 0은 거절. maxDowntime(쓰기 보류) 5s~60s (게이트웨이는 90s(`-max-hold`) 넘게 붙잡힌 쓰기에 503을 돌려주므로, 그 전에 끝나 실패한 요청이 없게 한다), switchoverTimeout 30s~3m, catchupTimeout 1m~15m, maxLagBytes 1 KiB~64 MiB |
-| 매니페스트 | `postgresql.cnpg.io/v1` Cluster 하나, 이름·네임스페이스는 Plan의 대상과 같음, `spec.replica.primary`는 원본 클러스터, 시작은 `pg_basebackup`만(source는 원본, secret은 `<원본>-app`, database·owner는 원본 DSN과 같음), `externalClusters`는 원본·대상 이름만 쓰고 host·port는 Plan의 해당 DSN과 같아야 하며 user는 `streaming_replica`, 인증서 시크릿은 `<이름>-replication`·`<이름>-ca`만(비밀번호 키 금지), `imageName`은 `ghcr.io/cloudnative-pg/postgresql` 이미지만, spec 키는 허용 목록만 (슈퍼유저, 백업 대상, 관리 계정 키 금지), instances 1~5 |
+| 매니페스트 | `postgresql.cnpg.io/v1` Cluster 하나(64 KiB 이하, `---`나 `...`로 문서를 더 붙일 수 없음). 엔진이 Force로 적용하므로 최상위는 apiVersion·kind·metadata·spec만, metadata는 name·namespace만 (annotations·finalizers·ownerReferences로 대상 DB를 멈추거나 지우지 못하게). 이름·네임스페이스는 Plan의 대상과 같음 |
+| 매니페스트 spec | 키는 허용 목록만 (슈퍼유저, 백업 대상, 관리 계정, affinity, monitoring 금지). `replica`는 self·primary·source만(primary·source는 원본). 시작은 `bootstrap.pg_basebackup` 필수(source는 원본, secret은 `<원본>-app`, database·owner는 원본 DSN과 같음). `storage`(필수)·`walStorage`는 size(0보다 크고 2Ti 이하)·storageClass만. `resources`는 requests·limits의 cpu(16 이하)·memory(64Gi 이하)만. `postgresql`은 성능·WAL 보존 설정(`max_connections`, `shared_buffers`, `wal_keep_size` 등)만, 값은 문자열. instances 1~5 정수, smartShutdownTimeout 0~600 정수. `imageName`은 `ghcr.io/cloudnative-pg/postgresql` 이미지만 |
+| 복제 접속 | `externalClusters`는 원본·대상 이름만 쓰고 host·port는 Plan의 해당 DSN과 같음, user는 `streaming_replica`, sslmode는 require·verify-ca·verify-full만, dbname은 postgres만, 인증서 시크릿은 `<이름>-replication`·`<이름>-ca`만(비밀번호 키 금지) |
+| 근거 | notes는 1~10개, 각 500자 이하, 빈 글 금지 (승인 화면과 AI 활동 기록에 그대로 보임) |
 
 수정안(진단 결과)은 두 종류다.
 
@@ -169,7 +172,7 @@ AI의 출력은 엔진 Plan, 대상 CNPG 매니페스트, 근거를 묶은 JSON�
 | `manifest-patch` | `spec.storage`·`spec.walStorage`의 storageClass·size, `spec.resources` 아래, `spec.instances`, `spec.imageName`, `spec.smartShutdownTimeout` |
 | `plan-param` | `thresholds`의 네 값, `verify.tables` |
 
-수정안은 사본에 적용한 뒤 위 검사를 모두 다시 통과해야 한다. 한 번에 5줄까지다.
+수정안은 사본에 적용한 뒤 위 검사를 모두 다시 통과해야 한다. 한 번에 5줄까지다. 진단의 원인은 1000자, 근거(evidence)는 1~10개·각 1000자 이하다.
 
 원본 삭제나 원복 정책을 새 Plan 필드로 추가하지 않는다. 정책이 늘면 OPA 도입을 검토한다.
 
@@ -225,8 +228,8 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 | 항목 | 설정 |
 |---|---|
 | 네임스페이스 | `sandbox-<app>-<4자리 id>`, 라벨 `hopcharlie/sandbox=true`, 주석 `expires-at` |
-| Pod Security | `pod-security.kubernetes.io/enforce=baseline`. AI 계정이 Pod를 만들 수 있으므로 hostNetwork(NetworkPolicy를 받지 않음), hostPath, privileged Pod를 막는다. CNPG Pod가 뜰 수 있게 restricted가 아니라 baseline |
-| RBAC | 이 네임스페이스에만 바인딩한 Role. TokenRequest로 1시간짜리 토큰 발급 |
+| Pod Security | `pod-security.kubernetes.io/enforce=baseline`. AI 계정은 Pod를 만들 수 없지만, 권한이 넓어지는 경우를 대비해 hostNetwork(NetworkPolicy를 받지 않음), hostPath, privileged Pod를 막는다. CNPG Pod가 뜰 수 있게 restricted가 아니라 baseline |
+| RBAC | 이 네임스페이스에만 바인딩한 Role. 쓰기는 CNPG Cluster만(리허설과 엔진), 읽기는 Pod·PVC·이벤트(진단 도구, 멈춤 감지)와 secret 이름 조회(임시 원본 앱 계정)만. Pod·Service·Job은 만들 수 없다(Service externalIPs로 클러스터 트래픽을 가로채는 길, CVE-2020-8554). TokenRequest로 1시간짜리 토큰 발급 |
 | NetworkPolicy | 기본 전부 차단. 같은 네임스페이스와 kube-dns만 허용. 운영망, Tailscale 대역(100.64.0.0/10), 169.254.169.254 차단 |
 | ResourceQuota, LimitRange | CPU 4, 메모리 8 GiB, Pod 20개 (데모 값) |
 | 데이터 | 임시 PostgreSQL(CNPG)에 테스트 데이터만. 운영 데이터는 넣지 않는다 (파일 리허설은 아직 없음) |
@@ -247,7 +250,7 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 - 운영 DB 주소로 연결 → NetworkPolicy가 막아야 한다
 - 자기 NetworkPolicy 삭제, 자기 Role 수정, 토큰 발급, 운영 Deployment 삭제 → 권한 확인 요청으로 막혔는지 본다 (실제로 지우지 않음)
 - API 서버(CNPG 모드에서는 다른 네임스페이스 서비스) → 정책이 없으면 열리는 곳이라 정책 동작의 증거
-- hostNetwork·hostPath Pod 생성 (dry-run) → Pod Security가 막아야 한다. Quota 거절처럼 다른 이유로 막힌 것은 통과로 치지 않는다
+- hostNetwork·hostPath Pod 생성 (dry-run) → RBAC(Pod 생성 권한 없음)나 Pod Security가 막아야 한다. Quota 거절처럼 다른 이유로 막힌 것은 통과로 치지 않는다
 - 자기 네임스페이스 조회와 DNS는 열려야 한다 (리허설이 가능한지, 검사 자체를 믿을 수 있는지)
 
 결과는 리허설 세션의 `blocked` 이벤트로도 남는다.
@@ -356,14 +359,14 @@ go test ./...
 REHEARSAL_KUBECONFIG=<kubeconfig> REHEARSAL_SC=standard go test -tags cluster -run Cluster -v -timeout 40m ./rehearsal/
 ```
 
-로컬 kind(kindnet, CNPG 1.25.1)에서 확인한 결과 (2026-11-03, [#16](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/16) 머지 후 main 코드):
+로컬 kind(kindnet, CNPG 1.25.1)에서 확인한 결과 (2026-11-03, 매니페스트 검사 강화와 AI 계정 권한 축소 후):
 
 | 경우 | 결과 |
 |---|---|
-| 대상 StorageClass `standard` | 격리 검사 10/10 → 임시 원본과 테스트 데이터(5,000행) → 엔진 9단계 모두 성공, 쓰기 보류 9.1초, 전체 82초 |
-| 대상 StorageClass `gp3` (kind에 없음) | prepare에서 55초 만에 멈춤, 근거 `storageclass.storage.k8s.io "gp3" not found`, 쓰기 보류 전이라 원본 그대로 |
+| 대상 StorageClass `standard` | 격리 검사 10/10 → 임시 원본과 테스트 데이터(5,000행) → 엔진 9단계 모두 성공, 쓰기 보류 9.7초, 전체 81초 |
+| 대상 StorageClass `gp3` (kind에 없음) | prepare에서 52초 만에 멈춤, 근거 `storageclass.storage.k8s.io "gp3" not found`, 쓰기 보류 전이라 원본 그대로 |
 
-- 격리 검사 10개: 열려야 하는 2개(자기 네임스페이스 조회, DNS)와 막혀야 하는 8개(운영 Secret 읽기, 자기 NetworkPolicy 삭제, Role 수정, 토큰 발급, 운영 Deployment 삭제, hostNetwork·hostPath Pod 생성, 메타데이터 주소, CNPG 웹훅)가 모두 기대대로 나왔다. 호스트 Pod는 Pod Security가 막았고, CNPG Pod는 `baseline` 아래에서 정상으로 떴다. 증거 대상인 CNPG 웹훅은 이름을 찾은 뒤 막혔다.
+- 격리 검사 10개: 열려야 하는 2개(자기 네임스페이스 조회, DNS)와 막혀야 하는 8개(운영 Secret 읽기, 자기 NetworkPolicy 삭제, Role 수정, 토큰 발급, 운영 Deployment 삭제, hostNetwork·hostPath Pod 생성, 메타데이터 주소, CNPG 웹훅)가 모두 기대대로 나왔다. 호스트 Pod는 AI 계정에 Pod 생성 권한이 없어 RBAC가 먼저 막았다. 권한을 줄인 계정으로도 임시 원본 생성, 대상 DB 적용, 엔진 9단계가 모두 됐고, CNPG Pod는 `baseline` 아래에서 정상으로 떴다. 증거 대상인 CNPG 웹훅은 이름을 찾은 뒤 막혔다.
 - 운영 DB 접속 검사는 이 테스트에 대상을 넣지 않아 빠졌다. `hopai`는 `-target`으로 넣는다.
 - 두 샌드박스 모두 끝나고 삭제 요청(`delete_requested`)이 들어갔다.
 - 이전 결과(11/2, [#8](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/8) 시점, Pod Security와 `host-pod-create` 전): 쓰기 보류 8.7초, 전체 77초 / `gp3` 51초.

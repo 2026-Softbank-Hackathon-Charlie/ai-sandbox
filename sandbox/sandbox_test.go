@@ -22,6 +22,19 @@ import (
 
 var now = time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)
 
+func TestBuildRejectsBadValues(t *testing.T) {
+	for _, c := range []Config{
+		{App: "shop", ID: "ab12", CPU: "-1"},
+		{App: "shop", ID: "ab12", Memory: "0"},
+		{App: "shop", ID: "ab12", Pods: -5},
+		{App: "shop", ID: "ab12", TTL: -time.Hour},
+	} {
+		if _, err := Build(c, now); err == nil {
+			t.Errorf("통과하면 안 되는 설정: %+v", c)
+		}
+	}
+}
+
 func TestBuild(t *testing.T) {
 	o, err := Build(Config{App: "shop", ID: "ab12"}, now)
 	if err != nil {
@@ -54,6 +67,15 @@ func TestBuild(t *testing.T) {
 		}
 		if slices.Contains(r.Verbs, "*") || slices.Contains(r.Verbs, "escalate") || slices.Contains(r.Verbs, "bind") {
 			t.Errorf("Role에 넓은 동사가 있음: %v", r.Verbs)
+		}
+		// 만들고 고칠 수 있는 것은 CNPG Cluster뿐이다. Pod·Service를 만들 수 있으면 다른 계정으로 Pod를 띄우거나
+		// Service externalIPs로 클러스터 트래픽을 가로챌 수 있다.
+		writes := slices.ContainsFunc(r.Verbs, func(v string) bool { return v != "get" && v != "list" && v != "watch" })
+		if writes && (!slices.Equal(r.APIGroups, []string{"postgresql.cnpg.io"}) || !slices.Equal(r.Resources, []string{"clusters"})) {
+			t.Errorf("CNPG Cluster 말고 쓰기 권한이 있음: %+v", r)
+		}
+		if slices.Contains(r.Resources, "secrets") && !slices.Equal(r.Verbs, []string{"get"}) {
+			t.Errorf("secret은 이름으로 읽기만: %v", r.Verbs)
 		}
 	}
 
@@ -312,6 +334,17 @@ func TestCheckRBAC(t *testing.T) {
 		rs := checkRBAC(context.Background(), ai, "sandbox-shop-ab12", "shop")
 		r := rs[len(rs)-2]
 		if r.Name != "host-pod-create" || r.Pass || r.Got != ExpectOpen {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("Pod 생성 권한이 없으면 RBAC가 막은 것", func(t *testing.T) {
+		ai := aiFake()
+		ai.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "",
+				errors.New(`User "system:serviceaccount:sandbox-shop-ab12:ai-sandbox" cannot create resource "pods" in API group "" in the namespace "sandbox-shop-ab12"`))
+		})
+		r := checkHostPod(context.Background(), ai, "sandbox-shop-ab12")
+		if !r.Pass || r.Got != ExpectBlocked || r.Detail != HostPodByRBAC {
 			t.Fatalf("%+v", r)
 		}
 	})

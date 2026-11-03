@@ -3,6 +3,7 @@ package plan
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"regexp"
 	"slices"
@@ -11,23 +12,59 @@ import (
 	"strings"
 
 	eplan "github.com/2026-Softbank-Hackathon-Charlie/migration-engine/pkg/plan"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/yaml"
 )
 
+// 엔진은 이 매니페스트를 대상 클러스터에 Force로 적용한다. 그래서 최상위와 metadata도 허용 목록으로 묶는다.
+// annotations(cnpg.io/hibernation, cnpg.io/reconciliationLoop), finalizers, ownerReferences로
+// 대상 DB를 멈추거나 만들자마자 지우게 할 수 있기 때문이다.
+var (
+	manifestTopKeys  = []string{"apiVersion", "kind", "metadata", "spec"}
+	manifestMetaKeys = []string{"name", "namespace"}
+)
+
 // AI가 쓸 수 있는 CNPG Cluster spec 키. 계정, 슈퍼유저, 백업 대상처럼 권한이나 데이터 위치를 바꾸는 키는 뺐다.
+// affinity(노드 선택)와 monitoring(사용자 쿼리를 메트릭으로 내보냄)도 이전에 필요 없어 뺐다.
 var manifestSpecKeys = []string{
-	"instances", "imageName", "storage", "walStorage", "resources", "affinity",
-	"smartShutdownTimeout", "bootstrap", "replica", "externalClusters", "monitoring", "postgresql",
+	"instances", "imageName", "storage", "walStorage", "resources",
+	"smartShutdownTimeout", "bootstrap", "replica", "externalClusters", "postgresql",
 }
+
+// AI가 정할 수 있는 PostgreSQL 설정. 성능과 WAL 보존에 관한 것만 받는다.
+// log_*처럼 데이터를 로그로 내보내거나, CNPG가 관리하는 복제·보안 설정은 뺐다.
+var pgParameterKeys = []string{
+	"max_connections", "shared_buffers", "work_mem", "maintenance_work_mem", "effective_cache_size",
+	"max_wal_size", "min_wal_size", "wal_keep_size", "max_slot_wal_keep_size", "checkpoint_timeout",
+	"checkpoint_completion_target", "random_page_cost", "effective_io_concurrency",
+	"max_worker_processes", "max_parallel_workers", "max_parallel_workers_per_gather",
+}
+
+// 매니페스트 크기와 자원 상한 (제안값, 11/6에 확정한다).
+const (
+	maxManifestBytes = 64 << 10
+	maxStorageSize   = "2Ti"
+	maxCPU           = "16"
+	maxMemory        = "64Gi"
+)
 
 // CheckManifest는 대상 매니페스트가 이 Plan의 대상 클러스터를 원본의 복제본으로 만드는지 본다.
 // 엔진은 prepare 단계에서 대상 클러스터가 없을 때만 이 매니페스트를 적용한다.
 func CheckManifest(manifest string, p *eplan.Plan) Issues {
 	var is Issues
+	if len(manifest) > maxManifestBytes {
+		is.add("", "%d KiB 이하여야 함 (받은 크기 %d바이트)", maxManifestBytes>>10, len(manifest))
+		return is
+	}
 	doc, err := parseYAMLObject(manifest)
 	if err != nil {
 		is.add("", "YAML 객체 하나여야 함: %v", err)
 		return is
+	}
+	for _, k := range sortedKeys(doc) {
+		if !slices.Contains(manifestTopKeys, k) {
+			is.add(k, "쓸 수 없는 키 (허용: %s)", strings.Join(manifestTopKeys, ", "))
+		}
 	}
 	if v := strOf(doc, "apiVersion"); v != "postgresql.cnpg.io/v1" {
 		is.add("apiVersion", "postgresql.cnpg.io/v1이어야 함 (받은 값 %q)", v)
@@ -39,6 +76,11 @@ func CheckManifest(manifest string, p *eplan.Plan) Issues {
 	if meta == nil {
 		is.add("metadata", "있어야 함")
 		meta = map[string]any{}
+	}
+	for _, k := range sortedKeys(meta) {
+		if !slices.Contains(manifestMetaKeys, k) {
+			is.add("metadata."+k, "쓸 수 없는 키 (허용: name, namespace). annotations, finalizers, ownerReferences로 대상 DB가 멈추거나 지워질 수 있음")
+		}
 	}
 	if n := strOf(meta, "name"); n != p.Target.Cluster {
 		is.add("metadata.name", "Plan의 target.cluster %q와 같아야 함 (받은 값 %q)", p.Target.Cluster, n)
@@ -61,8 +103,18 @@ func CheckManifest(manifest string, p *eplan.Plan) Issues {
 			is.add("spec."+k, "쓸 수 없는 키 (허용: %s)", strings.Join(manifestSpecKeys, ", "))
 		}
 	}
-	if n, ok := spec["instances"].(float64); ok && (n < 1 || n > 5 || n != float64(int(n))) {
-		is.add("spec.instances", "1~5인 정수여야 함 (받은 값 %v)", n)
+	if v, ok := spec["instances"]; ok && !intIn(v, 1, 5) {
+		is.add("spec.instances", "1~5인 정수여야 함 (받은 값 %v)", v)
+	}
+	if v, ok := spec["smartShutdownTimeout"]; ok && !intIn(v, 0, 600) {
+		is.add("spec.smartShutdownTimeout", "0~600인 정수(초)여야 함 (받은 값 %v)", v)
+	}
+	is = append(is, checkStorage("spec.storage", spec["storage"], true)...)
+	if v, ok := spec["walStorage"]; ok {
+		is = append(is, checkStorage("spec.walStorage", v, false)...)
+	}
+	if v, ok := spec["resources"]; ok {
+		is = append(is, checkResources(v)...)
 	}
 	// 대상은 원본의 복제본으로 시작해야 한다. 아니면 빈 DB가 생기고 동기화가 성립하지 않는다.
 	rep, _ := spec["replica"].(map[string]any)
@@ -79,22 +131,29 @@ func CheckManifest(manifest string, p *eplan.Plan) Issues {
 		if self := strOf(rep, "self"); self != "" && self != p.Target.Cluster {
 			is.add("spec.replica.self", "대상 클러스터 %q여야 함 (받은 값 %q)", p.Target.Cluster, self)
 		}
-	}
-	if pg, ok := spec["postgresql"].(map[string]any); ok {
-		for k := range pg {
-			if k != "parameters" {
-				is.add("spec.postgresql."+k, "postgresql 아래에는 parameters만 쓸 수 있음")
+		// minApplyDelay, enabled, promotionToken은 복제를 늦추거나 끄거나 승격 시점을 바꾼다. 승격은 엔진이 정한다.
+		for _, k := range sortedKeys(rep) {
+			if !slices.Contains([]string{"self", "primary", "source"}, k) {
+				is.add("spec.replica."+k, "쓸 수 없는 키 (허용: self, primary, source). 복제 지연과 승격은 엔진이 정함")
 			}
 		}
 	}
-	if b, ok := spec["bootstrap"].(map[string]any); ok {
-		for k := range b {
+	if v, ok := spec["postgresql"]; ok {
+		is = append(is, checkPostgresql(v)...)
+	}
+	b, _ := spec["bootstrap"].(map[string]any)
+	if b == nil {
+		is.add("spec.bootstrap", "pg_basebackup으로 원본 %q에서 시작해야 함 (받은 값 %v)", p.Source.Cluster, spec["bootstrap"])
+	} else {
+		for _, k := range sortedKeys(b) {
 			if k != "pg_basebackup" {
 				is.add("spec.bootstrap."+k, "복제본은 pg_basebackup으로만 시작함")
 			}
 		}
 		if bb, ok := b["pg_basebackup"].(map[string]any); ok {
 			is = append(is, checkBasebackup(bb, p)...)
+		} else {
+			is.add("spec.bootstrap.pg_basebackup", "객체여야 함 (source, database, owner, secret)")
 		}
 	}
 	if v, ok := spec["imageName"]; ok {
@@ -220,6 +279,140 @@ func checkConnection(path string, v any, ep eplan.Endpoint) Issues {
 	if user := strOf(cp, "user"); user != "streaming_replica" {
 		is.add(path+".user", "streaming_replica여야 함 (받은 값 %q)", user)
 	}
+	// 운영 데이터를 복제하는 연결이므로 암호화를 끄지 못하게 한다.
+	if m := strOf(cp, "sslmode"); m != "require" && m != "verify-ca" && m != "verify-full" {
+		is.add(path+".sslmode", "require, verify-ca, verify-full 중 하나여야 함 (받은 값 %v)", cp["sslmode"])
+	}
+	if db, ok := cp["dbname"]; ok && db != "postgres" {
+		is.add(path+".dbname", "postgres여야 함 (받은 값 %v)", db)
+	}
+	return is
+}
+
+// intIn은 YAML 숫자(JSON으로 바꾸면 float64)가 lo~hi 사이의 정수인지 본다. 문자열 "3"이나 true는 받지 않는다.
+func intIn(v any, lo, hi float64) bool {
+	n, ok := v.(float64)
+	return ok && n >= lo && n <= hi && n == math.Trunc(n)
+}
+
+// k8sName은 StorageClass 같은 리소스 이름(DNS-1123 subdomain)이다.
+var k8sName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`)
+
+// checkStorage는 storage·walStorage에 크기와 StorageClass만 쓰는지 본다.
+// pvcTemplate은 dataSource로 다른 볼륨을 복제해 올 수 있어 받지 않는다.
+func checkStorage(path string, v any, required bool) Issues {
+	var is Issues
+	if v == nil {
+		if required {
+			is.add(path, "있어야 함 (size 필수)")
+		}
+		return is
+	}
+	m, _ := v.(map[string]any)
+	if m == nil {
+		is.add(path, "객체여야 함 (size, storageClass)")
+		return is
+	}
+	for _, k := range sortedKeys(m) {
+		if k != "size" && k != "storageClass" {
+			is.add(path+"."+k, "쓸 수 없는 키 (허용: size, storageClass)")
+		}
+	}
+	if s, ok := m["size"]; !ok {
+		is.add(path+".size", "있어야 함")
+	} else {
+		is = append(is, checkQuantity(path+".size", s, maxStorageSize)...)
+	}
+	if sc, ok := m["storageClass"]; ok {
+		if s, _ := sc.(string); !k8sName.MatchString(s) {
+			is.add(path+".storageClass", "StorageClass 이름이어야 함 (받은 값 %v)", sc)
+		}
+	}
+	return is
+}
+
+// checkResources는 requests·limits에 cpu·memory만, 0보다 크고 상한 이하로 쓰는지 본다.
+func checkResources(v any) Issues {
+	var is Issues
+	m, _ := v.(map[string]any)
+	if m == nil {
+		is.add("spec.resources", "객체여야 함 (requests, limits)")
+		return is
+	}
+	for _, k := range sortedKeys(m) {
+		path := "spec.resources." + k
+		if k != "requests" && k != "limits" {
+			is.add(path, "쓸 수 없는 키 (허용: requests, limits)")
+			continue
+		}
+		r, _ := m[k].(map[string]any)
+		if r == nil {
+			is.add(path, "객체여야 함 (cpu, memory)")
+			continue
+		}
+		for _, name := range sortedKeys(r) {
+			switch name {
+			case "cpu":
+				is = append(is, checkQuantity(path+".cpu", r[name], maxCPU)...)
+			case "memory":
+				is = append(is, checkQuantity(path+".memory", r[name], maxMemory)...)
+			default:
+				is.add(path+"."+name, "쓸 수 없는 키 (허용: cpu, memory)")
+			}
+		}
+	}
+	return is
+}
+
+// checkQuantity는 쿠버네티스 수량(500m, 1Gi, 2)이 0보다 크고 max 이하인지 본다.
+func checkQuantity(path string, v any, max string) Issues {
+	var is Issues
+	var s string
+	switch x := v.(type) {
+	case string:
+		s = x
+	case float64:
+		s = strconv.FormatFloat(x, 'f', -1, 64)
+	}
+	q, err := resource.ParseQuantity(s)
+	if err != nil || q.Sign() <= 0 || q.Cmp(resource.MustParse(max)) > 0 {
+		is.add(path, "0보다 크고 %s 이하인 수량이어야 함 (받은 값 %v)", max, v)
+	}
+	return is
+}
+
+// checkPostgresql은 parameters만, 허용한 설정 이름과 문자열 값으로 쓰는지 본다.
+func checkPostgresql(v any) Issues {
+	var is Issues
+	pg, _ := v.(map[string]any)
+	if pg == nil {
+		is.add("spec.postgresql", "객체여야 함 (parameters)")
+		return is
+	}
+	for _, k := range sortedKeys(pg) {
+		if k != "parameters" {
+			is.add("spec.postgresql."+k, "postgresql 아래에는 parameters만 쓸 수 있음")
+		}
+	}
+	raw, ok := pg["parameters"]
+	if !ok {
+		return is
+	}
+	params, _ := raw.(map[string]any)
+	if params == nil {
+		is.add("spec.postgresql.parameters", "객체여야 함")
+		return is
+	}
+	for _, k := range sortedKeys(params) {
+		path := "spec.postgresql.parameters." + k
+		if !slices.Contains(pgParameterKeys, k) {
+			is.add(path, "쓸 수 없는 설정 (허용: %s)", strings.Join(pgParameterKeys, ", "))
+			continue
+		}
+		if s, _ := params[k].(string); s == "" {
+			is.add(path, "값은 문자열이어야 함 (예: \"200\") (받은 값 %v)", params[k])
+		}
+	}
 	return is
 }
 
@@ -264,8 +457,12 @@ func manifestPathAllowed(seg []string) bool {
 	return false
 }
 
+// docEnd는 YAML 문서 끝 표시(...)다. 이 뒤에는 --- 없이도 새 문서가 올 수 있다.
+var docEnd = regexp.MustCompile(`(?m)^\.\.\.([ \t#\r]|$)`)
+
 func parseYAMLObject(s string) (map[string]any, error) {
-	if strings.Contains(s, "\n---") {
+	// 이 검사와 엔진은 첫 문서만 읽지만, 첨부로 남은 파일을 다른 도구가 읽으면 뒤 문서도 적용될 수 있다.
+	if strings.Contains(s, "\n---") || docEnd.MatchString(s) {
 		return nil, fmt.Errorf("문서가 여러 개임")
 	}
 	var doc map[string]any

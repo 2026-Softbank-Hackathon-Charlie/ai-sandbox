@@ -147,7 +147,7 @@ func checkRBAC(ctx context.Context, ai kubernetes.Interface, sbNS, prodNS string
 		out = append(out, r)
 	}
 
-	// AI 계정은 Pod를 만들 수 있으므로, 노드 네트워크·파일시스템을 쓰는 Pod는 Pod Security가 막아야 한다.
+	// 노드 네트워크·파일시스템을 쓰는 Pod는 RBAC(Pod 생성 권한 없음)나 Pod Security가 막아야 한다.
 	// dry-run으로 보내 실제로는 아무것도 만들지 않는다.
 	out = append(out, checkHostPod(ctx, ai, sbNS))
 
@@ -174,15 +174,24 @@ func HostPod(namespace string) *corev1.Pod {
 	}
 }
 
+// host-pod-create 검사에서 무엇이 막았는지 (CheckResult.Detail)
+const (
+	HostPodByRBAC        = "RBAC: Pod 생성 권한 없음"
+	HostPodByPodSecurity = "Pod Security: 노드 네트워크·파일시스템을 쓰는 Pod 금지"
+)
+
 func checkHostPod(ctx context.Context, ai kubernetes.Interface, sbNS string) CheckResult {
 	r := CheckResult{Name: "host-pod-create", Command: "kubectl run -n " + sbNS + " --dry-run=server (hostNetwork, hostPath /)", Expect: ExpectBlocked}
 	_, err := ai.CoreV1().Pods(sbNS).Create(ctx, HostPod(sbNS), metav1.CreateOptions{DryRun: []string{metav1.DryRunAll}})
 	switch {
 	case err == nil:
 		r.Got = ExpectOpen
-	// Quota 초과도 Forbidden이므로, Pod Security가 막은 것만 막힘으로 친다
+	// Quota 초과도 Forbidden이므로, Pod Security나 RBAC가 막은 것만 막힘으로 친다.
+	// RBAC는 admission보다 먼저 보므로, Pod 생성 권한이 없으면 RBAC 거절이 온다.
 	case apierrors.IsForbidden(err) && strings.Contains(err.Error(), "PodSecurity"):
-		r.Got = ExpectBlocked
+		r.Got, r.Detail = ExpectBlocked, HostPodByPodSecurity
+	case apierrors.IsForbidden(err) && strings.Contains(err.Error(), `cannot create resource "pods"`):
+		r.Got, r.Detail = ExpectBlocked, HostPodByRBAC
 	default:
 		r.Got, r.Detail = "error", err.Error()
 	}

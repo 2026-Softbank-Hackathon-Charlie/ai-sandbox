@@ -51,6 +51,10 @@ func TestParseDiagnosisRejects(t *testing.T) {
 		{"값 없음", `, "value": "standard"`, ``, "값이 있어야"},
 		{"없는 키 replace", `"/spec/storage/storageClass"`, `"/spec/walStorage/size"`, "중간 키"},
 		{"모르는 키", `"evidence"`, `"evidence": [], "run"`, "unknown field"},
+		{"빈 근거", `["Warning  ProvisioningFailed  persistentvolumeclaim/moimroom-db-eks-1  storageclass.storage.k8s.io \"gp3\" not found"]`, `[" "]`, "evidence[0]: 비어 있음"},
+		{"원인 너무 김", `"cause": "매니페스트의 StorageClass gp3가 대상 클러스터에 없어 moimroom-db-eks의 PVC가 Pending"`, `"cause": "` + strings.Repeat("가", 1001) + `"`, "1000자 이하"},
+		{"StorageClass를 숫자로", `"value": "standard"`, `"value": 123`, "StorageClass 이름"},
+		{"크기를 비우기", `"/spec/storage/storageClass", "value": "standard"`, `"/spec/storage/size", "value": ""`, "spec.storage.size"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	eplan "github.com/2026-Softbank-Hackathon-Charlie/migration-engine/pkg/plan"
 )
@@ -119,8 +120,34 @@ func (p *Proposal) Check(draft *eplan.Plan) Issues {
 	} else if strings.TrimSpace(p.Manifest) != "" {
 		is.add("manifest", "target.manifest가 %q가 아니면 매니페스트를 보내지 않음", ManifestRef)
 	}
-	if len(p.Notes) == 0 {
-		is.add("notes", "값을 정한 근거가 하나 이상 있어야 함")
+	is = append(is, checkTexts("notes", "값을 정한 근거", p.Notes, maxNoteLen)...)
+	return is
+}
+
+// AI가 쓴 글(근거, 진단 근거)의 상한. 승인 화면과 에이전트 기록에 그대로 보이므로 짧게 받는다.
+const (
+	maxTexts       = 10
+	maxNoteLen     = 500
+	maxEvidenceLen = 1000
+	maxCauseLen    = 1000
+)
+
+// checkTexts는 글 목록이 1~maxTexts개이고, 각 글이 비어 있지 않으며 maxLen자 이하인지 본다.
+func checkTexts(path, what string, texts []string, maxLen int) Issues {
+	var is Issues
+	switch {
+	case len(texts) == 0:
+		is.add(path, "%s가 하나 이상 있어야 함", what)
+	case len(texts) > maxTexts:
+		is.add(path, "%s는 %d개까지 (받은 수 %d)", what, maxTexts, len(texts))
+	}
+	for i, s := range texts {
+		switch n := utf8.RuneCountInString(s); {
+		case strings.TrimSpace(s) == "":
+			is.add(fmt.Sprintf("%s[%d]", path, i), "비어 있음")
+		case n > maxLen:
+			is.add(fmt.Sprintf("%s[%d]", path, i), "%d자 이하여야 함 (받은 길이 %d자)", maxLen, n)
+		}
 	}
 	return is
 }
