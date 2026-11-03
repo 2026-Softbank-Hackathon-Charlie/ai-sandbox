@@ -62,10 +62,11 @@ func (is *Issues) add(path, msg string, a ...any) {
 	*is = append(*is, Issue{path, fmt.Sprintf(msg, a...)})
 }
 
-// 상한값 범위. 데모 3분 안에 끝나야 하고, 게이트웨이의 쓰기 보류 상한(-max-hold 90s)보다 짧아야 한다.
+// 상한값 범위. 데모 3분 안에 끝나야 하고, 쓰기 보류 예산은 게이트웨이의 쓰기 보류 상한(-max-hold, 기본 55s)보다
+// 짧아야 한다. 55s는 앞단 ALB의 유휴 타임아웃(60s)보다 먼저 503 Retry-After로 답하려고 정한 값이다.
 // 제안값이며 11/6에 확정한다.
 var (
-	maxDowntimeRange       = [2]time.Duration{5 * time.Second, 60 * time.Second}
+	maxDowntimeRange       = [2]time.Duration{5 * time.Second, 50 * time.Second}
 	switchoverTimeoutRange = [2]time.Duration{30 * time.Second, 3 * time.Minute}
 	catchupTimeoutRange    = [2]time.Duration{1 * time.Minute, 15 * time.Minute}
 	maxLagBytesRange       = [2]int64{1 << 10, 64 << 20}
