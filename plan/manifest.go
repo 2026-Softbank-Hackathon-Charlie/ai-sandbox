@@ -619,3 +619,6 @@ func patchYAML(src string, ops []Op) (string, error) {
 	out, err := yaml.Marshal(root)
 	return string(out), err
 }
+
+// IsCNPGImage는 CloudNativePG가 배포하는 PostgreSQL 이미지인지 알려준다. 대상 매니페스트와 리허설 임시 원본에 쓸 수 있는 이미지다.
+func IsCNPGImage(s string) bool { return cnpgImage.MatchString(s) }

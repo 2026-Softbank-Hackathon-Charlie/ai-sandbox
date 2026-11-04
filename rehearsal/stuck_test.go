@@ -2,11 +2,13 @@ package rehearsal
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -73,5 +75,33 @@ func TestStuckFiresOnRecurringWarning(t *testing.T) {
 	})
 	if !fired {
 		t.Fatal("계속 되풀이되는 경고는 멈춰야 함")
+	}
+}
+
+func TestFailedJobPods(t *testing.T) {
+	since := time.Now().Add(-time.Minute)
+	pod := func(name, job string, phase corev1.PodPhase, created time.Time) *corev1.Pod {
+		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "sb", CreationTimestamp: metav1.NewTime(created)}, Status: corev1.PodStatus{Phase: phase}}
+		if job != "" {
+			p.Labels = map[string]string{"job-name": job}
+		}
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "full-recovery", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Error", ExitCode: 1}}}}
+		return p
+	}
+	now := time.Now()
+	objs := []runtime.Object{
+		pod("dst-1-pgbasebackup-a", "dst-1-pgbasebackup", corev1.PodFailed, now),
+		pod("dst-1-pgbasebackup-b", "dst-1-pgbasebackup", corev1.PodFailed, now.Add(time.Second)),
+		pod("old-job-x", "old-job", corev1.PodFailed, since.Add(-time.Hour)), // 이 실행 전
+		pod("plain", "", corev1.PodFailed, now),                              // Job Pod가 아님
+	}
+	cs := fake.NewClientset(objs...)
+	if got := failedJobPods(context.Background(), cs, "sb", since, 3); len(got) != 0 {
+		t.Fatalf("두 번 실패로는 멈추지 않아야 함: %v", got)
+	}
+	_, _ = cs.CoreV1().Pods("sb").Create(context.Background(), pod("dst-1-pgbasebackup-c", "dst-1-pgbasebackup", corev1.PodFailed, now.Add(2*time.Second)), metav1.CreateOptions{})
+	got := failedJobPods(context.Background(), cs, "sb", since, 3)
+	if len(got) == 0 || !strings.Contains(got[0], "job/dst-1-pgbasebackup") || !strings.Contains(got[0], "3번 실패") || !strings.Contains(got[0], "pod/dst-1-pgbasebackup-c") || !strings.Contains(got[0], "종료 코드 1") {
+		t.Fatalf("근거: %v", got)
 	}
 }

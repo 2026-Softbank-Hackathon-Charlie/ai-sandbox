@@ -488,3 +488,22 @@ func TestPlanChecksSourceMajorVersion(t *testing.T) {
 		t.Fatalf("메이저 버전이 다르면 다시 물어야 함: %s", second)
 	}
 }
+
+func TestDiagnoseShowsSourceImage(t *testing.T) {
+	v := readFile(t, "../plan/testdata/proposal.json")
+	var p plan.Proposal
+	if err := json.Unmarshal([]byte(v), &p); err != nil {
+		t.Fatal(err)
+	}
+	p.SourceImage = "ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie"
+	diag := `{"cause":"대상이 PostgreSQL 17이라 원본 18에서 복제할 수 없음","evidence":["pg_basebackup: error: incompatible server version 18.6"],"fix":{"kind":"manifest-patch","patch":[{"op":"replace","path":"/spec/imageName","value":"ghcr.io/cloudnative-pg/postgresql:18.6"}]}}`
+	f := &fakeAPI{replies: []reply{{text: diag}}}
+	a, _ := newAgent(t, f)
+	if _, _, err := a.Diagnose(context.Background(), DiagnoseInput{Proposal: &p, Draft: draft(t), Log: "pg_basebackup: error: incompatible server version 18.6"}); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := json.Marshal(f.requests[0]["messages"])
+	if !strings.Contains(string(first), "source_image") || !strings.Contains(string(first), "PostgreSQL 18") {
+		t.Fatalf("진단에도 원본 이미지가 전달돼야 함: %s", first)
+	}
+}

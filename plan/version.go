@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -20,6 +21,14 @@ func PostgresMajor(image string) int {
 	}
 	n, _ := strconv.Atoi(tag[:end])
 	return n
+}
+
+// MajorLabel은 사람과 AI에 보여 줄 버전 표시다. 태그가 없어 메이저 버전을 모르면 그렇게 적는다.
+func MajorLabel(image string) string {
+	if n := PostgresMajor(image); n > 0 {
+		return fmt.Sprintf("PostgreSQL %d", n)
+	}
+	return "PostgreSQL 메이저 버전 모름 (태그 없음)"
 }
 
 // checkMajorVersion은 대상 매니페스트의 PostgreSQL이 원본과 같은 메이저 버전인지 본다.

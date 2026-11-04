@@ -129,7 +129,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "경고: 원본 CNPG 클러스터 이미지를 읽지 못함 (%v). 버전 검사 없이 계획합니다\n", err)
 	} else {
 		srcImage = img
-		fmt.Fprintf(os.Stderr, "원본 이미지: %s (PostgreSQL %d)\n", img, plan.PostgresMajor(img))
+		fmt.Fprintf(os.Stderr, "원본 이미지: %s (%s)\n", img, plan.MajorLabel(img))
 	}
 	scope := llm.PlanScope{App: *app, Namespace: draft.Source.Namespace, Envs: []string{*from, *to}}
 	prop, planSession, err := agent.Plan(ctx, llm.PlanInput{App: *app, Draft: &draft, Tools: llm.PlanTools(scope, pc, clusters), Source: stats, SourceImage: srcImage})

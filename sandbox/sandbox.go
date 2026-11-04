@@ -173,7 +173,7 @@ type Objects struct {
 }
 
 // aiRules는 샌드박스 토큰으로 하는 일만큼만 준다. 리허설과 엔진이 CNPG Cluster를 만들고 고치고,
-// 진단 도구와 멈춤 감지가 Pod·PVC·이벤트를 읽고, 리허설이 임시 원본의 앱 계정 secret을 이름으로 읽는다.
+// 진단 도구와 멈춤 감지가 Pod·Pod 로그·PVC·이벤트를 읽고, 리허설이 임시 원본의 앱 계정 secret을 이름으로 읽는다.
 // Pod, Service, Job처럼 워크로드를 만드는 권한은 주지 않는다. Service externalIPs로 클러스터의 다른 트래픽을
 // 가로채거나(CVE-2020-8554), 다른 계정으로 Pod를 띄우는 길을 막기 위해서다. Role, RoleBinding, NetworkPolicy,
 // ResourceQuota, LimitRange, serviceaccounts/token, pods/exec도 주지 않는다. 격리를 스스로 풀 수 없게 하기 위해서다.
@@ -183,7 +183,7 @@ var aiRules = []rbacv1.PolicyRule{
 		Resources: []string{"clusters"},
 		Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 	},
-	{APIGroups: []string{""}, Resources: []string{"pods", "persistentvolumeclaims", "events"}, Verbs: []string{"get", "list", "watch"}},
+	{APIGroups: []string{""}, Resources: []string{"pods", "pods/log", "persistentvolumeclaims", "events"}, Verbs: []string{"get", "list", "watch"}},
 	{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get"}},
 }
 

@@ -276,15 +276,9 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 		return a, nil, nil
 	}
 	src := SourceManifest(&cur.Plan, sb.Namespace, db)
-	if err := MatchStandbyParams(src, cur.Manifest); err != nil {
+	if err := PrepareTempSource(src, cur.SourceImage, cur.Manifest); err != nil {
 		failf("임시 원본 설정: %v", err)
 		return a, nil, nil
-	}
-	if img := TempSourceImage(cur.SourceImage, cur.Manifest); img != "" {
-		if err := unstructured.SetNestedField(src.Object, img, "spec", "imageName"); err != nil {
-			failf("임시 원본 이미지: %v", err)
-			return a, nil, nil
-		}
 	}
 	ses.Log(ctx, agentlog.Event{Type: agentlog.ToolCall, Tool: "sandbox_source", Input: map[string]any{"cluster": cur.Plan.Source.Cluster, "rows": c.Rows, "schemas": cur.Plan.Verify.Schemas}})
 	t0 = time.Now()
@@ -378,7 +372,7 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 	case ev := <-stuck:
 		if st.Outcome != engine.OutcomeSucceeded {
 			a.Evidence = ev
-			runErr = fmt.Errorf("같은 경고가 %s 넘게 이어져 멈춤: %w", c.FailFast, runErr)
+			runErr = fmt.Errorf("기다려도 풀리지 않는 문제로 멈춤 (같은 경고가 %s 넘게 이어지거나 작업 Job이 거듭 실패): %w", c.FailFast, runErr)
 		}
 	default:
 	}
@@ -594,6 +588,12 @@ func watchStuck(ctx context.Context, cs kubernetes.Interface, ns string, window 
 			return
 		case <-time.After(2 * time.Second):
 		}
+		// 경고 이벤트 없이 작업 Pod만 거듭 실패하는 경우(예: 메이저 버전이 달라 pg_basebackup이 거절됨)
+		if lines := failedJobPods(ctx, cs, ns, started, failedJobPodLimit); len(lines) > 0 {
+			out <- append(warningEvents(context.WithoutCancel(ctx), cs, ns), lines...)
+			cancel()
+			return
+		}
 		list, err := cs.CoreV1().Events(ns).List(ctx, metav1.ListOptions{FieldSelector: "type=Warning"})
 		if err != nil {
 			continue
@@ -637,6 +637,72 @@ func eventKey(e corev1.Event) string {
 }
 
 // warningEvents는 네임스페이스의 경고 이벤트를 시간순 로그 줄로 돌려준다. 진단 AI에 넘기는 근거다.
+// failedJobPodLimit은 같은 Job의 Pod가 몇 번 실패하면 멈춘 것으로 보는지다. Job은 10초, 20초, 40초 간격으로 다시 시도한다.
+const failedJobPodLimit = 3
+
+// failedJobPods는 CNPG 작업 Job(pg_basebackup, join 등)의 Pod가 since 뒤에 limit번 넘게 실패했는지 본다.
+// 이런 실패는 쿠버네티스 경고 이벤트를 남기지 않고 Job이 다시 시도만 해서, 재시도가 다 끝날 때(10분 넘게)까지 드러나지 않는다.
+// CNPG 1.30.1에서 대상 PostgreSQL 17, 원본 18일 때 실제로 이랬다. 마지막 Pod 로그의 오류 줄을 근거로 붙인다.
+func failedJobPods(ctx context.Context, cs kubernetes.Interface, ns string, since time.Time, limit int) []string {
+	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil
+	}
+	byJob := map[string][]corev1.Pod{}
+	for _, p := range pods.Items {
+		job := p.Labels["job-name"]
+		if job == "" || p.Status.Phase != corev1.PodFailed || p.CreationTimestamp.Time.Before(since) {
+			continue
+		}
+		byJob[job] = append(byJob[job], p)
+	}
+	jobs := make([]string, 0, len(byJob))
+	for job := range byJob {
+		jobs = append(jobs, job)
+	}
+	sort.Strings(jobs)
+	var out []string
+	for _, job := range jobs {
+		ps := byJob[job]
+		if len(ps) < limit {
+			continue
+		}
+		sort.Slice(ps, func(i, j int) bool { return ps[i].CreationTimestamp.Before(&ps[j].CreationTimestamp) })
+		last := ps[len(ps)-1]
+		out = append(out, mask.String(fmt.Sprintf("Failed  job/%s  Pod가 %d번 실패함 (마지막 pod/%s%s)", job, len(ps), last.Name, exitSummary(last))))
+		out = append(out, logErrors(ctx, cs, ns, last.Name)...)
+	}
+	return out
+}
+
+func exitSummary(p corev1.Pod) string {
+	for _, c := range p.Status.ContainerStatuses {
+		if t := c.State.Terminated; t != nil && t.ExitCode != 0 {
+			return fmt.Sprintf(", %s %s 종료 코드 %d", c.Name, t.Reason, t.ExitCode)
+		}
+	}
+	return ""
+}
+
+// logErrors는 Pod 로그 끝에서 오류 줄만 가려서 가져온다. 비밀값은 가린다.
+func logErrors(ctx context.Context, cs kubernetes.Interface, ns, pod string) []string {
+	tail := int64(100)
+	b, err := cs.CoreV1().Pods(ns).GetLogs(pod, &corev1.PodLogOptions{TailLines: &tail}).DoRaw(ctx)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if l := strings.ToLower(line); strings.Contains(l, "error") || strings.Contains(l, "fatal") {
+			out = append(out, mask.String("  log  pod/"+pod+"  "+strings.TrimSpace(line)))
+		}
+	}
+	if len(out) > 5 {
+		out = out[len(out)-5:]
+	}
+	return out
+}
+
 func warningEvents(ctx context.Context, cs kubernetes.Interface, ns string) []string {
 	list, err := cs.CoreV1().Events(ns).List(ctx, metav1.ListOptions{FieldSelector: "type=Warning"})
 	if err != nil {

@@ -119,3 +119,24 @@ func TestClusterRehearsalWithSmallStandbyParams(t *testing.T) {
 		t.Fatalf("통과해야 함: %+v", a)
 	}
 }
+
+// 원본과 대상의 PostgreSQL 메이저 버전이 다르면 경고 이벤트 없이 pg_basebackup Job만 거듭 실패한다.
+// 계획 검사는 원본 이미지를 읽었을 때만 막으므로, 리허설은 Job 실패로 빨리 멈추고 로그의 오류 줄을 근거로 남겨야 한다.
+func TestClusterRehearsalCatchesMajorVersionMismatch(t *testing.T) {
+	c := kindProposal(t, "standard")
+	c.Proposal.SourceImage = "ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie"
+	c.Proposal.Manifest = strings.Replace(c.Proposal.Manifest, "imageName: ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie", "imageName: ghcr.io/cloudnative-pg/postgresql:17.11", 1)
+	start := time.Now()
+	rep, err := Rehearse(context.Background(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := rep.Attempts[0]
+	t.Logf("결과: 통과=%v %.0f초 오류=%s\n근거:\n%s", a.Passed, a.DurationS, a.Error, strings.Join(a.Evidence, "\n"))
+	if rep.Passed || time.Since(start) > 4*time.Minute {
+		t.Fatalf("catchupTimeout(5분) 전에 멈춰야 함: 통과=%v %s", rep.Passed, time.Since(start))
+	}
+	if !strings.Contains(strings.Join(a.Evidence, "\n"), "incompatible server version") {
+		t.Fatalf("pg_basebackup 오류 줄이 근거에 있어야 함: %v", a.Evidence)
+	}
+}

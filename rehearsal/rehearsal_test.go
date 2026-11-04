@@ -372,37 +372,44 @@ func TestLogIsolationNamesPodSecurity(t *testing.T) {
 	}
 }
 
-func TestMatchStandbyParams(t *testing.T) {
+func TestPrepareTempSource(t *testing.T) {
 	p := proposal(t)
-	src := SourceManifest(&p.Plan, "sandbox-moimroom-ab12", DBInfo{Name: "app", User: "app"})
+	newSrc := func() *unstructured.Unstructured {
+		return SourceManifest(&p.Plan, "sandbox-moimroom-ab12", DBInfo{Name: "app", User: "app"})
+	}
+	image := func(u *unstructured.Unstructured) string {
+		s, _, _ := unstructured.NestedString(u.Object, "spec", "imageName")
+		return s
+	}
 	// 실제 원본(worker 8)에 맞춘 대상은 CNPG 기본값(32)으로 뜬 임시 원본보다 작아 리허설에서만 뜨지 않는다
-	target := "spec:\n  postgresql:\n    parameters:\n      max_connections: \"60\"\n      max_worker_processes: \"8\"\n      work_mem: \"8MB\"\n"
-	if err := MatchStandbyParams(src, target); err != nil {
+	target := "spec:\n  imageName: ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie\n  postgresql:\n    parameters:\n      max_connections: \"60\"\n      max_worker_processes: \"8\"\n      work_mem: \"8MB\"\n"
+	src := newSrc()
+	if err := PrepareTempSource(src, "ghcr.io/cloudnative-pg/postgresql:18.1", target); err != nil {
 		t.Fatal(err)
 	}
 	got, _, _ := unstructured.NestedStringMap(src.Object, "spec", "postgresql", "parameters")
 	if got["max_connections"] != "60" || got["max_worker_processes"] != "8" || len(got) != 2 {
 		t.Fatalf("임시 원본 설정: %v", got)
 	}
-	// 대상에 없으면 양쪽 다 기본값이라 건드리지 않는다
-	src = SourceManifest(&p.Plan, "sandbox-moimroom-ab12", DBInfo{Name: "app", User: "app"})
-	if err := MatchStandbyParams(src, p.Manifest); err != nil {
+	if image(src) != "ghcr.io/cloudnative-pg/postgresql:18.1" {
+		t.Fatalf("실제 원본 이미지를 써야 함: %s", image(src))
+	}
+	// 원본을 모르거나, 원본이 공식 이미지가 아니면(샌드박스가 받지 못할 수 있음) 대상 이미지
+	for _, srcImage := range []string{"", "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/mirror/postgresql:18.6"} {
+		src = newSrc()
+		if err := PrepareTempSource(src, srcImage, target); err != nil {
+			t.Fatal(err)
+		}
+		if image(src) != "ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie" {
+			t.Fatalf("원본 %q: 대상 이미지를 써야 함: %s", srcImage, image(src))
+		}
+	}
+	// 대상에 없는 설정과 이미지는 건드리지 않는다 (양쪽 다 기본값)
+	src = newSrc()
+	if err := PrepareTempSource(src, "", "spec: {}\n"); err != nil {
 		t.Fatal(err)
 	}
-	if _, found, _ := unstructured.NestedMap(src.Object, "spec", "postgresql"); found {
-		t.Fatal("대상에 없는 설정을 넣음")
-	}
-}
-
-func TestTempSourceImage(t *testing.T) {
-	m := "spec:\n  imageName: ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie\n"
-	if got := TempSourceImage("ghcr.io/cloudnative-pg/postgresql:18.1", m); got != "ghcr.io/cloudnative-pg/postgresql:18.1" {
-		t.Fatalf("실제 원본 이미지를 써야 함: %s", got)
-	}
-	if got := TempSourceImage("", m); got != "ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie" {
-		t.Fatalf("원본을 모르면 대상 이미지: %s", got)
-	}
-	if got := TempSourceImage("", "spec: {}\n"); got != "" {
-		t.Fatalf("둘 다 없으면 기본 이미지: %s", got)
+	if _, found, _ := unstructured.NestedMap(src.Object, "spec", "postgresql"); found || image(src) != "" {
+		t.Fatalf("대상에 없는 값을 넣음: %v", src.Object["spec"])
 	}
 }

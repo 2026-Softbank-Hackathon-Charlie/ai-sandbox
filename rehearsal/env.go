@@ -19,6 +19,7 @@ import (
 
 	eplan "github.com/2026-Softbank-Hackathon-Charlie/migration-engine/pkg/plan"
 
+	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/plan"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/sandbox"
 )
 
@@ -294,11 +295,13 @@ func Seed(ctx context.Context, dsn string, schemas []string, rows int) error {
 // standbyParams는 hot standby가 primary 이상이어야 시작하는 PostgreSQL 설정이다.
 var standbyParams = []string{"max_connections", "max_worker_processes"}
 
-// MatchStandbyParams는 임시 원본의 max_connections·max_worker_processes를 대상 매니페스트 값에 맞춘다.
-// 대상은 임시 원본을 따라가는 hot standby라 이 값들이 원본 이상이어야 뜬다. 임시 원본이 CNPG 기본값(100, 32)으로 뜨면,
-// 실제 원본에 맞춰 그보다 작게 정한 대상이 운영에서는 되는데 리허설에서만 뜨지 않는다.
-// 대상에 없는 값은 양쪽 다 기본값이므로 그대로 둔다.
-func MatchStandbyParams(src *unstructured.Unstructured, targetManifest string) error {
+// PrepareTempSource는 임시 원본을 대상 매니페스트와 실제 원본에 맞춘다. 대상 매니페스트는 한 번만 읽는다.
+//   - max_connections·max_worker_processes를 대상 값으로: 대상은 임시 원본을 따라가는 hot standby라 이 값들이
+//     원본 이상이어야 뜬다. 임시 원본이 CNPG 기본값(100, 32)으로 뜨면 실제 원본에 맞춰 더 작게 정한 대상이 리허설에서만 뜨지 않는다.
+//   - 이미지를 실제 원본 이미지로: 대상 클러스터의 기본 이미지로 뜨면 메이저 버전이 대상과 달라 물리 복제가 되지 않거나,
+//     실제 원본과 다른 버전으로 리허설하게 된다. 원본 이미지가 CNPG 공식 이미지가 아니면(사설 레지스트리·미러) 샌드박스가
+//     받지 못할 수 있으므로 대상 이미지를 쓴다. 대상 이미지는 계획 검사가 원본과 같은 메이저 버전임을 확인한 것이다.
+func PrepareTempSource(src *unstructured.Unstructured, sourceImage, targetManifest string) error {
 	var doc map[string]any
 	if err := yaml.Unmarshal([]byte(targetManifest), &doc); err != nil {
 		return fmt.Errorf("대상 매니페스트를 읽을 수 없음: %w", err)
@@ -312,24 +315,17 @@ func MatchStandbyParams(src *unstructured.Unstructured, targetManifest string) e
 			set[k] = v
 		}
 	}
-	if len(set) == 0 {
-		return nil
+	if len(set) > 0 {
+		if err := unstructured.SetNestedMap(src.Object, set, "spec", "postgresql", "parameters"); err != nil {
+			return err
+		}
 	}
-	return unstructured.SetNestedMap(src.Object, set, "spec", "postgresql", "parameters")
-}
-
-// TempSourceImage는 임시 원본에 쓸 이미지다. 실제 원본 이미지를 알면(sourceImage) 그것을, 모르면 대상 매니페스트의 이미지를 쓴다.
-// 임시 원본이 대상 클러스터의 기본 이미지로 뜨면, 메이저 버전이 대상과 달라 물리 복제가 되지 않거나(실제 원본과 맞는 대상도
-// 리허설에서만 실패), 실제 원본과 다른 버전으로 리허설해서 운영에서만 실패할 수 있다. 둘 다 없으면 빈 문자열(기본 이미지)이다.
-func TempSourceImage(sourceImage, targetManifest string) string {
-	if sourceImage != "" {
-		return sourceImage
+	img := sourceImage
+	if !plan.IsCNPGImage(img) {
+		img, _ = spec["imageName"].(string)
 	}
-	var doc map[string]any
-	if err := yaml.Unmarshal([]byte(targetManifest), &doc); err != nil {
-		return ""
+	if img == "" {
+		return nil // 둘 다 없으면 대상 클러스터의 기본 이미지
 	}
-	spec, _ := doc["spec"].(map[string]any)
-	img, _ := spec["imageName"].(string)
-	return img
+	return unstructured.SetNestedField(src.Object, img, "spec", "imageName")
 }

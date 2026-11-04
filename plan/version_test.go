@@ -70,3 +70,13 @@ func TestFixKeepsMajorVersion(t *testing.T) {
 		t.Fatalf("같은 메이저의 버전 변경은 통과해야 함:\n%s", is.Error())
 	}
 }
+
+func TestMajorLabel(t *testing.T) {
+	if got := MajorLabel(pg18); got != "PostgreSQL 18" {
+		t.Fatalf("태그 있음: %s", got)
+	}
+	// 태그가 없으면 "PostgreSQL 0"이 아니라 모른다고 보여 준다
+	if got := MajorLabel("ghcr.io/cloudnative-pg/postgresql@sha256:64abc98a4387361afd6821a3a99f975763bbd87bbdde9449e75ad6002528a318"); !strings.Contains(got, "모름") {
+		t.Fatalf("태그 없음: %s", got)
+	}
+}
