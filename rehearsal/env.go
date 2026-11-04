@@ -290,3 +290,30 @@ func Seed(ctx context.Context, dsn string, schemas []string, rows int) error {
 	}
 	return nil
 }
+
+// standbyParams는 hot standby가 primary 이상이어야 시작하는 PostgreSQL 설정이다.
+var standbyParams = []string{"max_connections", "max_worker_processes"}
+
+// MatchStandbyParams는 임시 원본의 max_connections·max_worker_processes를 대상 매니페스트 값에 맞춘다.
+// 대상은 임시 원본을 따라가는 hot standby라 이 값들이 원본 이상이어야 뜬다. 임시 원본이 CNPG 기본값(100, 32)으로 뜨면,
+// 실제 원본에 맞춰 그보다 작게 정한 대상이 운영에서는 되는데 리허설에서만 뜨지 않는다.
+// 대상에 없는 값은 양쪽 다 기본값이므로 그대로 둔다.
+func MatchStandbyParams(src *unstructured.Unstructured, targetManifest string) error {
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(targetManifest), &doc); err != nil {
+		return fmt.Errorf("대상 매니페스트를 읽을 수 없음: %w", err)
+	}
+	spec, _ := doc["spec"].(map[string]any)
+	pg, _ := spec["postgresql"].(map[string]any)
+	params, _ := pg["parameters"].(map[string]any)
+	set := map[string]any{}
+	for _, k := range standbyParams {
+		if v, ok := params[k].(string); ok {
+			set[k] = v
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return unstructured.SetNestedMap(src.Object, set, "spec", "postgresql", "parameters")
+}

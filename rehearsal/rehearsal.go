@@ -276,6 +276,10 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 		return a, nil, nil
 	}
 	src := SourceManifest(&cur.Plan, sb.Namespace, db)
+	if err := MatchStandbyParams(src, cur.Manifest); err != nil {
+		failf("임시 원본 설정: %v", err)
+		return a, nil, nil
+	}
 	ses.Log(ctx, agentlog.Event{Type: agentlog.ToolCall, Tool: "sandbox_source", Input: map[string]any{"cluster": cur.Plan.Source.Cluster, "rows": c.Rows, "schemas": cur.Plan.Verify.Schemas}})
 	t0 = time.Now()
 	if _, err := aiDyn.Resource(llm.CNPGClusterGVR).Namespace(sb.Namespace).Create(ctx, src, metav1.CreateOptions{}); err != nil {

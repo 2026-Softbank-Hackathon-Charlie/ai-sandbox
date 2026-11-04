@@ -10,6 +10,8 @@
 //	PLATFORM_URL        플랫폼 API 주소
 //	PLATFORM_TOKEN      플랫폼 agent 토큰 (Plan 제출, 첨부, 에이전트 세션. 승인은 못 함)
 //
+// 운영 DB 비밀번호는 받지 않는다. 원본 실측은 플랫폼이 초안과 함께 한다 (platform #47).
+//
 // 예:
 //
 //	hopai run -app moimroom -from gke -to eks \
@@ -65,6 +67,7 @@ func main() {
 	fs.Var(&targets, "target", "샌드박스에서 막혀야 하는 곳 <이름>=<호스트>:<포트> (예: 운영 DB, 여러 번)")
 	rows := fs.Int("rows", 20000, "리허설 테스트 데이터 행 수")
 	maxRuns := fs.Int("max-runs", 3, "리허설 최대 실행 횟수")
+	noMeasure := fs.Bool("no-measure", false, "플랫폼에 원본 실측을 요청하지 않음 (접속 수·초기 복사 검사 없이 계획)")
 	out := fs.String("out", "", "리포트 JSON을 쓸 파일 (비우면 표준 출력)")
 	must(fs.Parse(os.Args[2:]))
 	for name, v := range map[string]string{"-app": *app, "-from": *from, "-to": *to, "-sandbox-kubeconfig": *sbKube} {
@@ -91,13 +94,16 @@ func main() {
 	if *stream != "" {
 		req.WrittenRecordsStream = stream
 	}
-	d, err := pc.DraftPlan(ctx, req)
+	// 2. 원본 실측. 플랫폼은 이전을 시작할 때 같은 값을 재고 부족하면 막는다(409 capacity_insufficient).
+	// 승인 뒤에 막히지 않도록 초안을 받을 때 플랫폼에 같은 값을 재 달라고 한다(platform #47, ADR 0017).
+	// 이 실행기는 운영 DB에 붙지 않고 비밀번호도 갖지 않는다. 못 재면 용량 검사 없이 계획하고, 플랫폼이 시작할 때 잰다.
+	d, stats, err := draftWithStats(ctx, pc, req, !*noMeasure, os.Stderr)
 	must(err)
 	var draft eplan.Plan
 	b, _ := json.Marshal(d)
 	must(json.Unmarshal(b, &draft))
 
-	// 2. AI 계획
+	// 3. AI 계획
 	clusters := map[string]llm.Cluster{}
 	for _, e := range envs {
 		cfg, err := restConfig(e.path, e.context)
@@ -113,15 +119,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, "경고: 에이전트 기록 일부를 플랫폼에 남기지 못함:", err)
 	}})
 	scope := llm.PlanScope{App: *app, Namespace: draft.Source.Namespace, Envs: []string{*from, *to}}
-	prop, planSession, err := agent.Plan(ctx, llm.PlanInput{App: *app, Draft: &draft, Tools: llm.PlanTools(scope, pc, clusters)})
+	prop, planSession, err := agent.Plan(ctx, llm.PlanInput{App: *app, Draft: &draft, Tools: llm.PlanTools(scope, pc, clusters), Source: stats})
 	must(err)
 
-	// 3. 제출과 첨부
+	// 4. 제출과 첨부
 	rec, submitted, err := submit(ctx, pc, prop)
 	must(err)
 	fmt.Fprintf(os.Stderr, "Plan %s 제출 (revision %d, 계획 세션 %s)\n", rec.Ref, rec.Revision, planSession)
 
-	// 4. 리허설
+	// 5. 리허설
 	adminCfg, err := restConfig(*sbKube, *sbCtx)
 	must(err)
 	admin, err := kubernetes.NewForConfig(adminCfg)
@@ -149,8 +155,11 @@ func main() {
 	})
 
 	printRehearsalWarnings(os.Stderr, rep)
-	// 5. 수정안 반영과 리포트 첨부
+	// 6. 수정안 반영과 리포트 첨부
 	result := map[string]any{"planRef": rec.Ref, "planSession": planSession}
+	if stats != nil {
+		result["sourceStats"] = stats
+	}
 	if rep != nil {
 		result["rehearsal"] = rep
 		// 수정안은 리허설을 통과했을 때만 올린다. 통과하지 못한 수정안이 승인 대상 revision이 되면 안 된다.
@@ -314,4 +323,61 @@ func must(err error) {
 		fmt.Fprintln(os.Stderr, "오류:", err)
 		os.Exit(1)
 	}
+}
+
+// sourceStats는 플랫폼이 잰 원본 값을 계획 검사의 형식으로 바꾼다. 재지 못했으면 nil이다.
+// 크기와 WAL 속도는 플랫폼이 못 잰 경우 빠지는데, 그때는 0으로 두어 초기 복사 검사가 막지 않게 한다.
+func sourceStats(res *apiv1.PlanDraftResult) *plan.SourceStats {
+	s := res.SourceStats
+	if s == nil {
+		return nil
+	}
+	out := &plan.SourceStats{Sessions: s.Sessions, MaxConnections: s.MaxConnections, MaxWorkerProcesses: s.MaxWorkerProcesses, WindowSeconds: s.WindowSeconds}
+	if s.Bytes != nil {
+		out.Bytes = *s.Bytes
+	}
+	if s.WalBytesPerSecond != nil {
+		out.WALBytesPerSecond = *s.WalBytesPerSecond
+	}
+	return out
+}
+
+// reasonOf는 플랫폼이 원본을 재지 못한 이유다 (not_measured: 비밀번호 변수 없음, 닿지 못함, 쿼리 실패).
+func reasonOf(res *apiv1.PlanDraftResult) string {
+	if res.SourceStatsReason != nil {
+		return string(*res.SourceStatsReason)
+	}
+	return "이유 없음"
+}
+
+// drafter는 플랫폼의 Plan 초안 API다 (*client.Client).
+type drafter interface {
+	DraftPlan(context.Context, apiv1.PlanDraftRequest) (*apiv1.EnginePlan, error)
+	DraftPlanWithSourceStats(context.Context, apiv1.PlanDraftRequest) (*apiv1.PlanDraftResult, error)
+}
+
+// draftWithStats는 Plan 초안을 받는다. measure면 플랫폼에 원본 실측도 같이 요청한다.
+// 플랫폼이 실측을 모르면(platform #47 이전) 모르는 필드로 거절하거나, 예전 형식(Plan 자체)으로 답해 Plan이 비어 읽힌다.
+// 그럴 때는 실측 없는 초안으로 다시 받고 용량 검사 없이 계획한다. 플랫폼이 시작할 때 다시 잰다.
+func draftWithStats(ctx context.Context, pc drafter, req apiv1.PlanDraftRequest, measure bool, w io.Writer) (*apiv1.EnginePlan, *plan.SourceStats, error) {
+	if measure {
+		res, err := pc.DraftPlanWithSourceStats(ctx, req)
+		switch {
+		case err != nil:
+			fmt.Fprintf(w, "경고: 원본 실측과 함께 초안을 받지 못함 (%v). 실측 없이 다시 받습니다\n", err)
+		case res.Plan.Id == "":
+			fmt.Fprintln(w, "경고: 플랫폼이 원본 실측을 지원하지 않음 (응답에 Plan이 없음). 실측 없이 다시 받습니다")
+		default:
+			stats := sourceStats(res)
+			if stats == nil {
+				fmt.Fprintf(w, "경고: 플랫폼이 원본을 재지 못함 (%s). 접속 수·초기 복사 검사 없이 계획합니다\n", reasonOf(res))
+			} else {
+				fmt.Fprintf(w, "원본 실측: 세션 %d, max_connections %d (대상 %d 이상 필요), max_worker_processes %d, 크기 %d바이트, 변경 %.0f바이트/초\n",
+					stats.Sessions, stats.MaxConnections, stats.RequiredConnections(), stats.MaxWorkerProcesses, stats.Bytes, stats.WALBytesPerSecond)
+			}
+			return &res.Plan, stats, nil
+		}
+	}
+	d, err := pc.DraftPlan(ctx, req)
+	return d, nil, err
 }

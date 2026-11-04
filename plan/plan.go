@@ -33,6 +33,8 @@ type Proposal struct {
 	Manifest string `json:"manifest"`
 	// Notes는 AI가 값을 정한 근거다. 승인 화면과 에이전트 기록에 보인다.
 	Notes []string `json:"notes"`
+	// Source는 계획 전에 원본을 실측한 값이다. AI 출력이 아니라 실행기가 붙이며, 있으면 Check가 용량 규칙도 본다.
+	Source *SourceStats `json:"-"`
 }
 
 // Issue는 검사에서 걸린 항목 하나다. 재요청할 때 그대로 AI에 돌려준다.
@@ -121,6 +123,7 @@ func (p *Proposal) Check(draft *eplan.Plan) Issues {
 	} else if strings.TrimSpace(p.Manifest) != "" {
 		is.add("manifest", "target.manifest가 %q가 아니면 매니페스트를 보내지 않음", ManifestRef)
 	}
+	is = append(is, CheckCapacity(&p.Plan, p.Manifest, p.Source)...)
 	is = append(is, checkTexts("notes", "값을 정한 근거", p.Notes, maxNoteLen)...)
 	return is
 }

@@ -98,3 +98,20 @@ func TestClusterRehearsalCatchesWrongStorageClass(t *testing.T) {
 		t.Fatalf("쓰기 보류 전에 멈춰야 함 (원본 그대로): %v", a.Steps)
 	}
 }
+
+// 실제 원본에 맞춰 CNPG 기본값(max_connections 100, max_worker_processes 32)보다 작게 정한 대상도 리허설을 통과해야 한다.
+// 임시 원본이 기본값으로 뜨면 hot standby 조건에 걸려 대상이 뜨지 않는다.
+func TestClusterRehearsalWithSmallStandbyParams(t *testing.T) {
+	c := kindProposal(t, "standard")
+	c.Proposal.Manifest = strings.Replace(c.Proposal.Manifest, "  instances: 1\n",
+		"  instances: 1\n  postgresql:\n    parameters:\n      max_connections: \"60\"\n      max_worker_processes: \"8\"\n", 1)
+	rep, err := Rehearse(context.Background(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := rep.Attempts[0]
+	t.Logf("결과: 통과=%v 엔진=%s %.0f초 오류=%s", a.Passed, a.Outcome, a.DurationS, a.Error)
+	if !rep.Passed || a.Outcome != "succeeded" {
+		t.Fatalf("통과해야 함: %+v", a)
+	}
+}
