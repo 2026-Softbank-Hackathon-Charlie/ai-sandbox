@@ -23,6 +23,12 @@ HopCharlie의 AI(Plan 작성, 리허설 실패 진단, 수정안)와 샌드박�
 | v12 | [#16](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/16) | 11/3 11:19 | 승인할 때 리허설한 계획과 같은지 확인 |
 | v13 | [#17](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/17) | 11/3 14:33 | 버전 히스토리 문서, kind 재확인 (코드 변화 없음) |
 | v14 | [#18](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/18) | 11/3 14:55 | 히스토리를 쉬운 말로 다시 씀 (코드 변화 없음) |
+| v15 | [#19](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/19) | 11/3 15:03 | 버전 표에서 작성자 빼고 칸 비율 정리 (코드 변화 없음) |
+| v16 | [#20](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/20) | 11/3 15:29 | README를 지금 코드에 맞춤 (코드 변화 없음) |
+| v17 | [#22](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/22) | 11/3 17:42 | `maxDowntime` 상한을 60초에서 50초로 |
+| v18 | [#21](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/21) | 11/3 21:05 | 이상한 AI 출력 막기, 샌드박스 권한 좁힘 |
+| v19 | [#23](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/23) | 11/4 10:22 | 원본 실측값으로 접속 수·초기 복사 시간 검사 |
+| v20 | [#24](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/24) | 11/4 13:39 | 원본과 같은 PostgreSQL 메이저 버전, CNPG 1.30.1 확인 |
 
 # HopCharlie AI·샌드박스 사용 설계 (D 영역 초안)
 
@@ -298,13 +304,13 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 
 ## 10. 날짜별 (D 영역)
 
-목표일보다 먼저 끝난 항목도 상태에 완료로 적는다 (11/3 기준).
+목표일보다 먼저 끝난 항목도 상태에 완료로 적는다 (11/4 기준).
 
 | 목표일 | 목표 | 상태 |
 |---|---|---|
 | 11/2 (월) | 조사 도구, 계획 프롬프트 | 완료 (`get_app`, `list_storage_classes`, `node_capacity`, `get_cnpg_cluster`) |
 | 11/3 (화) | Plan 검사, 재요청, 고정 검사 | 완료 (엔진 Plan 기준) |
-| 11/4 (수) | 샌드박스, RBAC·NetworkPolicy·Quota, 리허설 1회 | 완료 (kind) |
+| 11/4 (수) | 샌드박스, RBAC·NetworkPolicy·Quota, 리허설 1회 | 완료 (kind, CNPG 1.25.1과 1.30.1). 원본 실측 검사(v19)와 원본 메이저 버전 맞춤(v20) 추가 |
 | 11/5 (목) | 실패 → 진단 → 수정 → 재통과, 격리 검증 | 코드 완료. AI 진단은 API 키로 실제 확인 필요 |
 | 11/6 (금) | 데모 실패 시나리오, 타임아웃·상한 값 확정 | 남음 |
 
