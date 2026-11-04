@@ -7,13 +7,20 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+
 	"github.com/2026-Softbank-Hackathon-Charlie/platform/pkg/apiv1"
 	"github.com/2026-Softbank-Hackathon-Charlie/platform/pkg/client"
 
+	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/llm"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/plan"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/rehearsal"
 )
@@ -167,5 +174,48 @@ func TestDraftWithStats(t *testing.T) {
 				t.Fatalf("실측값 %+v, 출력 %q", s, w.String())
 			}
 		})
+	}
+}
+
+func TestSourceCluster(t *testing.T) {
+	cluster := func(spec, status map[string]any) *unstructured.Unstructured {
+		o := map[string]any{"apiVersion": "postgresql.cnpg.io/v1", "kind": "Cluster", "metadata": map[string]any{"name": "moimroom-db-gke", "namespace": "moimroom"}}
+		if spec != nil {
+			o["spec"] = spec
+		}
+		if status != nil {
+			o["status"] = status
+		}
+		return &unstructured.Unstructured{Object: o}
+	}
+	gvr := map[schema.GroupVersionResource]string{llm.CNPGClusterGVR: "ClusterList"}
+	params := map[string]any{"parameters": map[string]any{"max_wal_senders": "20", "shared_buffers": "1GB"}}
+	for _, c := range []struct {
+		name       string
+		obj        *unstructured.Unstructured
+		wantImage  string
+		wantParams map[string]string
+	}{
+		{"실제로 도는 이미지와 hot standby 설정만", cluster(map[string]any{"imageName": "ghcr.io/cloudnative-pg/postgresql:17.6", "postgresql": params}, map[string]any{"image": "ghcr.io/cloudnative-pg/postgresql:17.11"}), "ghcr.io/cloudnative-pg/postgresql:17.11", map[string]string{"max_wal_senders": "20"}},
+		{"status가 없으면 spec", cluster(map[string]any{"imageName": "ghcr.io/cloudnative-pg/postgresql:17.11"}, nil), "ghcr.io/cloudnative-pg/postgresql:17.11", nil},
+		{"이미지가 없음", cluster(map[string]any{}, nil), "", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvr, c.obj)
+			sc, err := sourceCluster(context.Background(), dyn, "moimroom", "moimroom-db-gke")
+			if c.wantImage == "" {
+				if err == nil {
+					t.Fatalf("이미지가 없으면 오류여야 함: %+v", sc)
+				}
+				return
+			}
+			if err != nil || sc.Image != c.wantImage || !reflect.DeepEqual(sc.Parameters, c.wantParams) {
+				t.Fatalf("got %+v, err %v", sc, err)
+			}
+		})
+	}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvr)
+	if _, err := sourceCluster(context.Background(), dyn, "moimroom", "moimroom-db-gke"); err == nil {
+		t.Fatal("원본 클러스터가 없으면 오류여야 함")
 	}
 }

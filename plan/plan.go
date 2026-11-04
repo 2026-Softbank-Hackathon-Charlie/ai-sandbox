@@ -35,6 +35,8 @@ type Proposal struct {
 	Notes []string `json:"notes"`
 	// Source는 계획 전에 원본을 실측한 값이다. AI 출력이 아니라 실행기가 붙이며, 있으면 Check가 용량 규칙도 본다.
 	Source *SourceStats `json:"-"`
+	// SourceCluster는 실행기가 원본 CNPG 클러스터에서 읽은 이미지와 hot standby 설정이다. 있으면 대상이 원본과 맞는지 본다.
+	SourceCluster *SourceCluster `json:"-"`
 }
 
 // Issue는 검사에서 걸린 항목 하나다. 재요청할 때 그대로 AI에 돌려준다.
@@ -124,6 +126,7 @@ func (p *Proposal) Check(draft *eplan.Plan) Issues {
 		is.add("manifest", "target.manifest가 %q가 아니면 매니페스트를 보내지 않음", ManifestRef)
 	}
 	is = append(is, CheckCapacity(&p.Plan, p.Manifest, p.Source)...)
+	is = append(is, checkSourceMatch(p)...)
 	is = append(is, checkTexts("notes", "값을 정한 근거", p.Notes, maxNoteLen)...)
 	return is
 }

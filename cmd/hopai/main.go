@@ -31,6 +31,8 @@ import (
 	"strings"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -118,8 +120,20 @@ func main() {
 	agent := llm.New(llm.Config{Sink: sink, OnLogError: func(err error) {
 		fmt.Fprintln(os.Stderr, "경고: 에이전트 기록 일부를 플랫폼에 남기지 못함:", err)
 	}})
+	// 원본 CNPG 클러스터의 이미지와 hot standby 설정. 대상은 원본의 물리 복제본이라 이 값들이 원본과 맞아야 하고,
+	// 리허설은 임시 원본을 이 값으로 띄워 실제 원본을 흉내 낸다.
+	// 원본 환경의 읽기 전용 kubeconfig(-env)가 없거나 읽지 못하면 이 검사 없이 계획한다.
+	var src *plan.SourceCluster
+	if c, ok := clusters[*from]; !ok {
+		fmt.Fprintf(os.Stderr, "경고: 원본 환경 %s의 -env kubeconfig가 없어 원본 PostgreSQL 버전과 설정을 모름. 이 검사 없이 계획합니다\n", *from)
+	} else if sc, err := sourceCluster(ctx, c.Dynamic, draft.Source.Namespace, draft.Source.Cluster); err != nil {
+		fmt.Fprintf(os.Stderr, "경고: 원본 CNPG 클러스터를 읽지 못함 (%v). 버전·설정 검사 없이 계획합니다\n", err)
+	} else {
+		src = sc
+		fmt.Fprintf(os.Stderr, "원본 클러스터: %s (%s), hot standby 설정 %v\n", sc.Image, plan.MajorLabel(sc.Image), sc.Parameters)
+	}
 	scope := llm.PlanScope{App: *app, Namespace: draft.Source.Namespace, Envs: []string{*from, *to}}
-	prop, planSession, err := agent.Plan(ctx, llm.PlanInput{App: *app, Draft: &draft, Tools: llm.PlanTools(scope, pc, clusters), Source: stats})
+	prop, planSession, err := agent.Plan(ctx, llm.PlanInput{App: *app, Draft: &draft, Tools: llm.PlanTools(scope, pc, clusters), Source: stats, SourceCluster: src})
 	must(err)
 
 	// 4. 제출과 첨부
@@ -159,6 +173,9 @@ func main() {
 	result := map[string]any{"planRef": rec.Ref, "planSession": planSession}
 	if stats != nil {
 		result["sourceStats"] = stats
+	}
+	if src != nil {
+		result["sourceCluster"] = src
 	}
 	if rep != nil {
 		result["rehearsal"] = rep
@@ -380,4 +397,31 @@ func draftWithStats(ctx context.Context, pc drafter, req apiv1.PlanDraftRequest,
 	}
 	d, err := pc.DraftPlan(ctx, req)
 	return d, nil, err
+}
+
+// sourceCluster는 원본 CNPG 클러스터에서 이미지와 hot standby 설정을 읽는다.
+// 이미지는 실제로 도는 것(status.image)을 먼저 보고, 없으면 spec.imageName을 본다.
+func sourceCluster(ctx context.Context, dyn dynamic.Interface, ns, name string) (*plan.SourceCluster, error) {
+	obj, err := dyn.Resource(llm.CNPGClusterGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	sc := &plan.SourceCluster{}
+	if s, _, _ := unstructured.NestedString(obj.Object, "status", "image"); s != "" {
+		sc.Image = s
+	} else if s, _, _ := unstructured.NestedString(obj.Object, "spec", "imageName"); s != "" {
+		sc.Image = s
+	} else {
+		return nil, errors.New("status.image와 spec.imageName이 모두 비어 있음")
+	}
+	params, _, _ := unstructured.NestedStringMap(obj.Object, "spec", "postgresql", "parameters")
+	for _, k := range plan.StandbyParams {
+		if v, ok := params[k]; ok {
+			if sc.Parameters == nil {
+				sc.Parameters = map[string]string{}
+			}
+			sc.Parameters[k] = v
+		}
+	}
+	return sc, nil
 }

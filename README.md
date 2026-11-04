@@ -163,6 +163,7 @@ AI의 출력은 엔진 Plan, 대상 CNPG 매니페스트, 근거를 묶은 JSON�
 | 매니페스트 | `postgresql.cnpg.io/v1` Cluster 하나(64 KiB 이하, `---`나 `...`로 문서를 더 붙일 수 없음). 엔진이 Force로 적용하므로 최상위는 apiVersion·kind·metadata·spec만, metadata는 name·namespace만 (annotations·finalizers·ownerReferences로 대상 DB를 멈추거나 지우지 못하게). 이름·네임스페이스는 Plan의 대상과 같음 |
 | 매니페스트 spec | 키는 허용 목록만 (슈퍼유저, 백업 대상, 관리 계정, monitoring 금지). `replica`는 self·primary·source만(primary·source는 원본). 시작은 `bootstrap.pg_basebackup` 필수(source는 원본, secret은 `<원본>-app`, database·owner는 원본 DSN과 같음). `storage`(필수)·`walStorage`는 size(문자열, 0보다 크고 2Ti 이하)·storageClass만. `affinity`는 DB 전용 노드용 nodeSelector·tolerations(key 필수)·Pod 분산 설정만, control-plane 노드는 금지. `resources`는 requests·limits의 cpu(16 이하)·memory(64Gi 이하)만. `postgresql`은 성능·WAL 보존 설정(`max_connections`, `shared_buffers`, `wal_keep_size` 등)만, 값은 문자열. instances 1~5 정수, smartShutdownTimeout 0~600 정수. `imageName`은 `ghcr.io/cloudnative-pg/postgresql` 이미지만 |
 | 복제 접속 | `externalClusters`는 원본·대상 이름만 쓰고 host·port는 Plan의 해당 DSN과 같음, user는 `streaming_replica`, sslmode는 require·verify-ca·verify-full만, dbname은 postgres만, 인증서 시크릿은 `<이름>-replication`·`<이름>-ca`만(비밀번호 키 금지) |
+| 원본과 맞춤 (원본 클러스터를 읽었을 때) | `hopai`가 원본 CNPG 클러스터에서 이미지(`status.image`, 없으면 `spec.imageName`)와 hot standby 설정(`max_connections`, `max_worker_processes`, `max_wal_senders`, `max_prepared_transactions`, `max_locks_per_transaction`)을 읽는다. 대상 `imageName`은 반드시 적고 원본과 같은 메이저 버전이어야 한다. 비우면 대상 클러스터 운영자의 기본 이미지(실제 클러스터 18.6)로 떠서, moimroom처럼 17.11로 고정된 원본과 달라진다. 원본이 정한 hot standby 설정은 대상도 정하고 원본 이상이어야 한다(기본값은 짐작하지 않음). 대상은 원본의 물리 복제본이라 메이저 버전이 다르거나 이 값이 작으면 시작하지 못하고, 이 실패는 경고 이벤트를 남기지 않는다. 진단 수정안도 같은 규칙으로 다시 본다 |
 | 근거 | notes는 1~10개, 각 500자 이하, 빈 글 금지 (승인 화면과 AI 활동 기록에 그대로 보임) |
 | 용량 (원본을 실측했을 때) | 대상을 새로 만들면 `postgresql.parameters.max_connections`를 정해야 하고, 원본 max_connections 이상(대상은 원본을 따라가는 hot standby라 작으면 뜨지 않음)이면서 원본 클라이언트 세션 수 × 1.2 이상(플랫폼 기준)이어야 함. `max_worker_processes`도 정해야 하고 원본 이상이어야 함 (플랫폼 시작 검사 `standby_settings`는 대상이 없으면 매니페스트에서 두 값을 읽고, 없으면 건너뜀). `catchupTimeout`은 원본 전체를 100 MiB/s(제안값)로 복사하는 시간보다 길어야 함. 원본 변경 속도가 이 복사 속도 이상이거나 복사가 catchupTimeout 상한(15m)보다 오래 걸리면 AI를 부르지 않고 바로 멈춤(`llm.ErrInfeasible`). 플랫폼이 이전을 시작할 때 같은 기준(platform `internal/preflight/capacity`)으로 재고 막으므로, 승인 뒤에 막히지 않게 계획 단계에서 먼저 본다. 진단 수정안에도 같은 실측값으로 다시 본다 |
 
@@ -232,7 +233,7 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 |---|---|
 | 네임스페이스 | `sandbox-<app>-<4자리 id>`, 라벨 `hopcharlie/sandbox=true`, 주석 `expires-at` |
 | Pod Security | `pod-security.kubernetes.io/enforce=baseline`. AI 계정은 Pod를 만들 수 없지만, 권한이 넓어지는 경우를 대비해 hostNetwork(NetworkPolicy를 받지 않음), hostPath, privileged Pod를 막는다. 격리 검사가 관리자 계정의 dry-run으로 실제로 막히는지 따로 확인한다. CNPG Pod가 뜰 수 있게 restricted가 아니라 baseline |
-| RBAC | 이 네임스페이스에만 바인딩한 Role. 쓰기는 CNPG Cluster만(리허설과 엔진), 읽기는 Pod·PVC·이벤트(진단 도구, 멈춤 감지)와 secret 이름 조회(임시 원본 앱 계정)만. Pod·Service·Job은 만들 수 없다(Service externalIPs로 클러스터 트래픽을 가로채는 길, CVE-2020-8554). TokenRequest로 1시간짜리 토큰 발급 |
+| RBAC | 이 네임스페이스에만 바인딩한 Role. 쓰기는 CNPG Cluster만(리허설과 엔진), 읽기는 Pod·Pod 로그·PVC·이벤트(진단 도구, 멈춤 감지)와 secret 이름 조회(임시 원본 앱 계정)만. Pod·Service·Job은 만들 수 없다(Service externalIPs로 클러스터 트래픽을 가로채는 길, CVE-2020-8554). TokenRequest로 1시간짜리 토큰 발급 |
 | NetworkPolicy | 기본 전부 차단. 같은 네임스페이스와 kube-dns만 허용. 운영망, Tailscale 대역(100.64.0.0/10), 169.254.169.254 차단 |
 | ResourceQuota, LimitRange | 기본 CPU 4, 메모리 8 GiB, Pod 20개 (데모 값). 리허설은 대상 매니페스트 몫(인스턴스와 붙일 때 뜨는 작업 Pod 하나 × limits, 없으면 requests)을 더해 잡는다. 운영에 맞게 정한 자원을 샌드박스 때문에 줄이지 않게 하려는 것이다. 샌드박스 사본에서는 requests만 적은 자원의 limits를 requests와 같게 둔다 (LimitRange 기본 limits가 더 작으면 Pod가 거절됨) |
 | 데이터 | 임시 PostgreSQL(CNPG)에 테스트 데이터만. 운영 데이터는 넣지 않는다 (파일 리허설은 아직 없음) |
@@ -264,10 +265,10 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 대상 클러스터의 샌드박스에서 **실제 migration-engine**으로 Plan을 끝까지 돌린다. 고정값을 돌려주는 단계는 없다.
 
 1. 샌드박스를 CNPG 모드로 만들고(6장) 격리 검사를 돌린다. 막혀야 하는 명령은 `blocked` 이벤트로 남는다. 격리가 깨지면 그 샌드박스에서 아무것도 하지 않고 리허설 전체를 멈춘다.
-2. 임시 원본 CNPG 클러스터를 만든다. 이름은 Plan의 원본 클러스터와 같고, 엔진의 분산 토폴로지(`replica.source`가 대상)를 따른다. 검증할 스키마마다 테스트 데이터를 넣는다. 운영 데이터는 넣지 않는다. 대상 매니페스트에 `max_connections`·`max_worker_processes`가 있으면 임시 원본도 같은 값으로 띄운다. 대상은 원본을 따라가는 hot standby라 이 값들이 원본 이상이어야 뜨는데, 임시 원본이 CNPG 기본값(100, 32)이면 실제 원본에 맞춰 더 작게 정한 대상이 리허설에서만 뜨지 않기 때문이다.
+2. 임시 원본 CNPG 클러스터를 만든다. 이름은 Plan의 원본 클러스터와 같고, 엔진의 분산 토폴로지(`replica.source`가 대상)를 따른다. 검증할 스키마마다 테스트 데이터를 넣는다. 운영 데이터는 넣지 않는다. 임시 원본은 기본값이 아니라 **실제 원본처럼** 띄운다(`PrepareTempSource`). 원본 클러스터를 읽었으면 그 이미지와 hot standby 설정을 쓰고(원본에 없는 설정은 원본도 기본값), 원본 이미지가 CNPG 공식 이미지가 아니면(사설 레지스트리·미러) 샌드박스가 받지 못할 수 있어 같은 메이저인 대상 이미지를 쓴다. 원본을 모르면 대상 매니페스트의 이미지와 hot standby 설정을 쓴다. 임시 원본이 대상 클러스터의 기본값(CNPG 설정 100·32, 운영자 이미지 18.6)으로 뜨면, 실제 원본(예: moimroom 17.11)과 달라 운영에서는 되는 대상이 리허설에서만 실패하거나 그 반대가 된다. 메모리 같은 다른 설정은 샌드박스가 작아서 옮기지 않는다.
 3. AI가 쓴 대상 매니페스트를 샌드박스로 옮긴다. 네임스페이스와 접속 주소만 바꾸고 StorageClass, 크기, 자원, 인스턴스 수, 이미지는 그대로 둔다. 그 값이 대상 클러스터에서 되는지가 리허설이 보려는 것이다.
 4. 엔진을 라이브러리로 부른다. 쿠버네티스는 **샌드박스 토큰**(최소 권한)으로, DB는 로컬 프록시(연결마다 현재 primary Pod로 port-forward)로 붙는다. 게이트웨이, 파일, k6 기록은 샌드박스에 없으므로 뺀다. 상한값과 스키마는 AI의 Plan을 따르며, 테이블 필터는 샌드박스에 만든 합성 fixture 이름으로 바꾼 사본을 사용한다.
-5. 같은 경고(PVC ProvisioningFailed, FailedScheduling, 이미지 풀 실패 등)가 25초 넘게 **계속 되풀이되면** 기다려도 풀리지 않는 환경 문제로 보고 엔진을 멈춘다. 이 실행 전부터 있던 경고와, 한 번 나고 다시 일어나지 않은 경고는 보지 않는다. 엔진이 끝나면 감시를 먼저 멈추므로 성공한 실행이 늦은 판정으로 실패가 되지 않는다. 엔진의 catchupTimeout(분 단위)까지 기다리지 않는다.
+5. 같은 경고(PVC ProvisioningFailed, FailedScheduling, 이미지 풀 실패 등)가 25초 넘게 **계속 되풀이되면** 기다려도 풀리지 않는 환경 문제로 보고 엔진을 멈춘다. 이 실행 전부터 있던 경고와, 한 번 나고 다시 일어나지 않은 경고는 보지 않는다. 엔진이 끝나면 감시를 먼저 멈추므로 성공한 실행이 늦은 판정으로 실패가 되지 않는다. 엔진의 catchupTimeout(분 단위)까지 기다리지 않는다. 경고 이벤트 없이 CNPG 작업 Job(pg_basebackup, join)의 Pod만 거듭 실패하는 경우(예: 원본과 대상의 PostgreSQL 메이저 버전이 다름)도 같은 Job의 Pod가 3번 실패하면 멈추고, 마지막 Pod 로그의 오류 줄(예: `incompatible server version`)을 근거로 남긴다. 이런 실패는 Job 재시도가 다 끝날 때(10분 넘게)까지 이벤트로 드러나지 않기 때문이다.
 6. 엔진 단계 이벤트는 `engine.<단계>` 도구 호출·결과로 리허설 세션에 남는다.
 7. 통과 기준: 엔진 결과 `succeeded`와 실제 합성 데이터 검증 증거가 모두 필요하다. 각 스키마의 `rehearsal_orders/items`를 명시적으로 비교하고, fence 비교와 verify 결과에서 모든 fixture의 행 수가 예상값과 일치하며 0보다 커야 한다. 누락·중복·빈 검증은 실패다. 각 시도의 `coverage`에 실제 원본·대상·검사 행 수를 남긴다. 운영 Plan의 테이블 필터는 유지되며, 이 coverage는 합성 데이터에 대한 것이다.
 8. 실패하면 샌드박스가 살아 있는 동안 AI가 진단한다(샌드박스 조회 도구: `sandbox_events`, `sandbox_cnpg_status`, `sandbox_pvcs`, 대상 환경의 `list_storage_classes`, `node_capacity`). 수정안이 검사를 통과하면 새 샌드박스에서 다시 돌린다. 최대 3회다.
@@ -343,7 +344,7 @@ go run ./cmd/hopai run -app moimroom -from gke -to eks \
   -target db=moimroom-db-eks-rw.moimroom.svc.cluster.local:5432
 ```
 
-- `-env`는 AI 조사 도구가 쓰는 환경별 읽기 전용 kubeconfig다.
+- `-env`는 AI 조사 도구가 쓰는 환경별 읽기 전용 kubeconfig다. `hopai`는 원본 환경의 것으로 원본 CNPG 클러스터의 이미지와 hot standby 설정을 읽어 계획 검사와 리허설 임시 원본에 쓴다. 없거나 읽지 못하면 경고만 내고 이 검사 없이 계획한다.
 - `-sandbox-kubeconfig`는 대상 클러스터에서 샌드박스를 만들고 지우는 관리용이다. 엔진은 이것이 아니라 샌드박스 토큰으로 돈다.
 - 끝나면 Plan ref와 revision, 세션 ID, 리허설 리포트를 출력한다. 리허설을 통과하지 못하면 종료 코드 1이고 승인하지 말라고 알린다.
 - 비공개 모듈(platform, migration-engine)을 받으려면 `go env -w GOPRIVATE=github.com/2026-Softbank-Hackathon-Charlie`가 필요하다.
@@ -361,25 +362,28 @@ go test ./...
 
 ```bash
 REHEARSAL_KUBECONFIG=<kubeconfig> REHEARSAL_SC=standard go test -tags cluster -run Cluster -v -timeout 40m ./rehearsal/
+# 예시 계획은 moimroom 원본과 같은 PostgreSQL 17.11이다. 대상 이미지를 바꾸려면 REHEARSAL_IMAGE를 준다
 ```
 
-로컬 kind(kindnet, CNPG 1.25.1)에서 확인한 결과 (2026-11-03, 매니페스트 검사 강화, AI 계정 권한 축소, Quota를 매니페스트에 맞춘 뒤):
+로컬 kind(kindnet)에서 실제 클러스터와 같게 **CNPG 1.30.1, 운영자 기본 PostgreSQL 이미지 18.6**(infra `clusters/aws-dev-workload/values/cloudnative-pg.yaml`)으로 확인한 결과 (2026-11-04):
 
 | 경우 | 결과 |
 |---|---|
-| 대상 StorageClass `standard` | 격리 검사 11/11 → 임시 원본과 테스트 데이터(5,000행) → 엔진 9단계 모두 성공, 쓰기 보류 20.6초, 전체 96초 |
+| 대상 StorageClass `standard` | 격리 검사 11/11 → 임시 원본과 테스트 데이터(5,000행) → 엔진 9단계 모두 성공, 쓰기 보류 19.5초, 전체 97초 |
 | 대상 StorageClass `gp3` (kind에 없음) | prepare에서 52초 만에 멈춤, 근거 `storageclass.storage.k8s.io "gp3" not found`, 쓰기 보류 전이라 원본 그대로 |
+| 대상 `max_connections` 60, `max_worker_processes` 8 (원본을 모를 때, CNPG 기본값보다 작음) | 임시 원본을 대상 값으로 띄워 엔진 9단계 모두 성공, 쓰기 보류 11.2초, 전체 88초 |
+| **원본을 읽은 경우: 원본 17.11(moimroom과 같음), 운영자 기본 18.6** | 임시 원본을 원본 이미지 17.11로 띄워 엔진 9단계 모두 성공, 쓰기 보류 18.2초, 전체 92초 |
+| 원본 18.6, 대상 17.11 (계획 검사를 거치지 않게 직접 넣음) | 경고 이벤트 없이 pg_basebackup Job만 거듭 실패. Job Pod 3번 실패로 123초 만에 멈춤, 근거 `pg_basebackup: error: incompatible server version 18.6` (전에는 catchupTimeout 5분을 다 기다렸음) |
 
-- 격리 검사 11개: 열려야 하는 2개(자기 네임스페이스 조회, DNS)와 막혀야 하는 9개(운영 Secret 읽기, 자기 NetworkPolicy 삭제, Role 수정, 토큰 발급, 운영 Deployment 삭제, AI 계정의 호스트 Pod, 관리자 계정의 호스트 Pod, 메타데이터 주소, CNPG 웹훅)가 모두 기대대로 나왔다. AI 계정의 호스트 Pod는 권한 확인 요청에서 RBAC가 막았고, 관리자 계정의 같은 Pod는 Pod Security가 막았다. 권한을 줄인 계정으로도 임시 원본 생성, 대상 DB 적용, 엔진 9단계가 모두 됐고, CNPG Pod는 `baseline` 아래에서 정상으로 떴다. 증거 대상인 CNPG 웹훅은 이름을 찾은 뒤 막혔다.
-- 샌드박스 Quota는 매니페스트(인스턴스 2개 + 작업 Pod 1개)만큼 더해 CPU 4200m, 메모리 9Gi로 잡혔다.
-- 쓰기 보류는 이전 측정(9.7초)보다 길었다. 상한(30초) 안이지만 한 번 잰 값이다.
+- 처음에는 예시 계획의 대상이 moimroom 원본과 같은 PostgreSQL 17.11인데 임시 원본이 대상 클러스터 운영자 기본값 18.6으로 떠서, 대상이 시작하지 못하고 prepare에서 catchupTimeout(5분)까지 기다린 뒤 실패했다. 임시 원본이 실제 원본을 따르지 않아 생긴 문제로, 전에 CNPG 기본 설정값(100·32) 때문에 생긴 것과 같은 종류다. 그래서 임시 원본을 실제 원본 설정으로 띄우고(7장), 대상이 원본과 맞는지 계획 단계에서 본다(3장).
+- 격리 검사 11개: 열려야 하는 2개(자기 네임스페이스 조회, DNS)와 막혀야 하는 9개(운영 Secret 읽기, 자기 NetworkPolicy 삭제, Role 수정, 토큰 발급, 운영 Deployment 삭제, AI 계정의 호스트 Pod, 관리자 계정의 호스트 Pod, 메타데이터 주소, CNPG 웹훅)가 1.25.1 때와 똑같이 모두 기대대로 나왔다. AI 계정의 호스트 Pod는 권한 확인 요청에서 RBAC가 막았고, 관리자 계정의 같은 Pod는 Pod Security가 막았다.
+- 쓰기 보류는 측정마다 9~41초로 달랐다(단일 노드 kind, 이번 측정은 11~20초). 41초는 예시 계획의 maxDowntime 30초를 넘었는데, 엔진은 넘었다는 것만 비교하고 멈추지 않는다. 11/6 상한값을 정할 때 실제 클러스터에서 다시 재야 한다.
 - 운영 DB 접속 검사는 이 테스트에 대상을 넣지 않아 빠졌다. `hopai`는 `-target`으로 넣는다.
-- 두 샌드박스 모두 끝나고 삭제 요청(`delete_requested`)이 들어갔다.
-- 이전 결과(11/2, [#8](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/8) 시점, Pod Security와 `host-pod-create` 전): 쓰기 보류 8.7초, 전체 77초 / `gp3` 51초.
+- 이전 결과: CNPG 1.25.1(대상·임시 원본 모두 PostgreSQL 17)에서는 11/3에 쓰기 보류 20.6초, 전체 96초 / `gp3` 52초.
 
 알려진 한계:
 
 - 실제 클러스터 확인은 로컬 kind뿐이다. EKS·GKE·k3s에서 NetworkPolicy와 Pod Security가 실제로 동작하는지는 A 영역과 같이 확인해야 한다(6장).
-- 쿠버네티스 경고 이벤트로 드러나지 않는 실패(예: 복제 인증서 오류)는 Plan의 `catchupTimeout`까지 기다린다.
+- 쿠버네티스 경고 이벤트로도, 작업 Job 실패로도 드러나지 않는 실패(예: 복제가 붙었다가 끊기는 인증서 오류)는 Plan의 `catchupTimeout`까지 기다린다. 메이저 버전 불일치는 원본 이미지를 읽었을 때 계획 단계에서 막고, 못 읽었을 때는 리허설이 Job 실패로 빨리 잡는다.
 - AI가 실제로 계획과 진단을 하는 흐름(`hopai run`)과 플랫폼 세션 기록은 가짜 API로만 확인했다. 실제 API 키와 플랫폼으로 돌려 봐야 한다.
 - 파일(rclone), 게이트웨이와 카나리, 부하(k6)는 리허설하지 않는다.

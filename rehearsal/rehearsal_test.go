@@ -372,24 +372,52 @@ func TestLogIsolationNamesPodSecurity(t *testing.T) {
 	}
 }
 
-func TestMatchStandbyParams(t *testing.T) {
+func TestPrepareTempSource(t *testing.T) {
 	p := proposal(t)
-	src := SourceManifest(&p.Plan, "sandbox-moimroom-ab12", DBInfo{Name: "app", User: "app"})
-	// 실제 원본(worker 8)에 맞춘 대상은 CNPG 기본값(32)으로 뜬 임시 원본보다 작아 리허설에서만 뜨지 않는다
-	target := "spec:\n  postgresql:\n    parameters:\n      max_connections: \"60\"\n      max_worker_processes: \"8\"\n      work_mem: \"8MB\"\n"
-	if err := MatchStandbyParams(src, target); err != nil {
+	newSrc := func() *unstructured.Unstructured {
+		return SourceManifest(&p.Plan, "sandbox-moimroom-ab12", DBInfo{Name: "app", User: "app"})
+	}
+	image := func(u *unstructured.Unstructured) string {
+		s, _, _ := unstructured.NestedString(u.Object, "spec", "imageName")
+		return s
+	}
+	params := func(u *unstructured.Unstructured) map[string]string {
+		m, _, _ := unstructured.NestedStringMap(u.Object, "spec", "postgresql", "parameters")
+		return m
+	}
+	target := "spec:\n  imageName: ghcr.io/cloudnative-pg/postgresql:17.11\n  postgresql:\n    parameters:\n      max_connections: \"60\"\n      max_worker_processes: \"8\"\n      work_mem: \"8MB\"\n"
+
+	// 원본을 읽었으면 실제 원본처럼: 이미지와 hot standby 설정을 원본 값으로 (원본에 없는 설정은 원본도 기본값)
+	src := newSrc()
+	sc := &plan.SourceCluster{Image: "ghcr.io/cloudnative-pg/postgresql:17.6", Parameters: map[string]string{"max_wal_senders": "20"}}
+	if err := PrepareTempSource(src, sc, target); err != nil {
 		t.Fatal(err)
 	}
-	got, _, _ := unstructured.NestedStringMap(src.Object, "spec", "postgresql", "parameters")
-	if got["max_connections"] != "60" || got["max_worker_processes"] != "8" || len(got) != 2 {
-		t.Fatalf("임시 원본 설정: %v", got)
+	if image(src) != "ghcr.io/cloudnative-pg/postgresql:17.6" || !reflect.DeepEqual(params(src), map[string]string{"max_wal_senders": "20"}) {
+		t.Fatalf("실제 원본처럼 떠야 함: %s %v", image(src), params(src))
 	}
-	// 대상에 없으면 양쪽 다 기본값이라 건드리지 않는다
-	src = SourceManifest(&p.Plan, "sandbox-moimroom-ab12", DBInfo{Name: "app", User: "app"})
-	if err := MatchStandbyParams(src, p.Manifest); err != nil {
+	// 원본 이미지가 공식 이미지가 아니면(샌드박스가 받지 못할 수 있음) 대상 이미지, 설정은 원본 그대로
+	src = newSrc()
+	if err := PrepareTempSource(src, &plan.SourceCluster{Image: "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/mirror/postgresql:17.11"}, target); err != nil {
 		t.Fatal(err)
 	}
-	if _, found, _ := unstructured.NestedMap(src.Object, "spec", "postgresql"); found {
-		t.Fatal("대상에 없는 설정을 넣음")
+	if image(src) != "ghcr.io/cloudnative-pg/postgresql:17.11" || len(params(src)) != 0 {
+		t.Fatalf("미러 원본: %s %v", image(src), params(src))
+	}
+	// 원본을 모르면 대상의 이미지와 hot standby 설정 (대상이 자기 설정 이상인 원본의 복제본으로 뜨는지만 본다)
+	src = newSrc()
+	if err := PrepareTempSource(src, nil, target); err != nil {
+		t.Fatal(err)
+	}
+	if image(src) != "ghcr.io/cloudnative-pg/postgresql:17.11" || !reflect.DeepEqual(params(src), map[string]string{"max_connections": "60", "max_worker_processes": "8"}) {
+		t.Fatalf("원본을 모를 때: %s %v", image(src), params(src))
+	}
+	// 대상에도 없으면 건드리지 않는다
+	src = newSrc()
+	if err := PrepareTempSource(src, nil, "spec: {}\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ := unstructured.NestedMap(src.Object, "spec", "postgresql"); found || image(src) != "" {
+		t.Fatalf("없는 값을 넣음: %v", src.Object["spec"])
 	}
 }
