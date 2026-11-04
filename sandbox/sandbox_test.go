@@ -407,13 +407,16 @@ func TestCheckRBAC(t *testing.T) {
 }
 
 func TestProbePod(t *testing.T) {
-	p, err := ProbePod("sandbox-shop-ab12", "busybox:1.37", append(DefaultTargets, Target{Name: "db", Host: "10.0.1.5", Port: 5432, Expect: ExpectBlocked}))
+	p, err := ProbePod("sandbox-shop-ab12", "busybox:1.37", DefaultSettle, append(DefaultTargets, Target{Name: "db", Host: "10.0.1.5", Port: 5432, Expect: ExpectBlocked}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	args := p.Spec.Containers[0].Args
 	if !slices.Equal(args[len(args)-4:], []string{"db", "10.0.1.5", "5432", "0"}) || !slices.Contains(args, "1") {
 		t.Fatalf("대상은 인자로만 넘겨야 함: %v", args)
+	}
+	if args[3] != "15" {
+		t.Fatalf("첫 인자는 연결 전 대기 초여야 함: %v", args[:4])
 	}
 	if strings.Contains(args[1], "10.0.1.5") {
 		t.Fatal("대상이 셸 스크립트에 끼어 있음")
@@ -429,7 +432,7 @@ func TestProbePod(t *testing.T) {
 		{"db", "10.0.1.5", 0, ExpectBlocked, false},
 		{"db", "10.0.1.5", 5432, "maybe", false},
 	} {
-		if _, err := ProbePod("ns", "busybox", []Target{bad}); err == nil {
+		if _, err := ProbePod("ns", "busybox", 0, []Target{bad}); err == nil {
 			t.Errorf("거절해야 함: %+v", bad)
 		}
 	}
