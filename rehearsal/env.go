@@ -206,7 +206,8 @@ func TokenKubeconfig(dir string, admin *rest.Config, token string) (string, erro
 		ca = b
 	}
 	cfg := clientcmdapi.NewConfig()
-	cfg.Clusters["sandbox"] = &clientcmdapi.Cluster{Server: admin.Host, CertificateAuthorityData: ca, InsecureSkipTLSVerify: admin.Insecure}
+	// TLSServerName은 터널(127.0.0.1)로 붙을 때 인증서의 원래 이름이다. 빠지면 엔진이 인증서 확인에 실패한다.
+	cfg.Clusters["sandbox"] = &clientcmdapi.Cluster{Server: admin.Host, CertificateAuthorityData: ca, InsecureSkipTLSVerify: admin.Insecure, TLSServerName: admin.ServerName}
 	cfg.AuthInfos["ai-sandbox"] = &clientcmdapi.AuthInfo{Token: token}
 	cfg.Contexts["sandbox"] = &clientcmdapi.Context{Cluster: "sandbox", AuthInfo: "ai-sandbox"}
 	cfg.CurrentContext = "sandbox"

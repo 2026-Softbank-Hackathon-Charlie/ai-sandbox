@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"net/url"
 	"os"
 	"reflect"
@@ -457,5 +459,20 @@ func TestTempStorageClass(t *testing.T) {
 	}
 	if _, err := TempStorageClass([]storagev1.StorageClass{sc("r", "ebs.csi.aws.com", &retain, false)}, "spec: {}"); err == nil {
 		t.Error("쓸 수 있는 것이 없으면 오류여야 함")
+	}
+}
+
+func TestTokenKubeconfigKeepsTLSServerName(t *testing.T) {
+	admin := &rest.Config{Host: "https://127.0.0.1:11443", TLSClientConfig: rest.TLSClientConfig{CAData: []byte("ca"), ServerName: "abc.gr7.ap-northeast-2.eks.amazonaws.com"}}
+	path, err := TokenKubeconfig(t.TempDir(), admin, "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Clusters["sandbox"].TLSServerName; got != admin.ServerName {
+		t.Fatalf("터널로 붙을 때 인증서 이름이 남아야 함: %q", got)
 	}
 }
