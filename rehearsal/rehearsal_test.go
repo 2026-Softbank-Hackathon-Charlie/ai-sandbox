@@ -3,6 +3,8 @@ package rehearsal
 import (
 	"context"
 	"encoding/json"
+	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"net/url"
 	"os"
 	"reflect"
@@ -419,5 +421,41 @@ func TestPrepareTempSource(t *testing.T) {
 	}
 	if _, found, _ := unstructured.NestedMap(src.Object, "spec", "postgresql"); found || image(src) != "" {
 		t.Fatalf("없는 값을 넣음: %v", src.Object["spec"])
+	}
+}
+
+func TestTempStorageClass(t *testing.T) {
+	retain, del := corev1.PersistentVolumeReclaimRetain, corev1.PersistentVolumeReclaimDelete
+	sc := func(name, prov string, policy *corev1.PersistentVolumeReclaimPolicy, def bool) storagev1.StorageClass {
+		s := storagev1.StorageClass{Provisioner: prov, ReclaimPolicy: policy}
+		s.Name = name
+		if def {
+			s.Annotations = map[string]string{"storageclass.kubernetes.io/is-default-class": "true"}
+		}
+		return s
+	}
+	// 워크로드 EKS와 같은 모양: 기본값 없음
+	eks := []storagev1.StorageClass{
+		sc("cnpg-gp3-retain", "ebs.csi.aws.com", &retain, false),
+		sc("gp2", "kubernetes.io/aws-ebs", &del, false),
+		sc("gp3", "ebs.csi.aws.com", &del, false),
+	}
+	for _, c := range []struct {
+		name, manifest, want string
+		scs                  []storagev1.StorageClass
+	}{
+		{"기본값이 있으면 비움", "spec: {storage: {storageClass: gp3}}", "", append(eks, sc("standard", "x", nil, true))},
+		{"대상 값이 있고 Delete면 그것", "spec: {storage: {storageClass: gp2}}", "gp2", eks},
+		{"대상 값이 Retain이면 고르지 않음", "spec: {storage: {storageClass: cnpg-gp3-retain}}", "gp3", eks},
+		{"대상 값이 이 클러스터에 없으면(데모 실패) CSI Delete", "spec: {storage: {storageClass: standard-rwo}}", "gp3", eks},
+		{"대상 값이 없어도", "spec: {}", "gp3", eks},
+	} {
+		got, err := TempStorageClass(c.scs, c.manifest)
+		if err != nil || got != c.want {
+			t.Errorf("%s: %q %v, want %q", c.name, got, err, c.want)
+		}
+	}
+	if _, err := TempStorageClass([]storagev1.StorageClass{sc("r", "ebs.csi.aws.com", &retain, false)}, "spec: {}"); err == nil {
+		t.Error("쓸 수 있는 것이 없으면 오류여야 함")
 	}
 }

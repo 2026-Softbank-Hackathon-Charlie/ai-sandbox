@@ -7,9 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/rest"
@@ -290,6 +293,50 @@ func Seed(ctx context.Context, dsn string, schemas []string, rows int) error {
 		}
 	}
 	return nil
+}
+
+// TempStorageClass는 임시 원본 디스크의 StorageClass를 고른다. 비어 있으면 클러스터 기본값을 쓴다.
+// 임시 원본은 리허설 대상이 아니라 실제 원본을 대신하는 것이므로, 샌드박스 클러스터에서 반드시 뜨는 곳을 골라야 한다.
+// 기본 StorageClass가 없는 클러스터(예: 워크로드 EKS)에서 비워 두면 PVC가 영원히 Pending이 되고
+// 경고 이벤트도 되풀이되지 않아 멈춤 감지에 걸리지 않는다 (2026-11-05 실제 EKS에서 확인).
+//   - 기본 StorageClass가 있으면 비운다.
+//   - 대상 매니페스트의 StorageClass가 이 클러스터에 있고 지우면 디스크도 지우는 것(Delete)이면 그것.
+//   - 아니면 Delete인 것 중 CSI 드라이버를 먼저, 이름순으로 첫 번째. Retain은 샌드박스를 지워도 디스크가 남으므로 고르지 않는다.
+func TempStorageClass(scs []storagev1.StorageClass, targetManifest string) (string, error) {
+	deletes := func(s storagev1.StorageClass) bool {
+		return s.ReclaimPolicy == nil || *s.ReclaimPolicy == corev1.PersistentVolumeReclaimDelete
+	}
+	for _, s := range scs {
+		if s.Annotations["storageclass.kubernetes.io/is-default-class"] == "true" {
+			return "", nil
+		}
+	}
+	var doc map[string]any
+	_ = yaml.Unmarshal([]byte(targetManifest), &doc)
+	spec, _ := doc["spec"].(map[string]any)
+	storage, _ := spec["storage"].(map[string]any)
+	want, _ := storage["storageClass"].(string)
+	var cands []storagev1.StorageClass
+	for _, s := range scs {
+		if !deletes(s) {
+			continue
+		}
+		if s.Name == want {
+			return s.Name, nil
+		}
+		cands = append(cands, s)
+	}
+	if len(cands) == 0 {
+		return "", fmt.Errorf("샌드박스 클러스터에 기본 StorageClass도, 지우면 디스크도 지우는(Delete) StorageClass도 없음")
+	}
+	csi := func(s storagev1.StorageClass) bool { return strings.Contains(s.Provisioner, ".csi.") }
+	sort.SliceStable(cands, func(i, j int) bool {
+		if csi(cands[i]) != csi(cands[j]) {
+			return csi(cands[i])
+		}
+		return cands[i].Name < cands[j].Name
+	})
+	return cands[0].Name, nil
 }
 
 // PrepareTempSource는 임시 원본을 실제 원본처럼 띄운다. 리허설이 보려는 것은 대상이 "실제 원본"의 복제본으로 뜨는지이므로,
