@@ -465,3 +465,26 @@ func TestPlanInfeasibleSourceSkipsAI(t *testing.T) {
 		t.Fatalf("AI를 부르지 않아야 함: 요청 %d번, 세션 %d개", len(f.requests), len(sink.Sessions))
 	}
 }
+
+func TestPlanChecksSourceMajorVersion(t *testing.T) {
+	v := readFile(t, "../plan/testdata/proposal.json")
+	pg17 := strings.Replace(v, "postgresql:18.6-minimal-trixie", "postgresql:17.11", 1)
+	f := &fakeAPI{replies: []reply{{text: pg17}, {text: v}}}
+	a, _ := newAgent(t, f)
+	img := "ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie"
+	p, _, err := a.Plan(context.Background(), PlanInput{App: "moimroom", Draft: draft(t), SourceImage: img})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.SourceImage != img {
+		t.Fatal("결과에 원본 이미지가 붙어 있어야 수정안 검사에도 쓰임")
+	}
+	first, _ := json.Marshal(f.requests[0]["messages"])
+	if !strings.Contains(string(first), "source_image") || !strings.Contains(string(first), "PostgreSQL 18") {
+		t.Fatalf("원본 이미지가 AI에 전달돼야 함: %s", first)
+	}
+	second, _ := json.Marshal(f.requests[1]["messages"])
+	if !strings.Contains(string(second), "PostgreSQL 18 이미지여야 함") {
+		t.Fatalf("메이저 버전이 다르면 다시 물어야 함: %s", second)
+	}
+}

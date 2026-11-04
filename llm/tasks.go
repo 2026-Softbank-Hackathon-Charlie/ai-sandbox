@@ -33,6 +33,7 @@ const planSystem = `너는 HopCharlie의 이전 계획 작성기다. 가동 중�
    - spec.bootstrap.pg_basebackup: {source: <source.cluster>, database, owner, secret: {name: <source.cluster>-app}}. database·owner는 source.dsn의 DB와 사용자
    - spec.externalClusters에 원본(호스트는 source.dsn의 호스트, user streaming_replica, dbname postgres, sslmode verify-full, 인증서는 <source.cluster>-replication과 <source.cluster>-ca 시크릿)과 대상 자신(호스트는 target.dsn의 호스트, user streaming_replica, dbname postgres, sslmode verify-full). 이 두 이름 말고는 쓰지 않고, 비밀번호 키는 넣지 않는다
    - storage, resources, instances, imageName은 원본을 참고하되 대상 클러스터에 맞춘다. imageName은 ghcr.io/cloudnative-pg/postgresql:<버전>만 쓴다
+   - imageName은 반드시 적고, <source_image>(원본이 지금 쓰는 이미지)와 같은 PostgreSQL 메이저 버전으로 둔다. 메이저 버전이 다르면 물리 복제가 되지 않는다
    - storage·walStorage에는 size(문자열, 예: "10Gi", 2Ti 이하)와 storageClass만, resources에는 requests·limits의 cpu(16 이하)·memory(64Gi 이하)만 쓴다. instances는 1~5 정수, smartShutdownTimeout은 0~600 정수다
    - postgresql.parameters에는 max_connections, shared_buffers, work_mem, wal_keep_size 같은 성능·WAL 보존 설정만 쓰고 값은 문자열로 쓴다. log_로 시작하는 설정과 monitoring은 쓰지 않는다
    - DB 전용 노드에 올려야 하면 affinity에 nodeSelector, tolerations(key 필수), enablePodAntiAffinity, podAntiAffinityType, topologyKey만 쓴다. control-plane 노드는 고르지 않는다
@@ -56,6 +57,8 @@ type PlanInput struct {
 	// Source는 원본 실측값이다 (플랫폼이 초안과 함께 잼: POST /v1/plans/draft의 sourceStats). 있으면 AI에 보여 주고 같은 값으로 용량을 검사한다.
 	// 없으면(실측 실패) 용량 검사 없이 진행하고, 플랫폼이 시작할 때 잰다.
 	Source *plan.SourceStats
+	// SourceImage는 원본 CNPG 클러스터가 지금 쓰는 이미지다 (status.image). 있으면 AI에 보여 주고 대상이 같은 메이저 버전인지 검사한다.
+	SourceImage string
 }
 
 // sourceStatsBlock은 실측값과 그 값에서 나온 요구 조건을 AI에 보여 줄 글로 만든다. 숫자만 담는다.
@@ -101,7 +104,7 @@ func (a *Agent) Plan(ctx context.Context, in PlanInput) (*plan.Proposal, string,
 	return run(ctx, a, task[*plan.Proposal]{
 		session: agentlog.Start{Kind: agentlog.KindPlan, Title: in.App + " 이전 계획 (" + in.Draft.Source.Env + " → " + in.Draft.Target.Env + ")"},
 		system:  planSystem,
-		user:    "다음 Plan 초안으로 이전 계획을 작성해라.\n\n<draft>\n" + string(draft) + "\n</draft>" + sourceStatsBlock(in.Source),
+		user:    "다음 Plan 초안으로 이전 계획을 작성해라.\n\n<draft>\n" + string(draft) + "\n</draft>" + sourceStatsBlock(in.Source) + sourceImageBlock(in.SourceImage),
 		tools:   in.Tools,
 		schema:  proposalSchema,
 		parse: func(raw []byte) (*plan.Proposal, plan.Issues) {
@@ -124,6 +127,7 @@ func (a *Agent) Plan(ctx context.Context, in PlanInput) (*plan.Proposal, string,
 			p.Plan.Verify.Schemas = append([]string(nil), in.Draft.Verify.Schemas...)
 			p.Plan.Verify.WrittenRecords = in.Draft.Verify.WrittenRecords
 			p.Source = in.Source
+			p.SourceImage = in.SourceImage
 			if is := p.Check(in.Draft); len(is) > 0 {
 				return nil, is
 			}
@@ -183,4 +187,12 @@ func (a *Agent) Diagnose(ctx context.Context, in DiagnoseInput) (*plan.Diagnosis
 			return d.Cause, map[string]any{"cause": d.Cause, "fix": d.Fix}
 		},
 	})
+}
+
+// sourceImageBlock은 원본 이미지를 AI에 보여 줄 글로 만든다.
+func sourceImageBlock(image string) string {
+	if image == "" {
+		return ""
+	}
+	return fmt.Sprintf("\n\n<source_image>\n%s (PostgreSQL %d)\n</source_image>", image, plan.PostgresMajor(image))
 }

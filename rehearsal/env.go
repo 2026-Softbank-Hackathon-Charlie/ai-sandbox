@@ -317,3 +317,19 @@ func MatchStandbyParams(src *unstructured.Unstructured, targetManifest string) e
 	}
 	return unstructured.SetNestedMap(src.Object, set, "spec", "postgresql", "parameters")
 }
+
+// TempSourceImage는 임시 원본에 쓸 이미지다. 실제 원본 이미지를 알면(sourceImage) 그것을, 모르면 대상 매니페스트의 이미지를 쓴다.
+// 임시 원본이 대상 클러스터의 기본 이미지로 뜨면, 메이저 버전이 대상과 달라 물리 복제가 되지 않거나(실제 원본과 맞는 대상도
+// 리허설에서만 실패), 실제 원본과 다른 버전으로 리허설해서 운영에서만 실패할 수 있다. 둘 다 없으면 빈 문자열(기본 이미지)이다.
+func TempSourceImage(sourceImage, targetManifest string) string {
+	if sourceImage != "" {
+		return sourceImage
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(targetManifest), &doc); err != nil {
+		return ""
+	}
+	spec, _ := doc["spec"].(map[string]any)
+	img, _ := spec["imageName"].(string)
+	return img
+}

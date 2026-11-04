@@ -113,7 +113,7 @@ func (f Fix) Apply(p *Proposal, draft *eplan.Plan) (*Proposal, Issues) {
 		return nil, is
 	}
 
-	next := &Proposal{Plan: p.Plan, Manifest: p.Manifest, Notes: append([]string(nil), p.Notes...), Source: p.Source}
+	next := &Proposal{Plan: p.Plan, Manifest: p.Manifest, Notes: append([]string(nil), p.Notes...), Source: p.Source, SourceImage: p.SourceImage}
 	switch f.Kind {
 	case KindManifestPatch:
 		m, err := patchYAML(p.Manifest, f.Patch)

@@ -48,6 +48,10 @@ func kindProposal(t *testing.T, sc string) Config {
 	m = strings.Replace(m, "instances: 2", "instances: 1", 1)
 	m = strings.Replace(m, "storageClass: gp3", "storageClass: "+sc, 1)
 	m = strings.Replace(m, "size: 5Gi", "size: 1Gi", 1)
+	// 실제 클러스터의 운영자 기본 이미지(임시 원본이 쓰는 것)와 메이저 버전을 맞출 때 쓴다. 예: ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie
+	if img := os.Getenv("REHEARSAL_IMAGE"); img != "" {
+		m = strings.Replace(m, "imageName: ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie", "imageName: "+img, 1)
+	}
 	p.Manifest = m
 	p.Plan.Thresholds.CatchupTimeout.Duration = 5 * time.Minute
 	c.Proposal, c.Draft = p, &p.Plan

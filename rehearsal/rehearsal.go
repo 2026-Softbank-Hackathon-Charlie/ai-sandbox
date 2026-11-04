@@ -280,6 +280,12 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 		failf("임시 원본 설정: %v", err)
 		return a, nil, nil
 	}
+	if img := TempSourceImage(cur.SourceImage, cur.Manifest); img != "" {
+		if err := unstructured.SetNestedField(src.Object, img, "spec", "imageName"); err != nil {
+			failf("임시 원본 이미지: %v", err)
+			return a, nil, nil
+		}
+	}
 	ses.Log(ctx, agentlog.Event{Type: agentlog.ToolCall, Tool: "sandbox_source", Input: map[string]any{"cluster": cur.Plan.Source.Cluster, "rows": c.Rows, "schemas": cur.Plan.Verify.Schemas}})
 	t0 = time.Now()
 	if _, err := aiDyn.Resource(llm.CNPGClusterGVR).Namespace(sb.Namespace).Create(ctx, src, metav1.CreateOptions{}); err != nil {

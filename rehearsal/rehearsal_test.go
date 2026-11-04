@@ -393,3 +393,16 @@ func TestMatchStandbyParams(t *testing.T) {
 		t.Fatal("대상에 없는 설정을 넣음")
 	}
 }
+
+func TestTempSourceImage(t *testing.T) {
+	m := "spec:\n  imageName: ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie\n"
+	if got := TempSourceImage("ghcr.io/cloudnative-pg/postgresql:18.1", m); got != "ghcr.io/cloudnative-pg/postgresql:18.1" {
+		t.Fatalf("실제 원본 이미지를 써야 함: %s", got)
+	}
+	if got := TempSourceImage("", m); got != "ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie" {
+		t.Fatalf("원본을 모르면 대상 이미지: %s", got)
+	}
+	if got := TempSourceImage("", "spec: {}\n"); got != "" {
+		t.Fatalf("둘 다 없으면 기본 이미지: %s", got)
+	}
+}
