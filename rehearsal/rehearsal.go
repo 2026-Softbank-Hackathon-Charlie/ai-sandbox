@@ -276,7 +276,7 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 		return a, nil, nil
 	}
 	src := SourceManifest(&cur.Plan, sb.Namespace, db)
-	if err := PrepareTempSource(src, cur.SourceImage, cur.Manifest); err != nil {
+	if err := PrepareTempSource(src, cur.SourceCluster, cur.Manifest); err != nil {
 		failf("임시 원본 설정: %v", err)
 		return a, nil, nil
 	}

@@ -292,37 +292,44 @@ func Seed(ctx context.Context, dsn string, schemas []string, rows int) error {
 	return nil
 }
 
-// standbyParams는 hot standby가 primary 이상이어야 시작하는 PostgreSQL 설정이다.
-var standbyParams = []string{"max_connections", "max_worker_processes"}
-
-// PrepareTempSource는 임시 원본을 대상 매니페스트와 실제 원본에 맞춘다. 대상 매니페스트는 한 번만 읽는다.
-//   - max_connections·max_worker_processes를 대상 값으로: 대상은 임시 원본을 따라가는 hot standby라 이 값들이
-//     원본 이상이어야 뜬다. 임시 원본이 CNPG 기본값(100, 32)으로 뜨면 실제 원본에 맞춰 더 작게 정한 대상이 리허설에서만 뜨지 않는다.
-//   - 이미지를 실제 원본 이미지로: 대상 클러스터의 기본 이미지로 뜨면 메이저 버전이 대상과 달라 물리 복제가 되지 않거나,
-//     실제 원본과 다른 버전으로 리허설하게 된다. 원본 이미지가 CNPG 공식 이미지가 아니면(사설 레지스트리·미러) 샌드박스가
-//     받지 못할 수 있으므로 대상 이미지를 쓴다. 대상 이미지는 계획 검사가 원본과 같은 메이저 버전임을 확인한 것이다.
-func PrepareTempSource(src *unstructured.Unstructured, sourceImage, targetManifest string) error {
+// PrepareTempSource는 임시 원본을 실제 원본처럼 띄운다. 리허설이 보려는 것은 대상이 "실제 원본"의 복제본으로 뜨는지이므로,
+// 임시 원본이 대상 클러스터의 기본값으로 뜨면 리허설 결과가 운영과 달라진다(CNPG 기본 설정 100·32, 운영자 기본 이미지 18.6 등).
+//   - 원본을 읽었으면(sc): 이미지와 hot standby 설정(plan.StandbyParams)을 원본 값으로 둔다. 원본에 없는 설정은 원본도 기본값이므로
+//     임시 원본도 기본값이다. 원본 이미지가 CNPG 공식 이미지가 아니면(사설 레지스트리·미러) 샌드박스가 받지 못할 수 있으므로
+//     대상 이미지를 쓴다. 대상 이미지는 계획 검사가 원본과 같은 메이저 버전임을 확인한 것이다.
+//   - 원본을 모르면: 대상 매니페스트의 이미지와 hot standby 설정을 쓴다. 대상이 자기 설정 이상인 원본의 복제본으로 뜨는지만 본다.
+func PrepareTempSource(src *unstructured.Unstructured, sc *plan.SourceCluster, targetManifest string) error {
 	var doc map[string]any
 	if err := yaml.Unmarshal([]byte(targetManifest), &doc); err != nil {
 		return fmt.Errorf("대상 매니페스트를 읽을 수 없음: %w", err)
 	}
 	spec, _ := doc["spec"].(map[string]any)
+	targetImage, _ := spec["imageName"].(string)
 	pg, _ := spec["postgresql"].(map[string]any)
-	params, _ := pg["parameters"].(map[string]any)
+	targetParams, _ := pg["parameters"].(map[string]any)
+
+	img := targetImage
 	set := map[string]any{}
-	for _, k := range standbyParams {
-		if v, ok := params[k].(string); ok {
-			set[k] = v
+	if sc != nil {
+		if plan.IsCNPGImage(sc.Image) {
+			img = sc.Image
+		}
+		for _, k := range plan.StandbyParams {
+			if v, ok := sc.Parameters[k]; ok {
+				set[k] = v
+			}
+		}
+	} else {
+		for _, k := range plan.StandbyParams {
+			if v, ok := targetParams[k].(string); ok {
+				set[k] = v
+			}
 		}
 	}
 	if len(set) > 0 {
 		if err := unstructured.SetNestedMap(src.Object, set, "spec", "postgresql", "parameters"); err != nil {
 			return err
 		}
-	}
-	img := sourceImage
-	if !plan.IsCNPGImage(img) {
-		img, _ = spec["imageName"].(string)
 	}
 	if img == "" {
 		return nil // 둘 다 없으면 대상 클러스터의 기본 이미지

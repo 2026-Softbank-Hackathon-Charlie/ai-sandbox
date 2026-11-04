@@ -466,44 +466,45 @@ func TestPlanInfeasibleSourceSkipsAI(t *testing.T) {
 	}
 }
 
-func TestPlanChecksSourceMajorVersion(t *testing.T) {
+func TestPlanChecksSourceCluster(t *testing.T) {
+	// 원본(moimroom)은 17.11인데 AI가 18.6을 쓰면 다시 묻는다
 	v := readFile(t, "../plan/testdata/proposal.json")
-	pg17 := strings.Replace(v, "postgresql:18.6-minimal-trixie", "postgresql:17.11", 1)
-	f := &fakeAPI{replies: []reply{{text: pg17}, {text: v}}}
+	pg18 := strings.Replace(v, "postgresql:17.11", "postgresql:18.6", 1)
+	f := &fakeAPI{replies: []reply{{text: pg18}, {text: v}}}
 	a, _ := newAgent(t, f)
-	img := "ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie"
-	p, _, err := a.Plan(context.Background(), PlanInput{App: "moimroom", Draft: draft(t), SourceImage: img})
+	sc := &plan.SourceCluster{Image: "ghcr.io/cloudnative-pg/postgresql:17.11"}
+	p, _, err := a.Plan(context.Background(), PlanInput{App: "moimroom", Draft: draft(t), SourceCluster: sc})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.SourceImage != img {
-		t.Fatal("결과에 원본 이미지가 붙어 있어야 수정안 검사에도 쓰임")
+	if p.SourceCluster != sc {
+		t.Fatal("결과에 원본 클러스터 값이 붙어 있어야 수정안 검사와 리허설에도 쓰임")
 	}
 	first, _ := json.Marshal(f.requests[0]["messages"])
-	if !strings.Contains(string(first), "source_image") || !strings.Contains(string(first), "PostgreSQL 18") {
-		t.Fatalf("원본 이미지가 AI에 전달돼야 함: %s", first)
+	if !strings.Contains(string(first), "source_cluster") || !strings.Contains(string(first), "PostgreSQL 17") {
+		t.Fatalf("원본 클러스터 값이 AI에 전달돼야 함: %s", first)
 	}
 	second, _ := json.Marshal(f.requests[1]["messages"])
-	if !strings.Contains(string(second), "PostgreSQL 18 이미지여야 함") {
+	if !strings.Contains(string(second), "PostgreSQL 17 이미지여야 함") {
 		t.Fatalf("메이저 버전이 다르면 다시 물어야 함: %s", second)
 	}
 }
 
-func TestDiagnoseShowsSourceImage(t *testing.T) {
+func TestDiagnoseShowsSourceCluster(t *testing.T) {
 	v := readFile(t, "../plan/testdata/proposal.json")
 	var p plan.Proposal
 	if err := json.Unmarshal([]byte(v), &p); err != nil {
 		t.Fatal(err)
 	}
-	p.SourceImage = "ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie"
-	diag := `{"cause":"대상이 PostgreSQL 17이라 원본 18에서 복제할 수 없음","evidence":["pg_basebackup: error: incompatible server version 18.6"],"fix":{"kind":"manifest-patch","patch":[{"op":"replace","path":"/spec/imageName","value":"ghcr.io/cloudnative-pg/postgresql:18.6"}]}}`
+	p.SourceCluster = &plan.SourceCluster{Image: "ghcr.io/cloudnative-pg/postgresql:17.11"}
+	diag := `{"cause":"임시 원본과 대상의 메이저 버전이 달라 복제할 수 없음","evidence":["pg_basebackup: error: incompatible server version 18.6"],"fix":{"kind":"manifest-patch","patch":[{"op":"replace","path":"/spec/imageName","value":"ghcr.io/cloudnative-pg/postgresql:17.6"}]}}`
 	f := &fakeAPI{replies: []reply{{text: diag}}}
 	a, _ := newAgent(t, f)
 	if _, _, err := a.Diagnose(context.Background(), DiagnoseInput{Proposal: &p, Draft: draft(t), Log: "pg_basebackup: error: incompatible server version 18.6"}); err != nil {
 		t.Fatal(err)
 	}
 	first, _ := json.Marshal(f.requests[0]["messages"])
-	if !strings.Contains(string(first), "source_image") || !strings.Contains(string(first), "PostgreSQL 18") {
-		t.Fatalf("진단에도 원본 이미지가 전달돼야 함: %s", first)
+	if !strings.Contains(string(first), "source_cluster") || !strings.Contains(string(first), "PostgreSQL 17") {
+		t.Fatalf("진단에도 원본 클러스터 값이 전달돼야 함: %s", first)
 	}
 }

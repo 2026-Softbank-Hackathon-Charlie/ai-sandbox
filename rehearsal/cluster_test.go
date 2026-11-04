@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/agentlog"
+	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/plan"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/sandbox"
 )
 
@@ -48,9 +49,9 @@ func kindProposal(t *testing.T, sc string) Config {
 	m = strings.Replace(m, "instances: 2", "instances: 1", 1)
 	m = strings.Replace(m, "storageClass: gp3", "storageClass: "+sc, 1)
 	m = strings.Replace(m, "size: 5Gi", "size: 1Gi", 1)
-	// 실제 클러스터의 운영자 기본 이미지(임시 원본이 쓰는 것)와 메이저 버전을 맞출 때 쓴다. 예: ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie
+	// 대상 이미지를 바꿀 때 쓴다 (예시 계획은 moimroom 원본과 같은 PostgreSQL 17.11). 예: REHEARSAL_IMAGE=ghcr.io/cloudnative-pg/postgresql:16
 	if img := os.Getenv("REHEARSAL_IMAGE"); img != "" {
-		m = strings.Replace(m, "imageName: ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie", "imageName: "+img, 1)
+		m = strings.Replace(m, "imageName: ghcr.io/cloudnative-pg/postgresql:17.11", "imageName: "+img, 1)
 	}
 	p.Manifest = m
 	p.Plan.Thresholds.CatchupTimeout.Duration = 5 * time.Minute
@@ -124,8 +125,8 @@ func TestClusterRehearsalWithSmallStandbyParams(t *testing.T) {
 // 계획 검사는 원본 이미지를 읽었을 때만 막으므로, 리허설은 Job 실패로 빨리 멈추고 로그의 오류 줄을 근거로 남겨야 한다.
 func TestClusterRehearsalCatchesMajorVersionMismatch(t *testing.T) {
 	c := kindProposal(t, "standard")
-	c.Proposal.SourceImage = "ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie"
-	c.Proposal.Manifest = strings.Replace(c.Proposal.Manifest, "imageName: ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie", "imageName: ghcr.io/cloudnative-pg/postgresql:17.11", 1)
+	// 원본은 18.6으로 올라갔는데 대상은 17.11인 경우. 계획 검사를 거치지 않게 직접 넣는다
+	c.Proposal.SourceCluster = &plan.SourceCluster{Image: "ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie"}
 	start := time.Now()
 	rep, err := Rehearse(context.Background(), c)
 	if err != nil {
@@ -138,5 +139,21 @@ func TestClusterRehearsalCatchesMajorVersionMismatch(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(a.Evidence, "\n"), "incompatible server version") {
 		t.Fatalf("pg_basebackup 오류 줄이 근거에 있어야 함: %v", a.Evidence)
+	}
+}
+
+// moimroom처럼 원본이 PostgreSQL 17.11로 고정돼 있으면, 대상 클러스터 운영자의 기본 이미지가 18.6이어도
+// 임시 원본은 원본과 같은 17.11로 떠야 한다. 예전에는 임시 원본이 기본값으로 떠서 이 경우에 리허설이 실패했다.
+func TestClusterRehearsalWithRealSourceImage(t *testing.T) {
+	c := kindProposal(t, "standard")
+	c.Proposal.SourceCluster = &plan.SourceCluster{Image: "ghcr.io/cloudnative-pg/postgresql:17.11"}
+	rep, err := Rehearse(context.Background(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := rep.Attempts[0]
+	t.Logf("결과: 통과=%v 엔진=%s %.0f초 오류=%s", a.Passed, a.Outcome, a.DurationS, a.Error)
+	if !rep.Passed || a.Outcome != "succeeded" {
+		t.Fatalf("통과해야 함: %+v", a)
 	}
 }

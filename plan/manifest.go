@@ -47,6 +47,8 @@ var pgParameterKeys = []string{
 	"max_wal_size", "min_wal_size", "wal_keep_size", "max_slot_wal_keep_size", "checkpoint_timeout",
 	"checkpoint_completion_target", "random_page_cost", "effective_io_concurrency",
 	"max_worker_processes", "max_parallel_workers", "max_parallel_workers_per_gather",
+	// hot standby가 원본 이상이어야 하는 나머지 설정 (StandbyParams)
+	"max_wal_senders", "max_prepared_transactions", "max_locks_per_transaction",
 }
 
 // 매니페스트 크기와 자원 상한 (제안값, 11/6에 확정한다).
