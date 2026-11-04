@@ -301,8 +301,10 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 - 리허설은 이것을 실제로 잡는다. 로컬 kind에서 `gp3`로 돌리면 `storageclass.storage.k8s.io "gp3" not found` 경고가 근거로 남고, 엔진은 쓰기 보류 전에 멈춘다(원본 그대로).
 - 흐름: 1차 실패 → AI 진단(샌드박스 조회 도구로 StorageClass 확인) → `manifest-patch` 수정안 → 2차 통과 → 고친 `target.yaml` 첨부 → 승인 화면에 첨부와 세션 기록.
 - AI는 조사 도구로 대상 StorageClass를 보고 처음부터 맞게 고르므로, 그대로 두면 실패가 나오지 않는다. 그래서 `hopai run -demo-copy-source-storage`를 둔다.
-  - AI 계획의 `storage.storageClass`(있으면 `walStorage`도)를 **원본 DB가 실제로 쓰는 StorageClass**로 바꿔 제출한다. 원본 설정을 그대로 옮긴 계획과 같다. 원본 값은 원본 CNPG 클러스터의 `spec.storage.storageClass`, 비었으면(클러스터 기본값) 그 클러스터 PVC의 `storageClassName`에서 읽는다(원본 환경의 `-env` kubeconfig 필요).
-  - 대상에 그 StorageClass가 없으면 1차 리허설에서 DB 볼륨이 실제로 Pending이 되고, 멈춤 감지(25초)와 AI 진단이 실제로 돈다. 예: GKE → EKS면 GKE의 `standard-rwo`, EKS → GKE면 EKS의 `gp3`. 대상에도 같은 이름이 있으면 실패하지 않으므로 시작할 때 경고한다.
+  - AI 계획의 `storage.storageClass`(있으면 `walStorage`도)를 **원본 DB가 실제로 쓰는 StorageClass**로 바꿔 제출한다. 원본 설정을 그대로 옮긴 계획과 같다. 원본 값은 원본 CNPG 클러스터의 `spec.storage.storageClass`·`spec.walStorage.storageClass`, 비었으면(클러스터 기본값) 그 클러스터 PVC의 `storageClassName`에서 읽는다. CNPG는 WAL PVC에도 같은 클러스터 라벨을 붙이므로 `cnpg.io/pvcRole`(`PG_DATA`, `PG_WAL`)로 나눈다.
+  - 대상에 그 StorageClass가 없으면 1차 리허설에서 DB 볼륨이 실제로 Pending이 되고, 멈춤 감지(25초)와 AI 진단이 실제로 돈다. 예: GKE → EKS면 GKE의 `standard-rwo`, EKS → GKE면 EKS의 `gp3`.
+  - 실패가 나지 않을 조건이면 **시작하지 않고 멈춘다**: AI가 이미 원본과 같은 값을 골랐거나, 리허설이 도는 대상 클러스터(`-sandbox-kubeconfig`)에도 그 StorageClass가 있거나, 대상 목록을 읽지 못했을 때. 발표 중에 실패 장면 없이 지나가지 않게 예행에서 바로 알린다.
+  - 필요한 권한: 원본 `-env` kubeconfig로 원본 네임스페이스의 CNPG `clusters` get과 `persistentvolumeclaims` list, 샌드박스 kubeconfig로 `storageclasses` list.
   - 바꾼 것은 감추지 않는다. 표준 오류와 결과 JSON(`demo`)에 남고, 플랫폼 에이전트 기록에 **"운영자 데모 설정"** 세션(종류 `other`, 그 Plan에 연결)으로 남아 콘솔에서 리허설 실패보다 먼저 보인다. AI가 한 일이 아니라는 것을 밝힌다.
   - 수정안을 적용해 2차 리허설이 통과하면 고친 `target.yaml`을 첨부해 revision이 올라간다. 승인 화면에는 첨부, 리허설 세션, 진단 세션이 함께 보인다.
 
@@ -356,7 +358,7 @@ go run ./cmd/hopai run -app moimroom -from gke -to eks \
 
 - `-env`는 AI 조사 도구가 쓰는 환경별 읽기 전용 kubeconfig다. `hopai`는 원본 환경의 것으로 원본 CNPG 클러스터의 이미지와 hot standby 설정을 읽어 계획 검사와 리허설 임시 원본에 쓴다. 없거나 읽지 못하면 경고만 내고 이 검사 없이 계획한다.
 - `-sandbox-kubeconfig`는 대상 클러스터에서 샌드박스를 만들고 지우는 관리용이다. 엔진은 이것이 아니라 샌드박스 토큰으로 돈다.
-- `-demo-copy-source-storage`는 데모 실패 시나리오(9장)다. AI 계획의 StorageClass를 원본 값으로 바꿔 제출해 1차 리허설을 실제로 실패시킨다. 원본 환경의 `-env`가 필요하다.
+- `-demo-copy-source-storage`는 데모 실패 시나리오(9장)다. AI 계획의 StorageClass를 원본 값으로 바꿔 제출해 1차 리허설을 실제로 실패시킨다. 원본 환경의 `-env`(CNPG `clusters` get, `persistentvolumeclaims` list)가 필요하고, 실패가 나지 않을 조건이면 시작하지 않는다.
 - 끝나면 Plan ref와 revision, 세션 ID, 리허설 리포트를 출력한다. 리허설을 통과하지 못하면 종료 코드 1이고 승인하지 말라고 알린다.
 - 비공개 모듈(platform, migration-engine)을 받으려면 `go env -w GOPRIVATE=github.com/2026-Softbank-Hackathon-Charlie`가 필요하다.
 

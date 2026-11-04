@@ -138,28 +138,23 @@ func main() {
 	prop, planSession, err := agent.Plan(ctx, llm.PlanInput{App: *app, Draft: &draft, Tools: llm.PlanTools(scope, pc, clusters), Source: stats, SourceCluster: src})
 	must(err)
 
+	// 리허설이 도는 대상 클러스터의 관리용 접속. 데모 준비도 이것으로 대상 StorageClass를 확인한다.
+	adminCfg, err := restConfig(*sbKube, *sbCtx)
+	must(err)
+	admin, err := kubernetes.NewForConfig(adminCfg)
+	must(err)
+
 	// 데모 실패 시나리오(README 9장): AI 계획의 storageClass를 원본 값으로 바꿔 제출한다.
+	// 실패가 나지 않을 조건(AI가 이미 원본 값을 골랐거나 대상에도 그 값이 있음)이면 시작하지 않는다.
 	var demo *demoSetting
 	if *demoCopy {
 		c, ok := clusters[*from]
 		if !ok {
 			must(fmt.Errorf("-demo-copy-source-storage에는 원본 환경 %s의 -env kubeconfig가 필요함", *from))
 		}
-		sc, err := sourceStorageClass(ctx, c.Typed, c.Dynamic, draft.Source.Namespace, draft.Source.Cluster)
+		prop, demo, err = prepareDemo(ctx, prop, &draft, c, admin, draft.Source.Namespace, draft.Source.Cluster)
 		must(err)
-		next, ai, err := copySourceStorage(prop, &draft, sc)
-		must(err)
-		prop = next
-		demo = &demoSetting{Scenario: demoScenario, SourceStorageClass: sc, AIStorageClass: ai}
-		if t, ok := clusters[*to]; ok {
-			if has, err := storageClassExists(ctx, t.Typed, sc); err == nil {
-				demo.TargetHasIt = &has
-			}
-		}
-		fmt.Fprintf(os.Stderr, "데모 설정: AI가 정한 storageClass %q를 원본 값 %q로 바꿔 제출합니다\n", ai, sc)
-		if demo.TargetHasIt != nil && *demo.TargetHasIt {
-			fmt.Fprintf(os.Stderr, "경고: 대상 환경 %s에도 StorageClass %q가 있어 첫 리허설이 실패하지 않습니다\n", *to, sc)
-		}
+		fmt.Fprintf(os.Stderr, "데모 설정: AI가 정한 storageClass(%s)를 원본 값 %q로 바꿔 제출합니다. 대상에 없어 첫 리허설이 실패합니다\n", scLabel(demo.AIStorageClass), demo.SourceStorageClass)
 	}
 
 	// 4. 제출과 첨부
@@ -173,10 +168,6 @@ func main() {
 	}
 
 	// 5. 리허설
-	adminCfg, err := restConfig(*sbKube, *sbCtx)
-	must(err)
-	admin, err := kubernetes.NewForConfig(adminCfg)
-	must(err)
 	if *prodNS == "" {
 		*prodNS = draft.Target.Namespace
 	}
