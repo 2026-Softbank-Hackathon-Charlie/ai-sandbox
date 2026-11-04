@@ -82,3 +82,23 @@ func TestMatchCandidate(t *testing.T) {
 		t.Fatalf("매니페스트 없는 Plan인데 걸림: %v", err)
 	}
 }
+
+func TestSourceStatsFromPlatform(t *testing.T) {
+	notMeasured := apiv1.PlanDraftResultSourceStatsReasonNotMeasured
+	if s := sourceStats(&apiv1.PlanDraftResult{SourceStatsReason: &notMeasured}); s != nil {
+		t.Fatalf("재지 못했으면 nil이어야 함: %+v", s)
+	}
+	if got := reasonOf(&apiv1.PlanDraftResult{SourceStatsReason: &notMeasured}); got != "not_measured" {
+		t.Fatalf("이유: %s", got)
+	}
+	size, wal := int64(2<<30), 1048576.0
+	s := sourceStats(&apiv1.PlanDraftResult{SourceStats: &apiv1.SourceStats{Sessions: 80, MaxConnections: 200, MaxWorkerProcesses: 8, Bytes: &size, WalBytesPerSecond: &wal, WindowSeconds: 5}})
+	if s == nil || s.Sessions != 80 || s.MaxConnections != 200 || s.MaxWorkerProcesses != 8 || s.Bytes != size || s.WALBytesPerSecond != wal || s.WindowSeconds != 5 {
+		t.Fatalf("옮긴 값: %+v", s)
+	}
+	// 크기와 WAL 속도를 못 쟀으면 0으로 두어 초기 복사 검사가 막지 않는다. 접속 수 검사는 그대로 한다.
+	s = sourceStats(&apiv1.PlanDraftResult{SourceStats: &apiv1.SourceStats{Sessions: 80, MaxConnections: 200, MaxWorkerProcesses: 8}})
+	if s == nil || s.Bytes != 0 || s.WALBytesPerSecond != 0 || s.RequiredConnections() < 200 {
+		t.Fatalf("일부만 잰 값: %+v", s)
+	}
+}

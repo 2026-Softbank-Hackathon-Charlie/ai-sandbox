@@ -9,7 +9,7 @@ import (
 	eplan "github.com/2026-Softbank-Hackathon-Charlie/migration-engine/pkg/plan"
 )
 
-// SourceStats는 계획 전에 원본 DB를 실측한 값이다 (dbstats.Measure).
+// SourceStats는 계획 전에 원본 DB를 실측한 값이다. 플랫폼이 초안과 함께 잰다 (POST /v1/plans/draft의 sourceStats, platform ADR 0017).
 //
 // 플랫폼은 이전을 시작할 때 원본과 대상을 같은 방식으로 재고, 부족하면 409 capacity_insufficient로 막는다
 // (platform internal/preflight/capacity). 그때는 이미 승인된 뒤이므로, 계획 단계에서 같은 기준으로 먼저 막는다.
@@ -70,7 +70,7 @@ func CheckFeasible(s *SourceStats) error {
 
 // CheckCapacity는 실측값으로 대상 설정과 초기 복사 시간을 본다. s가 없으면(실측 실패) 보지 않는다.
 //   - 대상을 새로 만들면(매니페스트 있음) max_connections를 정해야 하고 RequiredConnections 이상이어야 한다.
-//     max_worker_processes도 원본 이상이어야 한다 (정하지 않으면 CNPG 기본값 32).
+//     max_worker_processes도 정해야 하고 원본 이상이어야 한다.
 //   - 엔진은 prepare에서 catchupTimeout 안에 대상이 원본을 다 복사하고 따라잡기를 기다린다.
 //     넉넉한 복사 속도로도 그 안에 못 끝나면 끝나지 않는다.
 func CheckCapacity(p *eplan.Plan, manifest string, s *SourceStats) Issues {
@@ -89,13 +89,15 @@ func CheckCapacity(p *eplan.Plan, manifest string, s *SourceStats) Issues {
 			is.add(path+"max_connections", "%d이면 부족함. %d 이상이어야 함 (대상은 hot standby라 원본 max_connections %d 이상, 플랫폼 기준 세션 %d × %.1f 이상)",
 				n, need, s.MaxConnections, s.Sessions, ConnectionHeadroom)
 		}
-		n, ok := manifestParam(manifest, "max_worker_processes")
-		if !ok {
-			n = cnpgDefaultMaxWorkerProcesses
-		}
-		if n < s.MaxWorkerProcesses {
-			is.add(path+"max_worker_processes", "%d이면 부족함. 대상은 hot standby라 원본 값 %d 이상이어야 함 (정하지 않으면 CNPG 기본값 %d)",
-				n, s.MaxWorkerProcesses, cnpgDefaultMaxWorkerProcesses)
+		// 플랫폼 시작 검사(standby_settings)는 대상이 없으면 매니페스트에서 이 값을 읽고, 없으면 짐작하지 않고 건너뛴다.
+		// 그래서 기본값에 기대지 않고 적게 한다 (platform #47).
+		switch n, ok := manifestParam(manifest, "max_worker_processes"); {
+		case !ok:
+			is.add(path+"max_worker_processes", "원본 값 %d 이상으로 정해야 함 (플랫폼 시작 검사가 매니페스트에서 이 값을 읽음. CNPG 기본값은 %d)",
+				s.MaxWorkerProcesses, cnpgDefaultMaxWorkerProcesses)
+		case n < s.MaxWorkerProcesses:
+			is.add(path+"max_worker_processes", "%d이면 부족함. 대상은 hot standby라 원본 값 %d 이상이어야 함",
+				n, s.MaxWorkerProcesses)
 		}
 	}
 	// 0은 CheckRules가 이미 거절한다.

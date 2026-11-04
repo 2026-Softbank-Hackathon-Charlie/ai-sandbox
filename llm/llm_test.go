@@ -429,7 +429,7 @@ func TestLogFailureDoesNotDiscardResult(t *testing.T) {
 
 func TestPlanUsesSourceStats(t *testing.T) {
 	v := readFile(t, "../plan/testdata/proposal.json")
-	withConns := strings.Replace(v, `instances: 2\n`, `instances: 2\n  postgresql:\n    parameters:\n      max_connections: \"200\"\n`, 1)
+	withConns := strings.Replace(v, `instances: 2\n`, `instances: 2\n  postgresql:\n    parameters:\n      max_connections: \"200\"\n      max_worker_processes: \"8\"\n`, 1)
 	if withConns == v {
 		t.Fatal("max_connections를 넣을 자리가 없음")
 	}

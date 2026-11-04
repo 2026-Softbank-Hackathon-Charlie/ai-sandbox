@@ -40,7 +40,6 @@ import (
 	"github.com/2026-Softbank-Hackathon-Charlie/platform/pkg/client"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/agentlog"
-	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/dbstats"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/llm"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/mask"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/plan"
@@ -67,7 +66,7 @@ func main() {
 	fs.Var(&targets, "target", "샌드박스에서 막혀야 하는 곳 <이름>=<호스트>:<포트> (예: 운영 DB, 여러 번)")
 	rows := fs.Int("rows", 20000, "리허설 테스트 데이터 행 수")
 	maxRuns := fs.Int("max-runs", 3, "리허설 최대 실행 횟수")
-	noMeasure := fs.Bool("no-measure", false, "원본 실측을 건너뜀 (접속 수·초기 복사 검사 없이 계획)")
+	noMeasure := fs.Bool("no-measure", false, "플랫폼에 원본 실측을 요청하지 않음 (접속 수·초기 복사 검사 없이 계획)")
 	out := fs.String("out", "", "리포트 JSON을 쓸 파일 (비우면 표준 출력)")
 	must(fs.Parse(os.Args[2:]))
 	for name, v := range map[string]string{"-app": *app, "-from": *from, "-to": *to, "-sandbox-kubeconfig": *sbKube} {
@@ -94,24 +93,28 @@ func main() {
 	if *stream != "" {
 		req.WrittenRecordsStream = stream
 	}
-	d, err := pc.DraftPlan(ctx, req)
-	must(err)
+	// 2. 원본 실측. 플랫폼은 이전을 시작할 때 같은 값을 재고 부족하면 막는다(409 capacity_insufficient).
+	// 승인 뒤에 막히지 않도록 초안을 받을 때 플랫폼에 같은 값을 재 달라고 한다(platform #47, ADR 0017).
+	// 이 실행기는 운영 DB에 붙지 않고 비밀번호도 갖지 않는다. 못 재면 용량 검사 없이 계획하고, 플랫폼이 시작할 때 잰다.
+	var d *apiv1.EnginePlan
+	var stats *plan.SourceStats
+	if *noMeasure {
+		d, err = pc.DraftPlan(ctx, req)
+		must(err)
+	} else {
+		res, err := pc.DraftPlanWithSourceStats(ctx, req)
+		must(err)
+		d = &res.Plan
+		if stats = sourceStats(res); stats == nil {
+			fmt.Fprintf(os.Stderr, "경고: 플랫폼이 원본을 재지 못함 (%s). 접속 수·초기 복사 검사 없이 계획합니다\n", reasonOf(res))
+		} else {
+			fmt.Fprintf(os.Stderr, "원본 실측: 세션 %d, max_connections %d (대상 %d 이상 필요), max_worker_processes %d, 크기 %d바이트, 변경 %.0f바이트/초\n",
+				stats.Sessions, stats.MaxConnections, stats.RequiredConnections(), stats.MaxWorkerProcesses, stats.Bytes, stats.WALBytesPerSecond)
+		}
+	}
 	var draft eplan.Plan
 	b, _ := json.Marshal(d)
 	must(json.Unmarshal(b, &draft))
-
-	// 2. 원본 실측. 플랫폼은 이전을 시작할 때 같은 값을 재고 부족하면 막는다(409 capacity_insufficient).
-	// 승인 뒤에 막히지 않도록 계획에 쓴다. 못 재면 용량 검사 없이 계획하고, 플랫폼이 시작할 때 잰다.
-	var stats *plan.SourceStats
-	if !*noMeasure {
-		if s, err := dbstats.Measure(ctx, draft.Source.DSN, 0); err != nil {
-			fmt.Fprintf(os.Stderr, "경고: %v. 접속 수·초기 복사 검사 없이 계획합니다\n", err)
-		} else {
-			stats = s
-			fmt.Fprintf(os.Stderr, "원본 실측: 세션 %d, max_connections %d (대상 %d 이상 필요), max_worker_processes %d, 크기 %d바이트, 변경 %.0f바이트/초\n",
-				s.Sessions, s.MaxConnections, s.RequiredConnections(), s.MaxWorkerProcesses, s.Bytes, s.WALBytesPerSecond)
-		}
-	}
 
 	// 3. AI 계획
 	clusters := map[string]llm.Cluster{}
@@ -333,4 +336,29 @@ func must(err error) {
 		fmt.Fprintln(os.Stderr, "오류:", err)
 		os.Exit(1)
 	}
+}
+
+// sourceStats는 플랫폼이 잰 원본 값을 계획 검사의 형식으로 바꾼다. 재지 못했으면 nil이다.
+// 크기와 WAL 속도는 플랫폼이 못 잰 경우 빠지는데, 그때는 0으로 두어 초기 복사 검사가 막지 않게 한다.
+func sourceStats(res *apiv1.PlanDraftResult) *plan.SourceStats {
+	s := res.SourceStats
+	if s == nil {
+		return nil
+	}
+	out := &plan.SourceStats{Sessions: s.Sessions, MaxConnections: s.MaxConnections, MaxWorkerProcesses: s.MaxWorkerProcesses, WindowSeconds: s.WindowSeconds}
+	if s.Bytes != nil {
+		out.Bytes = *s.Bytes
+	}
+	if s.WalBytesPerSecond != nil {
+		out.WALBytesPerSecond = *s.WalBytesPerSecond
+	}
+	return out
+}
+
+// reasonOf는 플랫폼이 원본을 재지 못한 이유다 (not_measured: 비밀번호 변수 없음, 닿지 못함, 쿼리 실패).
+func reasonOf(res *apiv1.PlanDraftResult) string {
+	if res.SourceStatsReason != nil {
+		return string(*res.SourceStatsReason)
+	}
+	return "이유 없음"
 }

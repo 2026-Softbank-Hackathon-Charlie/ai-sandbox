@@ -23,8 +23,9 @@ func withParams(t *testing.T, p *Proposal, params map[string]string) *Proposal {
 	return &q
 }
 
+// withConns는 max_connections를 n으로, max_worker_processes를 stats()의 원본 값(8)으로 넣는다.
 func withConns(t *testing.T, p *Proposal, n string) *Proposal {
-	return withParams(t, p, map[string]string{"max_connections": n})
+	return withParams(t, p, map[string]string{"max_connections": n, "max_worker_processes": "8"})
 }
 
 func stats() *SourceStats {
@@ -66,10 +67,10 @@ func TestCapacityRejects(t *testing.T) {
 		"원본보다 작은 max_worker_processes": {func(p *Proposal) {
 			*p = *withParams(t, p, map[string]string{"max_connections": "200", "max_worker_processes": "4"})
 		}, "max_worker_processes: 4이면 부족함"},
-		"CNPG 기본값보다 큰 원본 worker": {func(p *Proposal) {
-			p.Source.MaxWorkerProcesses = 64
-			*p = *withConns(t, p, "200")
-		}, "32이면 부족함"},
+		// 플랫폼 시작 검사는 매니페스트에 없으면 건너뛰므로 기본값에 기대지 않는다
+		"max_worker_processes 없음": {func(p *Proposal) {
+			*p = *withParams(t, p, map[string]string{"max_connections": "200"})
+		}, "max_worker_processes: 원본 값 8 이상으로 정해야 함"},
 		"초기 복사보다 짧은 catchupTimeout": {func(p *Proposal) {
 			p.Source.Bytes = 80 << 30 // 100 MiB/s로 약 13.7분, 상한 15분 안
 			*p = *withConns(t, p, "200")
