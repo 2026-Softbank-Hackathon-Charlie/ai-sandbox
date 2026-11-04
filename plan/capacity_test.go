@@ -136,3 +136,28 @@ func TestFixKeepsCapacityCheck(t *testing.T) {
 		t.Fatalf("수정안이 catchupTimeout을 복사 시간보다 줄이면 걸려야 함:\n%s", is.Error())
 	}
 }
+
+func TestCapacityReportsEachProblemOnce(t *testing.T) {
+	d := draft(t)
+	// 숫자로 쓴 값은 형식 오류만 낸다. "정해야 함"까지 나가면 AI가 이미 적은 값을 또 적는다.
+	p := proposal(t)
+	p.Manifest = strings.Replace(p.Manifest, "  instances: 2\n", "  instances: 2\n  postgresql:\n    parameters:\n      max_connections: 200\n      max_worker_processes: \"8\"\n", 1)
+	p.Source = stats()
+	is := p.Check(d).Error()
+	if !strings.Contains(is, "값은 문자열이어야 함") || strings.Contains(is, "정해야 함") || strings.Contains(is, "부족함") {
+		t.Fatalf("숫자 값: %s", is)
+	}
+	// 문자열이지만 정수가 아니면 그것만 알린다
+	p = withParams(t, proposal(t), map[string]string{"max_connections": "많이", "max_worker_processes": "8"})
+	p.Source = stats()
+	if is := p.Check(d).Error(); !strings.Contains(is, "양의 정수여야 함") || strings.Contains(is, "정해야 함") {
+		t.Fatalf("정수가 아닌 값: %s", is)
+	}
+	// 어떤 값으로도 통과할 수 없는 원본이면 catchupTimeout 이유는 하나만
+	p = withConns(t, proposal(t), "200")
+	p.Source = stats()
+	p.Source.Bytes = 200 << 30
+	if n := strings.Count(p.Check(d).Error(), "plan.thresholds.catchupTimeout"); n != 1 {
+		t.Fatalf("catchupTimeout 항목 %d개:\n%s", n, p.Check(d).Error())
+	}
+}

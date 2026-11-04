@@ -2,12 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/platform/pkg/apiv1"
+	"github.com/2026-Softbank-Hackathon-Charlie/platform/pkg/client"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/plan"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/rehearsal"
@@ -100,5 +105,67 @@ func TestSourceStatsFromPlatform(t *testing.T) {
 	s = sourceStats(&apiv1.PlanDraftResult{SourceStats: &apiv1.SourceStats{Sessions: 80, MaxConnections: 200, MaxWorkerProcesses: 8}})
 	if s == nil || s.Bytes != 0 || s.WALBytesPerSecond != 0 || s.RequiredConnections() < 200 {
 		t.Fatalf("일부만 잰 값: %+v", s)
+	}
+}
+
+// fakePlatform은 초안 API만 흉내 낸다. supportsStats가 false면 #47 이전 플랫폼처럼 sourceStats를 무시하고 Plan 자체를 돌려준다.
+func fakePlatform(t *testing.T, supportsStats bool, reason string) (*client.Client, *[]bool) {
+	var asked []bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/plans/draft" {
+			http.NotFound(w, r)
+			return
+		}
+		var req apiv1.PlanDraftRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		withStats := req.SourceStats != nil && *req.SourceStats
+		asked = append(asked, withStats)
+		p := apiv1.EnginePlan{Id: "moimroom-gke-to-eks"}
+		w.Header().Set("Content-Type", "application/json")
+		if !withStats || !supportsStats {
+			_ = json.NewEncoder(w).Encode(p)
+			return
+		}
+		res := apiv1.PlanDraftResult{Plan: p}
+		if reason != "" {
+			r := apiv1.PlanDraftResultSourceStatsReason(reason)
+			res.SourceStatsReason = &r
+		} else {
+			res.SourceStats = &apiv1.SourceStats{Sessions: 80, MaxConnections: 200, MaxWorkerProcesses: 8}
+		}
+		_ = json.NewEncoder(w).Encode(res)
+	}))
+	t.Cleanup(srv.Close)
+	return client.New(srv.URL, "agent-token"), &asked
+}
+
+func TestDraftWithStats(t *testing.T) {
+	req := apiv1.PlanDraftRequest{App: "moimroom", Source: "gke", Target: "eks"}
+	for _, c := range []struct {
+		name            string
+		measure, stats  bool
+		reason          string
+		wantAsked       []bool
+		wantStats, warn bool
+	}{
+		{"실측 받음", true, true, "", []bool{true}, true, false},
+		{"플랫폼이 재지 못함", true, true, "not_measured", []bool{true}, false, true},
+		{"실측을 모르는 플랫폼", true, false, "", []bool{true, false}, false, true},
+		{"-no-measure", false, true, "", []bool{false}, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			pc, asked := fakePlatform(t, c.stats, c.reason)
+			var w bytes.Buffer
+			d, s, err := draftWithStats(context.Background(), pc, req, c.measure, &w)
+			if err != nil || d == nil || d.Id != "moimroom-gke-to-eks" {
+				t.Fatalf("초안: %+v %v", d, err)
+			}
+			if !slices.Equal(*asked, c.wantAsked) {
+				t.Fatalf("sourceStats 요청: %v, want %v", *asked, c.wantAsked)
+			}
+			if (s != nil) != c.wantStats || strings.Contains(w.String(), "경고") != c.warn {
+				t.Fatalf("실측값 %+v, 출력 %q", s, w.String())
+			}
+		})
 	}
 }

@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -80,9 +81,14 @@ func CheckCapacity(p *eplan.Plan, manifest string, s *SourceStats) Issues {
 	}
 	if p.Target.Manifest == ManifestRef {
 		const path = "manifest.spec.postgresql.parameters."
+		params := manifestParams(manifest)
 		need := s.RequiredConnections()
-		switch n, ok := manifestParam(manifest, "max_connections"); {
-		case !ok:
+		// 값이 있는데 정수 문자열이 아니면 형식 오류만 알린다. "정해야 함"까지 같이 나가면 AI가 이미 적은 값을 또 적는다.
+		switch n, set, err := paramInt(params, "max_connections"); {
+		case errors.Is(err, errNotString): // CheckManifest가 알린다
+		case err != nil:
+			is.add(path+"max_connections", "%s", err)
+		case !set:
 			is.add(path+"max_connections", "%d 이상으로 정해야 함 (원본 max_connections %d, 세션 %d × %.1f)",
 				need, s.MaxConnections, s.Sessions, ConnectionHeadroom)
 		case n < need:
@@ -91,8 +97,11 @@ func CheckCapacity(p *eplan.Plan, manifest string, s *SourceStats) Issues {
 		}
 		// 플랫폼 시작 검사(standby_settings)는 대상이 없으면 매니페스트에서 이 값을 읽고, 없으면 짐작하지 않고 건너뛴다.
 		// 그래서 기본값에 기대지 않고 적게 한다 (platform #47).
-		switch n, ok := manifestParam(manifest, "max_worker_processes"); {
-		case !ok:
+		switch n, set, err := paramInt(params, "max_worker_processes"); {
+		case errors.Is(err, errNotString): // CheckManifest가 알린다
+		case err != nil:
+			is.add(path+"max_worker_processes", "%s", err)
+		case !set:
 			is.add(path+"max_worker_processes", "원본 값 %d 이상으로 정해야 함 (플랫폼 시작 검사가 매니페스트에서 이 값을 읽음. CNPG 기본값은 %d)",
 				s.MaxWorkerProcesses, cnpgDefaultMaxWorkerProcesses)
 		case n < s.MaxWorkerProcesses:
@@ -100,32 +109,47 @@ func CheckCapacity(p *eplan.Plan, manifest string, s *SourceStats) Issues {
 				n, s.MaxWorkerProcesses)
 		}
 	}
-	// 0은 CheckRules가 이미 거절한다.
-	if got := p.Thresholds.CatchupTimeout.Duration; got > 0 && got < s.MinCopyTime() {
-		is.add("plan.thresholds.catchupTimeout", "%s이면 짧음. 원본 %s를 %s/s로 복사해도 최소 %s 걸림",
-			got, humanBytes(s.Bytes), humanBytes(MaxCopyBytesPerSecond), s.MinCopyTime().Round(time.Second))
-	}
+	// 어떤 값으로도 통과할 수 없으면 그 이유 하나만 알린다. "짧음"이 같이 나가면 catchupTimeout을 늘리면 될 것처럼 읽힌다.
 	if err := CheckFeasible(s); err != nil {
 		is.add("plan.thresholds.catchupTimeout", "%s", err)
+	} else if got := p.Thresholds.CatchupTimeout.Duration; got > 0 && got < s.MinCopyTime() { // 0은 CheckRules가 이미 거절한다
+		is.add("plan.thresholds.catchupTimeout", "%s이면 짧음. 원본 %s를 %s/s로 복사해도 최소 %s 걸림",
+			got, humanBytes(s.Bytes), humanBytes(MaxCopyBytesPerSecond), s.MinCopyTime().Round(time.Second))
 	}
 	return is
 }
 
-// manifestParam은 spec.postgresql.parameters의 정수 설정을 읽는다. 플랫폼과 같이 기본값을 가정하지 않는다.
-func manifestParam(manifest, name string) (int, bool) {
+// errNotString은 설정 값이 문자열이 아닐 때다. CheckManifest가 이미 형식 오류로 알린다.
+var errNotString = errors.New("문자열이 아님")
+
+// manifestParams는 spec.postgresql.parameters를 한 번 읽는다. 읽을 수 없으면 비어 있다 (형식 오류는 CheckManifest가 알린다).
+func manifestParams(manifest string) map[string]any {
 	doc, err := parseYAMLObject(manifest)
 	if err != nil {
-		return 0, false
+		return nil
 	}
 	spec, _ := doc["spec"].(map[string]any)
 	pg, _ := spec["postgresql"].(map[string]any)
 	params, _ := pg["parameters"].(map[string]any)
-	v, ok := params[name].(string)
+	return params
+}
+
+// paramInt는 정수 설정을 읽는다. 플랫폼과 같이 기본값을 가정하지 않는다.
+// set은 값이 있는지, err는 값이 있는데 양의 정수 문자열이 아닌지다. 문자열이 아니면 errNotString이다 (CheckManifest가 알림).
+func paramInt(params map[string]any, name string) (n int, set bool, err error) {
+	v, ok := params[name]
 	if !ok {
-		return 0, false
+		return 0, false, nil
 	}
-	n, err := strconv.Atoi(v)
-	return n, err == nil && n > 0
+	s, isStr := v.(string)
+	if !isStr {
+		return 0, true, errNotString
+	}
+	n, convErr := strconv.Atoi(s)
+	if convErr != nil || n <= 0 {
+		return 0, true, fmt.Errorf("양의 정수여야 함 (받은 값 %q)", s)
+	}
+	return n, true, nil
 }
 
 func humanBytes(n int64) string {

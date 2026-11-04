@@ -9,7 +9,8 @@
 //	ANTHROPIC_API_KEY   Claude API 키
 //	PLATFORM_URL        플랫폼 API 주소
 //	PLATFORM_TOKEN      플랫폼 agent 토큰 (Plan 제출, 첨부, 에이전트 세션. 승인은 못 함)
-//	<원본>_PGPASSWORD   원본 DSN의 ${VAR}. 있으면 계획 전에 원본을 실측해 접속 수·초기 복사 시간을 검사한다
+//
+// 운영 DB 비밀번호는 받지 않는다. 원본 실측은 플랫폼이 초안과 함께 한다 (platform #47).
 //
 // 예:
 //
@@ -96,22 +97,8 @@ func main() {
 	// 2. 원본 실측. 플랫폼은 이전을 시작할 때 같은 값을 재고 부족하면 막는다(409 capacity_insufficient).
 	// 승인 뒤에 막히지 않도록 초안을 받을 때 플랫폼에 같은 값을 재 달라고 한다(platform #47, ADR 0017).
 	// 이 실행기는 운영 DB에 붙지 않고 비밀번호도 갖지 않는다. 못 재면 용량 검사 없이 계획하고, 플랫폼이 시작할 때 잰다.
-	var d *apiv1.EnginePlan
-	var stats *plan.SourceStats
-	if *noMeasure {
-		d, err = pc.DraftPlan(ctx, req)
-		must(err)
-	} else {
-		res, err := pc.DraftPlanWithSourceStats(ctx, req)
-		must(err)
-		d = &res.Plan
-		if stats = sourceStats(res); stats == nil {
-			fmt.Fprintf(os.Stderr, "경고: 플랫폼이 원본을 재지 못함 (%s). 접속 수·초기 복사 검사 없이 계획합니다\n", reasonOf(res))
-		} else {
-			fmt.Fprintf(os.Stderr, "원본 실측: 세션 %d, max_connections %d (대상 %d 이상 필요), max_worker_processes %d, 크기 %d바이트, 변경 %.0f바이트/초\n",
-				stats.Sessions, stats.MaxConnections, stats.RequiredConnections(), stats.MaxWorkerProcesses, stats.Bytes, stats.WALBytesPerSecond)
-		}
-	}
+	d, stats, err := draftWithStats(ctx, pc, req, !*noMeasure, os.Stderr)
+	must(err)
 	var draft eplan.Plan
 	b, _ := json.Marshal(d)
 	must(json.Unmarshal(b, &draft))
@@ -361,4 +348,36 @@ func reasonOf(res *apiv1.PlanDraftResult) string {
 		return string(*res.SourceStatsReason)
 	}
 	return "이유 없음"
+}
+
+// drafter는 플랫폼의 Plan 초안 API다 (*client.Client).
+type drafter interface {
+	DraftPlan(context.Context, apiv1.PlanDraftRequest) (*apiv1.EnginePlan, error)
+	DraftPlanWithSourceStats(context.Context, apiv1.PlanDraftRequest) (*apiv1.PlanDraftResult, error)
+}
+
+// draftWithStats는 Plan 초안을 받는다. measure면 플랫폼에 원본 실측도 같이 요청한다.
+// 플랫폼이 실측을 모르면(platform #47 이전) 모르는 필드로 거절하거나, 예전 형식(Plan 자체)으로 답해 Plan이 비어 읽힌다.
+// 그럴 때는 실측 없는 초안으로 다시 받고 용량 검사 없이 계획한다. 플랫폼이 시작할 때 다시 잰다.
+func draftWithStats(ctx context.Context, pc drafter, req apiv1.PlanDraftRequest, measure bool, w io.Writer) (*apiv1.EnginePlan, *plan.SourceStats, error) {
+	if measure {
+		res, err := pc.DraftPlanWithSourceStats(ctx, req)
+		switch {
+		case err != nil:
+			fmt.Fprintf(w, "경고: 원본 실측과 함께 초안을 받지 못함 (%v). 실측 없이 다시 받습니다\n", err)
+		case res.Plan.Id == "":
+			fmt.Fprintln(w, "경고: 플랫폼이 원본 실측을 지원하지 않음 (응답에 Plan이 없음). 실측 없이 다시 받습니다")
+		default:
+			stats := sourceStats(res)
+			if stats == nil {
+				fmt.Fprintf(w, "경고: 플랫폼이 원본을 재지 못함 (%s). 접속 수·초기 복사 검사 없이 계획합니다\n", reasonOf(res))
+			} else {
+				fmt.Fprintf(w, "원본 실측: 세션 %d, max_connections %d (대상 %d 이상 필요), max_worker_processes %d, 크기 %d바이트, 변경 %.0f바이트/초\n",
+					stats.Sessions, stats.MaxConnections, stats.RequiredConnections(), stats.MaxWorkerProcesses, stats.Bytes, stats.WALBytesPerSecond)
+			}
+			return &res.Plan, stats, nil
+		}
+	}
+	d, err := pc.DraftPlan(ctx, req)
+	return d, nil, err
 }

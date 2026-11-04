@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/yaml"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/migration-engine/pkg/engine"
@@ -368,5 +369,27 @@ func TestLogIsolationNamesPodSecurity(t *testing.T) {
 	ev := mem.Sessions[0].Events
 	if ev[0].Output != sandbox.HostPodByRBAC || ev[1].Output != sandbox.HostPodByPodSecurity {
 		t.Fatalf("무엇이 막았는지 남겨야 함: %+v %+v", ev[0], ev[1])
+	}
+}
+
+func TestMatchStandbyParams(t *testing.T) {
+	p := proposal(t)
+	src := SourceManifest(&p.Plan, "sandbox-moimroom-ab12", DBInfo{Name: "app", User: "app"})
+	// 실제 원본(worker 8)에 맞춘 대상은 CNPG 기본값(32)으로 뜬 임시 원본보다 작아 리허설에서만 뜨지 않는다
+	target := "spec:\n  postgresql:\n    parameters:\n      max_connections: \"60\"\n      max_worker_processes: \"8\"\n      work_mem: \"8MB\"\n"
+	if err := MatchStandbyParams(src, target); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ := unstructured.NestedStringMap(src.Object, "spec", "postgresql", "parameters")
+	if got["max_connections"] != "60" || got["max_worker_processes"] != "8" || len(got) != 2 {
+		t.Fatalf("임시 원본 설정: %v", got)
+	}
+	// 대상에 없으면 양쪽 다 기본값이라 건드리지 않는다
+	src = SourceManifest(&p.Plan, "sandbox-moimroom-ab12", DBInfo{Name: "app", User: "app"})
+	if err := MatchStandbyParams(src, p.Manifest); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ := unstructured.NestedMap(src.Object, "spec", "postgresql"); found {
+		t.Fatal("대상에 없는 설정을 넣음")
 	}
 }
