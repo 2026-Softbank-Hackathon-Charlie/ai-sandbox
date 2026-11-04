@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	corev1 "k8s.io/api/core/v1"
@@ -266,13 +267,34 @@ func DSN(db DBInfo, password string, port int) string {
 	return u.String()
 }
 
+// SeedConnectWait는 임시 원본이 healthy가 된 뒤 첫 접속을 다시 시도하는 시간이다.
+// 2026-11-05 실제 EKS(CNPG 1.30.1)에서 healthy 직후의 첫 접속이 app 계정 비밀번호 인증에 실패했고(SQLSTATE 28P01),
+// 몇 초 뒤 같은 비밀번호·같은 프록시로는 바로 접속됐다. kind에서는 드러나지 않았다.
+var SeedConnectWait = 60 * time.Second
+
+// connectRetry는 wait 동안 3초마다 다시 접속해 본다. 마지막 오류를 돌려준다.
+func connectRetry(ctx context.Context, dsn string, wait time.Duration) (*pgx.Conn, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		conn, err := pgx.Connect(ctx, dsn)
+		if err == nil || time.Now().After(deadline) || ctx.Err() != nil {
+			return conn, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
 // Seed는 임시 원본에 테스트 데이터를 넣는다. 검증할 스키마마다 표 두 개를 만든다.
 // 운영 데이터는 넣지 않는다 (설계 문서 6장).
 func Seed(ctx context.Context, dsn string, schemas []string, rows int) error {
 	if rows < 4 {
 		return fmt.Errorf("fixture rows must be at least 4")
 	}
-	conn, err := pgx.Connect(ctx, dsn)
+	conn, err := connectRetry(ctx, dsn, SeedConnectWait)
 	if err != nil {
 		return fmt.Errorf("임시 원본 접속 실패: %w", err)
 	}
