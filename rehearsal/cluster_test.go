@@ -7,6 +7,7 @@ package rehearsal
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/agentlog"
+	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/llm"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/plan"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/sandbox"
 )
@@ -155,5 +157,58 @@ func TestClusterRehearsalWithRealSourceImage(t *testing.T) {
 	t.Logf("결과: 통과=%v 엔진=%s %.0f초 오류=%s", a.Passed, a.Outcome, a.DurationS, a.Error)
 	if !rep.Passed || a.Outcome != "succeeded" {
 		t.Fatalf("통과해야 함: %+v", a)
+	}
+}
+
+// scriptedDiagnoser는 AI 대신 정해진 수정안을 낸다. 실제 AI 진단은 API 키가 있어야 해서, 여기서는
+// 1차 실패 → 진단 수정안 → 2차 통과의 흐름(샌드박스 재생성, 수정안 적용, 재실행)만 실제 클러스터에서 본다.
+type scriptedDiagnoser struct {
+	to    string
+	calls int
+	log   string
+}
+
+func (d *scriptedDiagnoser) Diagnose(_ context.Context, in llm.DiagnoseInput) (*plan.Diagnosis, string, error) {
+	d.calls++
+	d.log = in.Log
+	v, _ := json.Marshal(d.to)
+	return &plan.Diagnosis{
+		Cause:    "매니페스트의 StorageClass가 대상 클러스터에 없어 DB 볼륨이 Pending",
+		Evidence: []string{"storageclass not found (리허설 로그)"},
+		Fix:      plan.Fix{Kind: plan.KindManifestPatch, Patch: []plan.Op{{Op: "replace", Path: "/spec/storage/storageClass", Value: v}}},
+	}, "scripted", nil
+}
+
+// 데모 실패 시나리오(README 9장, hopai -demo-copy-source-storage): 원본 DB가 쓰는 StorageClass(예: GKE의
+// standard-rwo)를 그대로 옮긴 계획은 대상에 그 StorageClass가 없어 1차 리허설이 실패하고, 진단 수정안으로
+// 대상 값으로 고친 2차 리허설은 통과해야 한다.
+func TestClusterDemoCopiedSourceStorageFailsThenFixed(t *testing.T) {
+	sc := os.Getenv("REHEARSAL_SC")
+	if sc == "" {
+		sc = "standard"
+	}
+	c := kindProposal(t, "standard-rwo")
+	c.FailFast = 20 * time.Second
+	c.MaxRuns = 2
+	d := &scriptedDiagnoser{to: sc}
+	c.Diagnoser = d
+	rep, err := Rehearse(context.Background(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range rep.Attempts {
+		t.Logf("%d회차: 통과=%v 엔진=%s %.0f초 오류=%s", a.N, a.Passed, a.Outcome, a.DurationS, a.Error)
+	}
+	if d.calls != 1 || !strings.Contains(d.log, `"standard-rwo" not found`) {
+		t.Fatalf("1차 실패 로그로 한 번 진단해야 함: 호출 %d\n%s", d.calls, d.log)
+	}
+	if len(rep.Attempts) != 2 || rep.Attempts[0].Passed || !rep.Attempts[1].Passed {
+		t.Fatalf("1차 실패, 2차 통과여야 함: %+v", rep.Attempts)
+	}
+	if !rep.Passed || !rep.Changed || !strings.Contains(rep.Final.Manifest, "storageClass: "+sc) {
+		t.Fatalf("고친 매니페스트로 통과해야 함: 통과=%v 변경=%v", rep.Passed, rep.Changed)
+	}
+	if !strings.Contains(rep.Attempts[0].FixDiff, "standard-rwo") {
+		t.Fatalf("1차 회차에 수정 diff가 남아야 함: %q", rep.Attempts[0].FixDiff)
 	}
 }

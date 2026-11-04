@@ -71,6 +71,8 @@ func main() {
 	maxRuns := fs.Int("max-runs", 3, "리허설 최대 실행 횟수")
 	noMeasure := fs.Bool("no-measure", false, "플랫폼에 원본 실측을 요청하지 않음 (접속 수·초기 복사 검사 없이 계획)")
 	out := fs.String("out", "", "리포트 JSON을 쓸 파일 (비우면 표준 출력)")
+	demoCopy := fs.Bool("demo-copy-source-storage", false, "데모: AI 계획의 storageClass를 원본 DB가 쓰는 값으로 바꿔 제출한다(원본 설정을 그대로 옮긴 경우). "+
+		"대상에 그 StorageClass가 없으면 첫 리허설이 실패하고 AI가 진단해 고친다. 바꾼 사실은 에이전트 기록에 운영자 설정으로 남는다")
 	must(fs.Parse(os.Args[2:]))
 	for name, v := range map[string]string{"-app": *app, "-from": *from, "-to": *to, "-sandbox-kubeconfig": *sbKube} {
 		if v == "" {
@@ -136,10 +138,39 @@ func main() {
 	prop, planSession, err := agent.Plan(ctx, llm.PlanInput{App: *app, Draft: &draft, Tools: llm.PlanTools(scope, pc, clusters), Source: stats, SourceCluster: src})
 	must(err)
 
+	// 데모 실패 시나리오(README 9장): AI 계획의 storageClass를 원본 값으로 바꿔 제출한다.
+	var demo *demoSetting
+	if *demoCopy {
+		c, ok := clusters[*from]
+		if !ok {
+			must(fmt.Errorf("-demo-copy-source-storage에는 원본 환경 %s의 -env kubeconfig가 필요함", *from))
+		}
+		sc, err := sourceStorageClass(ctx, c.Typed, c.Dynamic, draft.Source.Namespace, draft.Source.Cluster)
+		must(err)
+		next, ai, err := copySourceStorage(prop, &draft, sc)
+		must(err)
+		prop = next
+		demo = &demoSetting{Scenario: demoScenario, SourceStorageClass: sc, AIStorageClass: ai}
+		if t, ok := clusters[*to]; ok {
+			if has, err := storageClassExists(ctx, t.Typed, sc); err == nil {
+				demo.TargetHasIt = &has
+			}
+		}
+		fmt.Fprintf(os.Stderr, "데모 설정: AI가 정한 storageClass %q를 원본 값 %q로 바꿔 제출합니다\n", ai, sc)
+		if demo.TargetHasIt != nil && *demo.TargetHasIt {
+			fmt.Fprintf(os.Stderr, "경고: 대상 환경 %s에도 StorageClass %q가 있어 첫 리허설이 실패하지 않습니다\n", *to, sc)
+		}
+	}
+
 	// 4. 제출과 첨부
 	rec, submitted, err := submit(ctx, pc, prop)
 	must(err)
 	fmt.Fprintf(os.Stderr, "Plan %s 제출 (revision %d, 계획 세션 %s)\n", rec.Ref, rec.Revision, planSession)
+	if demo != nil {
+		if err := logDemoSetting(ctx, sink, rec.Ref, *demo); err != nil {
+			fmt.Fprintln(os.Stderr, "경고: 데모 설정을 에이전트 기록에 남기지 못함:", err)
+		}
+	}
 
 	// 5. 리허설
 	adminCfg, err := restConfig(*sbKube, *sbCtx)
@@ -176,6 +207,9 @@ func main() {
 	}
 	if src != nil {
 		result["sourceCluster"] = src
+	}
+	if demo != nil {
+		result["demo"] = demo
 	}
 	if rep != nil {
 		result["rehearsal"] = rep

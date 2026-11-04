@@ -300,7 +300,11 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 - 원인 예: 대상 매니페스트에 원본 클러스터의 StorageClass(예: EKS의 `gp3`)가 남아 있으면 대상에서 CNPG PVC가 Pending이 된다.
 - 리허설은 이것을 실제로 잡는다. 로컬 kind에서 `gp3`로 돌리면 `storageclass.storage.k8s.io "gp3" not found` 경고가 근거로 남고, 엔진은 쓰기 보류 전에 멈춘다(원본 그대로).
 - 흐름: 1차 실패 → AI 진단(샌드박스 조회 도구로 StorageClass 확인) → `manifest-patch` 수정안 → 2차 통과 → 고친 `target.yaml` 첨부 → 승인 화면에 첨부와 세션 기록.
-- 남은 결정: AI가 처음부터 대상 StorageClass를 맞게 고르면 실패가 나오지 않는다. 데모에서 실패를 보이려면 어떻게 할지(예: 원본 설정을 그대로 옮긴 매니페스트로 시작) 11/6에 정한다.
+- AI는 조사 도구로 대상 StorageClass를 보고 처음부터 맞게 고르므로, 그대로 두면 실패가 나오지 않는다. 그래서 `hopai run -demo-copy-source-storage`를 둔다.
+  - AI 계획의 `storage.storageClass`(있으면 `walStorage`도)를 **원본 DB가 실제로 쓰는 StorageClass**로 바꿔 제출한다. 원본 설정을 그대로 옮긴 계획과 같다. 원본 값은 원본 CNPG 클러스터의 `spec.storage.storageClass`, 비었으면(클러스터 기본값) 그 클러스터 PVC의 `storageClassName`에서 읽는다(원본 환경의 `-env` kubeconfig 필요).
+  - 대상에 그 StorageClass가 없으면 1차 리허설에서 DB 볼륨이 실제로 Pending이 되고, 멈춤 감지(25초)와 AI 진단이 실제로 돈다. 예: GKE → EKS면 GKE의 `standard-rwo`, EKS → GKE면 EKS의 `gp3`. 대상에도 같은 이름이 있으면 실패하지 않으므로 시작할 때 경고한다.
+  - 바꾼 것은 감추지 않는다. 표준 오류와 결과 JSON(`demo`)에 남고, 플랫폼 에이전트 기록에 **"운영자 데모 설정"** 세션(종류 `other`, 그 Plan에 연결)으로 남아 콘솔에서 리허설 실패보다 먼저 보인다. AI가 한 일이 아니라는 것을 밝힌다.
+  - 수정안을 적용해 2차 리허설이 통과하면 고친 `target.yaml`을 첨부해 revision이 올라간다. 승인 화면에는 첨부, 리허설 세션, 진단 세션이 함께 보인다.
 
 ## 10. 날짜별 (D 영역)
 
@@ -312,7 +316,7 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 | 11/3 (화) | Plan 검사, 재요청, 고정 검사 | 완료 (엔진 Plan 기준) |
 | 11/4 (수) | 샌드박스, RBAC·NetworkPolicy·Quota, 리허설 1회 | 완료 (kind, CNPG 1.25.1과 1.30.1). 원본 실측 검사(v19)와 원본 메이저 버전 맞춤(v20) 추가 |
 | 11/5 (목) | 실패 → 진단 → 수정 → 재통과, 격리 검증 | 코드 완료. AI 진단은 API 키로 실제 확인 필요 |
-| 11/6 (금) | 데모 실패 시나리오, 타임아웃·상한 값 확정 | 남음 |
+| 11/6 (금) | 데모 실패 시나리오, 타임아웃·상한 값 확정 | 실패 시나리오 완료(`-demo-copy-source-storage`, kind에서 1차 실패 → 수정안 → 2차 통과 확인). 상한 값은 남음 |
 
 ## 11. 팀 결정이 필요한 것
 
@@ -352,6 +356,7 @@ go run ./cmd/hopai run -app moimroom -from gke -to eks \
 
 - `-env`는 AI 조사 도구가 쓰는 환경별 읽기 전용 kubeconfig다. `hopai`는 원본 환경의 것으로 원본 CNPG 클러스터의 이미지와 hot standby 설정을 읽어 계획 검사와 리허설 임시 원본에 쓴다. 없거나 읽지 못하면 경고만 내고 이 검사 없이 계획한다.
 - `-sandbox-kubeconfig`는 대상 클러스터에서 샌드박스를 만들고 지우는 관리용이다. 엔진은 이것이 아니라 샌드박스 토큰으로 돈다.
+- `-demo-copy-source-storage`는 데모 실패 시나리오(9장)다. AI 계획의 StorageClass를 원본 값으로 바꿔 제출해 1차 리허설을 실제로 실패시킨다. 원본 환경의 `-env`가 필요하다.
 - 끝나면 Plan ref와 revision, 세션 ID, 리허설 리포트를 출력한다. 리허설을 통과하지 못하면 종료 코드 1이고 승인하지 말라고 알린다.
 - 비공개 모듈(platform, migration-engine)을 받으려면 `go env -w GOPRIVATE=github.com/2026-Softbank-Hackathon-Charlie`가 필요하다.
 
@@ -377,6 +382,7 @@ REHEARSAL_KUBECONFIG=<kubeconfig> REHEARSAL_SC=standard go test -tags cluster -r
 |---|---|
 | 대상 StorageClass `standard` | 격리 검사 11/11 → 임시 원본과 테스트 데이터(5,000행) → 엔진 9단계 모두 성공, 쓰기 보류 19.5초, 전체 97초 |
 | 대상 StorageClass `gp3` (kind에 없음) | prepare에서 52초 만에 멈춤, 근거 `storageclass.storage.k8s.io "gp3" not found`, 쓰기 보류 전이라 원본 그대로 |
+| 데모 실패 시나리오: 원본 StorageClass `standard-rwo`(GKE 기본값)를 그대로 옮김, 최대 2회 | 1회차 prepare에서 55초 만에 멈춤 → 진단 수정안(`/spec/storage/storageClass` → `standard`) → 2회차 엔진 9단계 모두 성공, 쓰기 보류 19.7초, 96초. 진단은 AI 대신 정해진 수정안을 내는 가짜 진단기로 했다(실제 AI 진단은 API 키 필요) |
 | 대상 `max_connections` 60, `max_worker_processes` 8 (원본을 모를 때, CNPG 기본값보다 작음) | 임시 원본을 대상 값으로 띄워 엔진 9단계 모두 성공, 쓰기 보류 11.2초, 전체 88초 |
 | **원본을 읽은 경우: 원본 17.11(moimroom과 같음), 운영자 기본 18.6** | 임시 원본을 원본 이미지 17.11로 띄워 엔진 9단계 모두 성공, 쓰기 보류 18.2초, 전체 92초 |
 | 원본 18.6, 대상 17.11 (계획 검사를 거치지 않게 직접 넣음) | 경고 이벤트 없이 pg_basebackup Job만 거듭 실패. Job Pod 3번 실패로 123초 만에 멈춤, 근거 `pg_basebackup: error: incompatible server version 18.6` (전에는 catchupTimeout 5분을 다 기다렸음) |
