@@ -486,6 +486,9 @@ func TestForCNPG(t *testing.T) {
 	cs := fake.NewClientset(&discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{Name: "kubernetes", Namespace: "default", Labels: map[string]string{"kubernetes.io/service-name": "kubernetes"}},
 		Endpoints:  []discoveryv1.Endpoint{{Addresses: []string{"172.18.0.2"}}},
+	}, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "kubernetes", Namespace: "default"},
+		Spec:       corev1.ServiceSpec{ClusterIP: "10.96.0.1", ClusterIPs: []string{"10.96.0.1"}},
 	})
 	c, err := ForCNPG(context.Background(), cs, Config{App: "moimroom", ID: "ab12"})
 	if err != nil {
@@ -496,8 +499,19 @@ func TestForCNPG(t *testing.T) {
 		t.Fatal(err)
 	}
 	np := o.NetworkPolicy.Spec
-	if got := np.Egress[len(np.Egress)-1].To[0].IPBlock.CIDR; got != "172.18.0.2/32" {
-		t.Fatalf("API 서버 엔드포인트가 열려야 함: %s", got)
+	var opened []string
+	for _, r := range np.Egress {
+		for _, to := range r.To {
+			if to.IPBlock != nil {
+				opened = append(opened, to.IPBlock.CIDR)
+			}
+		}
+	}
+	if !slices.Contains(opened, "172.18.0.2/32") {
+		t.Fatalf("API 서버 엔드포인트가 열려야 함: %v", opened)
+	}
+	if !slices.Contains(opened, "10.96.0.1/32") {
+		t.Fatalf("EKS처럼 서비스 주소로 판정하는 곳을 위해 kubernetes 서비스 주소도 열어야 함: %v", opened)
 	}
 	from := np.Ingress[0].From
 	if from[len(from)-1].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != CNPGOperatorNamespace {
