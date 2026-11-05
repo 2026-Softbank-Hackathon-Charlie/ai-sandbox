@@ -166,7 +166,7 @@ func TestPlanUsesToolsAndLogsEverything(t *testing.T) {
 		t.Errorf("대체 모델 설정: %v", req["fallbacks"])
 	}
 	if _, ok := req["tool_choice"]; ok {
-		t.Error("claude-opus-5-5에 강제 도구 선택을 보내면 400")
+		t.Error("Opus 5.5·Sonnet 5.5에 강제 도구 선택을 보내면 400")
 	}
 	// 도구 결과가 두 번째 요청에 실려 감
 	second, _ := json.Marshal(f.requests[1]["messages"])

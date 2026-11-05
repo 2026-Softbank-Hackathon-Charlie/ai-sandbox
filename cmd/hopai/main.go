@@ -178,9 +178,13 @@ func main() {
 	if *demoCopy {
 		c, ok := clusters[*from]
 		if !ok {
-			must(fmt.Errorf("-demo-copy-source-storage에는 원본 환경 %s의 -env kubeconfig가 필요함", *from))
+			err = fmt.Errorf("-demo-copy-source-storage에는 원본 환경 %s의 -env kubeconfig가 필요함", *from)
+		} else {
+			prop, demo, err = prepareDemo(ctx, prop, &draft, c, admin, draft.Source.Namespace, draft.Source.Cluster)
 		}
-		prop, demo, err = prepareDemo(ctx, prop, &draft, c, admin, draft.Source.Namespace, draft.Source.Cluster)
+		if err != nil {
+			prewarm.Discard(ctx) // os.Exit 전에 미리 만든 샌드박스를 지운다
+		}
 		must(err)
 		fmt.Fprintf(os.Stderr, "데모 설정: AI가 정한 storageClass(%s)를 원본 값 %q로 바꿔 제출합니다. 대상에 없어 첫 리허설이 실패합니다\n", scLabel(demo.AIStorageClass), demo.SourceStorageClass)
 	}

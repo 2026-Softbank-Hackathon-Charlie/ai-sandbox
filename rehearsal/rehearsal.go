@@ -281,6 +281,13 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 		failf("샌드박스 대상 디스크: %v", err)
 		return a, nil, nil
 	}
+	if usedPrewarm {
+		// 미리 준비할 때는 매니페스트 없이 임시 원본 클래스를 골랐다. 새로 만들었다면 고를 클래스와 다르면 남긴다
+		// (기본 클래스가 Retain이거나 없는 클러스터). 임시 원본은 이미 떠 있으므로 리허설은 그대로 진행한다.
+		if want, err := TempStorageClass(scs.Items, sbManifest); err == nil && want != pp.tempSC {
+			scNotes = append(scNotes, fmt.Sprintf("임시 원본 storageClass %q: 미리 준비할 때 매니페스트 없이 고름 (매니페스트 기준이면 %q)", pp.tempSC, want))
+		}
+	}
 	a.SandboxNotes = scNotes
 	for _, note := range scNotes {
 		ses.Log(ctx, agentlog.Event{Type: agentlog.Message, Tool: "sandbox_target", Output: note})

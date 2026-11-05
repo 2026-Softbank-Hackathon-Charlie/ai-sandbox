@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/agentlog"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/llm"
@@ -33,6 +34,7 @@ type prepared struct {
 	db       DBInfo
 	srcProxy *Proxy
 	dstProxy *Proxy
+	tempSC   string // 임시 원본 디스크의 StorageClass ("" = 클러스터 기본값)
 	srcDSN   string
 	dstDSN   string
 }
@@ -190,7 +192,7 @@ func prepareSandbox(ctx context.Context, c *Config, ses agentlog.Session, a *Att
 		return nil, nil
 	}
 	password := string(sec.Data["password"])
-	p := &prepared{sb: sb, token: token, aiCS: aiCS, aiDyn: aiDyn, db: db}
+	p := &prepared{sb: sb, token: token, aiCS: aiCS, aiDyn: aiDyn, db: db, tempSC: tempSC}
 	if p.srcProxy, err = NewProxy(c.Admin, c.AdminREST, sb.Namespace, pl.Source.Cluster); err != nil {
 		return nil, err
 	}
@@ -209,7 +211,12 @@ func prepareSandbox(ctx context.Context, c *Config, ses agentlog.Session, a *Att
 }
 
 // raiseQuota는 미리 기본값으로 만든 샌드박스의 Quota를 대상 매니페스트에 맞게 올린다. 줄이지는 않는다.
+// Pod가 뜨고 지는 동안 quota 컨트롤러가 status를 계속 고치므로 충돌(409)이 나면 다시 읽어 시도한다.
 func raiseQuota(ctx context.Context, cs kubernetes.Interface, ns string, want sandbox.Config) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error { return raiseQuotaOnce(ctx, cs, ns, want) })
+}
+
+func raiseQuotaOnce(ctx context.Context, cs kubernetes.Interface, ns string, want sandbox.Config) error {
 	q, err := cs.CoreV1().ResourceQuotas(ns).Get(ctx, "sandbox-quota", metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -252,10 +259,12 @@ type Prewarm struct {
 	taken  bool
 }
 
-// StartPrewarm은 미리 준비를 시작한다. 원본 클러스터 값(src)이 없으면 임시 원본의 이미지·설정을 AI 매니페스트에서
-// 가져와야 하므로 시작하지 않고 nil을 돌려준다. c에는 Admin, AdminREST, Isolation, Rows(와 시간 상한)만 쓴다.
+// StartPrewarm은 미리 준비를 시작한다. 원본 클러스터 값(src)이 없거나 원본 이미지가 CNPG 공식 이미지가 아니면
+// (미러·사설 레지스트리) 임시 원본 이미지를 AI 매니페스트에서 가져와야 하므로 시작하지 않고 nil을 돌려준다.
+// 그대로 미리 띄우면 오퍼레이터 기본 이미지(다른 메이저 버전일 수 있음)로 떠서 1회차가 버전 불일치로 실패한다.
+// c에는 Admin, AdminREST, Isolation, Rows(와 시간 상한)만 쓴다.
 func StartPrewarm(ctx context.Context, c Config, draft *eplan.Plan, src *plan.SourceCluster) *Prewarm {
-	if src == nil || draft == nil {
+	if src == nil || draft == nil || !plan.IsCNPGImage(src.Image) {
 		return nil
 	}
 	c.defaults()

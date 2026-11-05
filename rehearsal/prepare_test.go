@@ -2,14 +2,20 @@ package rehearsal
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	eplan "github.com/2026-Softbank-Hackathon-Charlie/migration-engine/pkg/plan"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/plan"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/sandbox"
 )
 
@@ -72,4 +78,31 @@ func TestStartPrewarmNeedsSourceCluster(t *testing.T) {
 		t.Fatal("want nil without source cluster")
 	}
 	p.Discard(context.Background())
+	// 미러·사설 레지스트리 이미지면 임시 원본 이미지를 매니페스트에서 가져와야 하므로 미리 준비하지 않는다
+	if p := StartPrewarm(context.Background(), Config{}, &eplan.Plan{}, &plan.SourceCluster{Image: "registry.example.com/postgresql:17.2"}); p != nil {
+		t.Fatal("want nil for a non-CNPG source image")
+	}
+}
+
+// quota 컨트롤러가 status를 고쳐 Update가 충돌해도 다시 시도한다.
+func TestRaiseQuotaRetriesConflict(t *testing.T) {
+	q := resource.MustParse
+	cs := fake.NewClientset(&corev1.ResourceQuota{ObjectMeta: metav1.ObjectMeta{Name: "sandbox-quota", Namespace: "sb"}, Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+		corev1.ResourceRequestsCPU: q("1"), corev1.ResourceLimitsCPU: q("1"), corev1.ResourceRequestsMemory: q("1Gi"), corev1.ResourceLimitsMemory: q("1Gi"),
+	}}})
+	conflicts := 0
+	cs.PrependReactor("update", "resourcequotas", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if conflicts < 2 {
+			conflicts++
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "resourcequotas"}, "sandbox-quota", errors.New("modified"))
+		}
+		return false, nil, nil
+	})
+	if err := raiseQuota(context.Background(), cs, "sb", sandbox.Config{CPU: "2", Memory: "2Gi"}); err != nil {
+		t.Fatalf("err = %v after %d conflicts", err, conflicts)
+	}
+	got, _ := cs.CoreV1().ResourceQuotas("sb").Get(context.Background(), "sandbox-quota", metav1.GetOptions{})
+	if c := got.Spec.Hard[corev1.ResourceLimitsCPU]; c.Cmp(q("2")) != 0 || conflicts != 2 {
+		t.Fatalf("limits.cpu = %s, conflicts = %d", c.String(), conflicts)
+	}
 }
