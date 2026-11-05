@@ -540,3 +540,28 @@ func TestSandboxStorageClasses(t *testing.T) {
 		t.Fatalf("err = %v, want no Delete class error", err)
 	}
 }
+
+// 대체 후보는 같은 volumeBindingMode가 먼저다. 이름순으로는 앞서도 Immediate는 운영(WaitForFirstConsumer)에 없는 AZ 문제를 만든다.
+func TestSandboxStorageClassesBindingMode(t *testing.T) {
+	retain, del := corev1.PersistentVolumeReclaimRetain, corev1.PersistentVolumeReclaimDelete
+	wffc, imm := storagev1.VolumeBindingWaitForFirstConsumer, storagev1.VolumeBindingImmediate
+	sc := func(name string, policy *corev1.PersistentVolumeReclaimPolicy, mode *storagev1.VolumeBindingMode) storagev1.StorageClass {
+		s := storagev1.StorageClass{Provisioner: "ebs.csi.aws.com", ReclaimPolicy: policy, VolumeBindingMode: mode, Parameters: map[string]string{"type": "gp3", "encrypted": "true"}}
+		s.Name = name
+		return s
+	}
+	scs := []storagev1.StorageClass{sc("cnpg-gp3-retain", &retain, &wffc), sc("aaa-gp3-immediate", &del, &imm), sc("gp3", &del, &wffc)}
+	out, notes, err := SandboxStorageClasses("spec: {storage: {storageClass: cnpg-gp3-retain}}", scs)
+	if err != nil || len(notes) != 1 || !strings.Contains(out, "storageClass: gp3") {
+		t.Fatalf("out = %q, notes = %v, err = %v, want gp3", out, notes, err)
+	}
+}
+
+// 진단 AI가 샌드박스 대체를 운영 매니페스트 문제로 고치지 않게 실패 로그에 남긴다.
+func TestFailureLogSandboxNotes(t *testing.T) {
+	a := Attempt{N: 1, Namespace: "sandbox-x", SandboxNotes: []string{"storage.storageClass cnpg-gp3-retain(Retain) → gp3(Delete, 같은 프로비저너)"}}
+	got := failureLog(a, engine.State{}, nil)
+	if !strings.Contains(got, "sandbox-only substitutions") || !strings.Contains(got, "cnpg-gp3-retain(Retain) → gp3") {
+		t.Fatalf("failureLog = %q", got)
+	}
+}

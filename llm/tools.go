@@ -80,7 +80,7 @@ func PlanTools(scope PlanScope, platform *client.Client, clusters map[string]Clu
 		},
 		{
 			Name:        "node_capacity",
-			Description: "환경의 노드별 할당 가능(cpu, memory), 이미 떠 있는 Pod가 요청한 양(requestedCpu, requestedMemory), 남은 여유(freeCpu, freeMemory), 준비 상태를 본다. 대상 매니페스트의 resources와 instances를 정할 때 쓴다. Pod를 읽지 못하면 free 없이 할당 가능만 준다.",
+			Description: "환경의 노드별 할당 가능(cpu, memory), 이미 떠 있는 Pod가 요청한 양(requestedCpu, requestedMemory), 남은 여유(freeCpu, freeMemory), 준비 상태, 새 Pod를 받지 않는 노드(unschedulable, NoSchedule taint)를 본다. 대상 매니페스트의 resources와 instances를 정할 때 쓴다. Pod를 읽지 못하면 free 없이 할당 가능만 준다.",
 			Properties:  envProp, Required: []string{"env"},
 			Run: func(ctx context.Context, raw json.RawMessage) (any, error) {
 				var in struct{ Env string }
@@ -109,6 +109,19 @@ func PlanTools(scope PlanScope, platform *client.Client, clusters map[string]Clu
 						"name": n.Name, "ready": ready,
 						"cpu": n.Status.Allocatable.Cpu().String(), "memory": n.Status.Allocatable.Memory().String(),
 						"arch": n.Status.NodeInfo.Architecture,
+					}
+					// 새 Pod가 못 오는 노드: cordon, NoSchedule·NoExecute taint (control-plane 등). 여유가 있어도 쓸 수 없다.
+					var taints []string
+					for _, tt := range n.Spec.Taints {
+						if tt.Effect == corev1.TaintEffectNoSchedule || tt.Effect == corev1.TaintEffectNoExecute {
+							taints = append(taints, tt.Key+":"+string(tt.Effect))
+						}
+					}
+					if n.Spec.Unschedulable {
+						m["unschedulable"] = true
+					}
+					if len(taints) > 0 {
+						m["taints"] = taints
 					}
 					if podErr == nil {
 						r := reqs[n.Name]
@@ -197,7 +210,8 @@ func nodeRequests(ctx context.Context, cs kubernetes.Interface) (map[string]podR
 	}
 	out := map[string]podRequests{}
 	for _, p := range pods.Items {
-		if p.Spec.NodeName == "" {
+		// field selector를 지원하지 않는 API(가짜 클라이언트 포함)에서도 끝난 Pod는 세지 않는다.
+		if p.Spec.NodeName == "" || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 			continue
 		}
 		var cpu, mem, initCPU, initMem resource.Quantity
@@ -206,6 +220,12 @@ func nodeRequests(ctx context.Context, cs kubernetes.Interface) (map[string]podR
 			mem.Add(*c.Resources.Requests.Memory())
 		}
 		for _, c := range p.Spec.InitContainers {
+			// 사이드카(restartPolicy: Always)는 앱 컨테이너와 함께 계속 떠 있으므로 스케줄러처럼 더한다.
+			if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+				cpu.Add(*c.Resources.Requests.Cpu())
+				mem.Add(*c.Resources.Requests.Memory())
+				continue
+			}
 			if q := c.Resources.Requests.Cpu(); q.Cmp(initCPU) > 0 {
 				initCPU = q.DeepCopy()
 			}

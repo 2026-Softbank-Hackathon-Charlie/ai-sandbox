@@ -467,7 +467,8 @@ func SandboxStorageClasses(manifest string, scs []storagev1.StorageClass) (strin
 		if name == "" || !ok || deletes(cur) {
 			continue
 		}
-		// 같은 프로비저너, 같은 디스크 종류(parameters.type)를 먼저 고른다. 리허설이 보는 디스크가 운영과 같게.
+		// 같은 프로비저너 가운데 운영과 가장 비슷한 것: 같은 volumeBindingMode(다르면 다중 AZ에서 운영에 없는
+		// 스케줄 실패가 날 수 있음), 그다음 같은 parameters가 많은 것(type, encrypted, iops 등), 그다음 이름순.
 		var cands []storagev1.StorageClass
 		for _, s := range scs {
 			if deletes(s) && s.Provisioner == cur.Provisioner {
@@ -477,10 +478,21 @@ func SandboxStorageClasses(manifest string, scs []storagev1.StorageClass) (strin
 		if len(cands) == 0 {
 			return "", nil, fmt.Errorf("%s.storageClass %s는 Retain인데 같은 프로비저너(%s)의 Delete StorageClass가 없어 샌드박스 디스크가 남게 됨", key, name, cur.Provisioner)
 		}
+		sameParams := func(s storagev1.StorageClass) int {
+			n := 0
+			for k, v := range cur.Parameters {
+				if s.Parameters[k] == v {
+					n++
+				}
+			}
+			return n
+		}
 		sort.SliceStable(cands, func(i, j int) bool {
-			ti, tj := cands[i].Parameters["type"] == cur.Parameters["type"], cands[j].Parameters["type"] == cur.Parameters["type"]
-			if ti != tj {
-				return ti
+			if mi, mj := bindingMode(cands[i]) == bindingMode(cur), bindingMode(cands[j]) == bindingMode(cur); mi != mj {
+				return mi
+			}
+			if pi, pj := sameParams(cands[i]), sameParams(cands[j]); pi != pj {
+				return pi > pj
 			}
 			return cands[i].Name < cands[j].Name
 		})
@@ -492,4 +504,12 @@ func SandboxStorageClasses(manifest string, scs []storagev1.StorageClass) (strin
 	}
 	out, err := yaml.Marshal(doc)
 	return string(out), notes, err
+}
+
+// bindingMode는 비어 있으면 쿠버네티스 기본값(Immediate)이다.
+func bindingMode(s storagev1.StorageClass) storagev1.VolumeBindingMode {
+	if s.VolumeBindingMode == nil {
+		return storagev1.VolumeBindingImmediate
+	}
+	return *s.VolumeBindingMode
 }

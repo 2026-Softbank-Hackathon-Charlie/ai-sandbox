@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -518,16 +519,26 @@ func TestNodeCapacityFree(t *testing.T) {
 		Allocatable: corev1.ResourceList{corev1.ResourceCPU: q("1930m"), corev1.ResourceMemory: q("7Gi")},
 		Conditions:  []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
 	}}
+	// 새 Pod를 받지 않는 노드는 표시한다
+	cp := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n2"}, Spec: corev1.NodeSpec{Unschedulable: true,
+		Taints: []corev1.Taint{{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectNoSchedule}, {Key: "soft", Effect: corev1.TaintEffectPreferNoSchedule}}},
+		Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{corev1.ResourceCPU: q("2"), corev1.ResourceMemory: q("8Gi")}}}
+	always := corev1.ContainerRestartPolicyAlways
 	ctr := func(cpu, mem string) corev1.Container {
 		return corev1.Container{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: q(cpu), corev1.ResourceMemory: q(mem)}}}
 	}
 	pod := func(name, nodeName string, init []corev1.Container, cs ...corev1.Container) *corev1.Pod {
 		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "x"}, Spec: corev1.PodSpec{NodeName: nodeName, InitContainers: init, Containers: cs}}
 	}
-	cs := fake.NewClientset(node,
+	sidecar := ctr("50m", "32Mi")
+	sidecar.RestartPolicy = &always
+	done := pod("done", "n1", nil, ctr("1", "1Gi"))
+	done.Status.Phase = corev1.PodSucceeded
+	cs := fake.NewClientset(node, cp, done,
+		pod("c", "n1", []corev1.Container{sidecar}, ctr("100m", "64Mi")),                                    // 사이드카는 더함: 150m, 96Mi
 		pod("a", "n1", []corev1.Container{ctr("500m", "64Mi")}, ctr("100m", "128Mi"), ctr("200m", "128Mi")), // max(300m, 500m) = 500m, 256Mi
 		pod("b", "n1", nil, ctr("250m", "1Gi")),
-		pod("pending", "", nil, ctr("4", "4Gi")), // 아직 노드가 없으면 세지 않음
+		pod("pending", "", nil, ctr("4", "4Gi")), // 아직 노드가 없으면 세지 않음, 끝난 Pod(done)도 세지 않음
 	)
 	var tool Tool
 	for _, tl := range PlanTools(PlanScope{App: "a", Namespace: "x", Envs: []string{"eks"}}, nil, map[string]Cluster{"eks": {Typed: cs, Dynamic: clusters()["eks"].Dynamic}}) {
@@ -539,8 +550,16 @@ func TestNodeCapacityFree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := got.([]map[string]any)[0]
-	if n["requestedCpu"] != "750m" || n["freeCpu"] != "1180m" || n["requestedMemory"] != "1280Mi" {
-		t.Fatalf("node = %v, want requestedCpu 750m, freeCpu 1180m, requestedMemory 1280Mi", n)
+	nodes := got.([]map[string]any)
+	n := nodes[0]
+	if n["requestedCpu"] != "900m" || n["freeCpu"] != "1030m" || n["requestedMemory"] != "1376Mi" {
+		t.Fatalf("node = %v, want requestedCpu 900m, freeCpu 1030m, requestedMemory 1376Mi", n)
+	}
+	if _, ok := n["unschedulable"]; ok {
+		t.Fatalf("n1 = %v, want no unschedulable", n)
+	}
+	n2 := nodes[1]
+	if n2["unschedulable"] != true || fmt.Sprint(n2["taints"]) != "[node-role.kubernetes.io/control-plane:NoSchedule]" {
+		t.Fatalf("n2 = %v, want unschedulable and only the NoSchedule taint", n2)
 	}
 }

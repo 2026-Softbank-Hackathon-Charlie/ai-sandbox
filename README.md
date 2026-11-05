@@ -233,7 +233,7 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 |---|---|---|
 | `get_app` | 플랫폼의 앱 설정 (`GET /v1/apps`). 비밀번호 없음 | agent 토큰 |
 | `list_storage_classes` | 이번 이전의 두 환경만. StorageClass 이름, 프로비저너, 기본 여부 | 환경별 읽기 전용 kubeconfig |
-| `node_capacity` | 이번 이전의 두 환경만. 노드 할당 가능 CPU, 메모리와 떠 있는 Pod의 requests를 뺀 여유(`freeCpu`, `freeMemory`). Pod를 읽지 못하면 할당 가능만 | 같음 |
+| `node_capacity` | 이번 이전의 두 환경만. 노드 할당 가능 CPU, 메모리와 떠 있는 Pod의 requests를 뺀 여유(`freeCpu`, `freeMemory`), cordon·taint 노드 표시. 여유를 계산하려면 env kubeconfig에 **클러스터 범위 `pods` list** 권한이 필요하고, 없으면 `free: unknown`과 할당 가능만 준다 | 같음 |
 | `get_cnpg_cluster` | 이번 이전의 두 환경, 앱 네임스페이스만. spec 중 instances, image, storage, resources, bootstrap, replica만 돌려줌 | 같음 |
 | 진단 도구 | 리허설 샌드박스 네임스페이스만 (7장) | 샌드박스 토큰 |
 | `list_files` | `hopai prepare`가 만든 임시 클론 하나. `.git`을 빼고 얕은 것부터 400개까지 (넘으면 잘렸다고 알림). 심볼릭 링크는 따라가지 않음 | 없음 (로컬 파일) |
