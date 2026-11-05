@@ -42,6 +42,15 @@ func TestStringPreservesEnvironmentReferencesAndJSON(t *testing.T) {
 	if got := String(in); got != in {
 		t.Fatalf("symbolic references must survive masking: %s", got)
 	}
+	// Kubernetes env 참조 (platform.yaml env의 $(PGPASSWORD))
+	k8s := `KC_DB_PASSWORD: "$(PGPASSWORD)", url=postgresql://$(PGUSER):$(PGPASSWORD)@$(PGHOST)/app, DB_PASSWORD=$(PGPASSWORD)`
+	if got := String(k8s); got != k8s {
+		t.Fatalf("Kubernetes env references must survive masking: %s", got)
+	}
+	// env 이름이 아닌 $( )는 값을 감싼 것일 수 있어 지운다
+	if got := String(`password=$(hunter2) {"token":"$(abc)"}`); strings.Contains(got, "hunter2") || strings.Contains(got, "abc") {
+		t.Fatalf("$( )로 감싼 값이 남음: %s", got)
+	}
 	masked := String(`{"token":"plain-secret","dsn":"postgres://app:db-secret@db:5432/app"}`)
 	if !json.Valid([]byte(masked)) || strings.Contains(masked, "plain-secret") || strings.Contains(masked, "db-secret") {
 		t.Fatalf("masked JSON must remain valid and secret-free: %s", masked)

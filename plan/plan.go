@@ -187,6 +187,8 @@ func CheckAgainstDraft(p, draft *eplan.Plan) Issues {
 		same(f.path, f.got, f.want)
 	}
 	same("plan.gateway", p.Gateway, draft.Gateway)
+	// 원본 정리(engine c336658의 decommission)도 초안 그대로여야 한다. 지울 대상(selector)과 확인할 주소를 AI가 바꾸지 못하게 한다.
+	same("plan.decommission", p.Decommission, draft.Decommission)
 	// 파일 이전은 초안 그대로여야 한다. 빼면 버킷이 옮겨지지 않고, flags를 바꾸면 복사 방식이 달라진다.
 	switch {
 	case draft.Files == nil && p.Files != nil:

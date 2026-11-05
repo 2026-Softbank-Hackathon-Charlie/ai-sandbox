@@ -75,7 +75,7 @@ func write(path, content string) aiReply {
 
 const (
 	shopSpec   = "name: shop\nservices:\n  - name: web\n    dockerfile: hopcharlie.Dockerfile\n    port: 8080\n    healthCheck: /healthz\n    public: true\n"
-	shopAnswer = `{"summary":"platform.yaml과 hopcharlie.Dockerfile을 추가했다.","commitMessage":"feat: HopCharlie 배포 설정 추가","secrets":[{"name":"ADMIN_PASSWORD","purpose":"관리자 비밀번호"}],"notes":["첫 로그인은 admin"]}`
+	shopAnswer = `{"deployable":true,"blockers":[],"summary":"platform.yaml과 hopcharlie.Dockerfile을 추가했다.","commitMessage":"feat: HopCharlie 배포 설정 추가","secrets":[{"name":"ADMIN_PASSWORD","purpose":"관리자 비밀번호"}],"notes":["첫 로그인은 admin"]}`
 )
 
 /* ---------- 가짜 플랫폼 ---------- */
@@ -396,6 +396,82 @@ func TestPrepareEndToEnd(t *testing.T) {
 		t.Fatalf("다음 단계: %s", out)
 	}
 	r2.assertNoToken(t)
+}
+
+// TestPrepareDeployableDecision은 AI가 deployable=true로 답하면 오늘처럼 검사 뒤 push하고(docker-doom 같은 앱),
+// false로 답하면 커밋도 push도 하지 않고 이유를 출력하고 세션에 남기고 종료 코드 3으로 끝나는지 본다.
+func TestPrepareDeployableDecision(t *testing.T) {
+	t.Run("배포할 수 있음", func(t *testing.T) {
+		github, bare := localRemote(t)
+		spec := "name: docker-doom\nservices:\n  - name: web\n    path: Docker\n    dockerfile: hopcharlie.Dockerfile\n    port: 8080\n    healthCheck: /vnc.html\n    public: true\n    env:\n      VNC_GEOMETRY: \"1024x768\"\n"
+		r := newPrepareRun(t, github, &fakePlatformServer{},
+			write("platform.yaml", spec),
+			write("Docker/hopcharlie.Dockerfile", "FROM ghcr.io/example/doom:1.0.0\nUSER 65532\n"),
+			aiReply{text: `{"deployable":true,"blockers":[],"summary":"Docker/hopcharlie.Dockerfile과 platform.yaml을 추가했다.","commitMessage":"feat: HopCharlie 배포 설정 추가","secrets":[],"notes":["화면은 /vnc.html"]}`},
+		)
+		err := runPrepare(context.Background(), r.env, testRepo, "")
+		if code := prepareExit(io.Discard, err); code != 0 {
+			t.Fatalf("종료 코드 %d: %v\n%s", code, err, r.stderr)
+		}
+		if files := gitT(t, bare, "show", "--name-only", "--format=", "hopcharlie"); files != "Docker/hopcharlie.Dockerfile\nplatform.yaml" {
+			t.Fatalf("커밋한 파일: %q", files)
+		}
+		if out := r.stdout.String(); !strings.Contains(out, "앱 이름: docker-doom") || !strings.Contains(out, "charlie app add") {
+			t.Fatalf("출력:\n%s", out)
+		}
+		r.assertNoToken(t)
+	})
+
+	t.Run("배포할 수 없음", func(t *testing.T) {
+		github, bare := localRemote(t)
+		// 전에 만든 hopcharlie 브랜치가 있어도 그대로 둔다
+		work := filepath.Join(t.TempDir(), "w")
+		gitT(t, "", "clone", "--quiet", bare, work)
+		gitT(t, work, "push", "--quiet", "origin", "main:hopcharlie")
+		before := gitT(t, bare, "rev-parse", "hopcharlie")
+		plat := &fakePlatformServer{}
+		r := newPrepareRun(t, github, plat,
+			aiReply{tool: "read_file", input: `{"path":"README.md"}`},
+			// 쓰다가 멈춘 파일이 있어도 커밋하지 않는다
+			write("platform.yaml", "name: shop\n"),
+			aiReply{text: `{"deployable":false,"blockers":[{"need":"MySQL","reason":"config/database.yml이 mysql2 어댑터만 지원함"},{"need":"TCP 25 수신","reason":"메일을 SMTP로 직접 받음"}],"summary":"MySQL 전용 앱이라 배포할 수 없다.","commitMessage":"","secrets":[],"notes":["PostgreSQL을 지원하면 다시 돌린다"]}`},
+		)
+		err := runPrepare(context.Background(), r.env, testRepo, "")
+		if !errors.Is(err, errNotDeployable) || !strings.Contains(err.Error(), "ags_1") {
+			t.Fatalf("배포할 수 없다고 끝나야 함: %v", err)
+		}
+		var stderr bytes.Buffer
+		if code := prepareExit(&stderr, err); code != exitNotDeployable || exitNotDeployable != 3 || !strings.Contains(stderr.String(), "중단:") {
+			t.Fatalf("종료 코드 %d: %s", code, stderr.String())
+		}
+		for _, a := range *r.argv {
+			if slices.Contains(a, "commit") || slices.Contains(a, "push") {
+				t.Fatalf("커밋이나 push를 함: %v", a)
+			}
+		}
+		if got := gitT(t, bare, "rev-parse", "hopcharlie"); got != before {
+			t.Fatalf("hopcharlie가 바뀜: %s, 전 %s", got, before)
+		}
+		out := r.stdout.String()
+		for _, want := range []string{"레포: " + testRepo, "AI 세션: ags_1", "push하지 않았습니다", "  - MySQL: config/database.yml이 mysql2 어댑터만 지원함", "  - TCP 25 수신: 메일을", "요약: MySQL 전용", "  - PostgreSQL을 지원하면"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("출력에 %q가 없음:\n%s", want, out)
+			}
+		}
+		// 판단과 이유는 플랫폼의 에이전트 세션(콘솔)에 남는다
+		s := r.sink.Sessions[0]
+		if !s.Done || !s.OK || s.Summary != "배포할 수 없음: MySQL, TCP 25 수신" {
+			t.Fatalf("세션: %+v", s)
+		}
+		if reqs := plat.requests(); !strings.Contains(reqs, `"need":"MySQL"`) || !strings.Contains(reqs, "배포할 수 없음: MySQL") {
+			t.Fatalf("플랫폼 세션에 이유가 남지 않음:\n%s", reqs)
+		}
+		r.assertNoToken(t)
+	})
+
+	if prepareExit(io.Discard, errors.New("x")) != 1 {
+		t.Fatal("다른 실패는 종료 코드 1")
+	}
 }
 
 func TestPreparePushRejected(t *testing.T) {

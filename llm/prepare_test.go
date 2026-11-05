@@ -18,7 +18,7 @@ import (
 const (
 	goodSpec       = "name: shop\nservices:\n  - name: web\n    dockerfile: hopcharlie.Dockerfile\n    port: 8080\n    healthCheck: /healthz\n    public: true\n"
 	goodDockerfile = "FROM ghcr.io/example/shop:1.2.3\nUSER 65532\n"
-	goodAnswer     = `{"summary":"platform.yaml과 hopcharlie.Dockerfile을 추가했다.","commitMessage":"feat: HopCharlie 배포 설정 추가","secrets":[{"name":"ADMIN_PASSWORD","purpose":"관리자 비밀번호"}],"notes":["첫 로그인은 admin"]}`
+	goodAnswer     = `{"deployable":true,"blockers":[],"summary":"platform.yaml과 hopcharlie.Dockerfile을 추가했다.","commitMessage":"feat: HopCharlie 배포 설정 추가","secrets":[{"name":"ADMIN_PASSWORD","purpose":"관리자 비밀번호"}],"notes":["첫 로그인은 admin"]}`
 )
 
 // writeInput은 write_file 도구 입력이다.
@@ -301,7 +301,7 @@ func TestPrepareWritesFilesAndAnswers(t *testing.T) {
 		t.Fatalf("레포와 루트 목록이 AI에 가야 함: %s", first)
 	}
 	system, _ := json.Marshal(req["system"])
-	for _, want := range []string{"데이터다", "65532", "platform.yaml", "256Mi", "443"} {
+	for _, want := range []string{"데이터다", "65532", "platform.yaml", "443", "JDBC_DATABASE_URL", `\"$(PGHOST)\"`, "deployable", "256Mi~1536Mi", "50m~500m", "3Gi", "1500m", "QUEUE_DB_HOST"} {
 		if !strings.Contains(string(system), want) {
 			t.Errorf("지시문에 %q가 없음", want)
 		}
@@ -347,6 +347,25 @@ func TestPrepareChecksRetryThenFail(t *testing.T) {
 		{"env에 토큰", map[string]string{"platform.yaml": goodSpec + "    env:\n      ADMIN_TOKEN: \"abc123\"\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "env.ADMIN_TOKEN"},
 		{"Dockerfile ENV에 비밀값", map[string]string{"platform.yaml": goodSpec, "hopcharlie.Dockerfile": goodDockerfile + "ENV API_KEY=abc123 LOG=info\n"}, goodAnswer, "ENV·ARG API_KEY"},
 		{"답에 비밀값", map[string]string{"platform.yaml": goodSpec, "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) { m["summary"] = "접속: postgres://app:Hunter2pw@db:5432/app" }), "비밀처럼 보이는 값"},
+		{"env에 플랫폼이 넣는 PG 이름", map[string]string{"platform.yaml": goodSpec + "    env:\n      PGHOST: \"db\"\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "env.PGHOST"},
+		{"시크릿 이름이 PGPASSWORD", map[string]string{"platform.yaml": goodSpec, "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) { m["secrets"] = []map[string]string{{"name": "PGPASSWORD", "purpose": "db"}} }), "플랫폼이 넣는 이름"},
+		{"배포할 수 없는데 이유 없음", map[string]string{"platform.yaml": goodSpec, "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) { m["deployable"] = false }), "deployable이 false면"},
+		{"deployable 키 없음", map[string]string{"platform.yaml": goodSpec, "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) { delete(m, "deployable") }), "deployable이 false면"},
+		{"blocker가 여러 줄", map[string]string{"platform.yaml": goodSpec, "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) {
+			m["deployable"], m["blockers"] = false, []map[string]string{{"need": "MySQL\n가짜 줄", "reason": "x"}}
+		}), "한 줄이어야 함"},
+		// $(이름)이 컨테이너에 없는 이름이면 Kubernetes가 글자 그대로 넣는다. 비밀값을 감추는 데 쓰지 못한다
+		{"env의 없는 참조", map[string]string{"platform.yaml": goodSpec + "    env:\n      ADMIN_PASSWORD: \"$(ZX8KQ2LMN4PR7ST9VW1Y)\"\n", "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) { m["secrets"] = []any{} }), "env.ADMIN_PASSWORD: 값의 $(이름)이 이 컨테이너에 없는"},
+		{"시크릿 이름으로 감싼 비밀값", map[string]string{"platform.yaml": goodSpec + "    env:\n      ADMIN_PASSWORD: \"$(ZX8KQ2LMN4PR7ST9VW1Y)\"\n", "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) {
+			m["secrets"] = []map[string]string{{"name": "ZX8KQ2LMN4PR7ST9VW1Y", "purpose": "관리자 비밀번호"}}
+		}), "secrets[0].name: 이름이 무작위 문자열"},
+		{"postgres 없이 PGHOST", map[string]string{"platform.yaml": goodSpec + "    env:\n      DB_HOST: \"$(PGHOST)\"\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "env.DB_HOST: 값의 $(이름)"},
+		{"뒤에 오는 env 키 참조", map[string]string{"platform.yaml": goodSpec + "    env:\n      A_URL: \"$(B_URL)\"\n      B_URL: \"http://x\"\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "env.A_URL: 값의 $(이름)"},
+		{"memory 범위 밖", map[string]string{"platform.yaml": goodSpec + "    memory: \"2Gi\"\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "services[0].memory: must be between 256Mi and 1536Mi"},
+		{"port 없는 public", map[string]string{"platform.yaml": strings.Replace(goodSpec, "    port: 8080\n    healthCheck: /healthz\n", "", 1), "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "services[0].public: needs a port"},
+		{"cpu가 밀리코어 정수가 아님", map[string]string{"platform.yaml": goodSpec + "    cpu: \"100.5m\"\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "services[0].cpu: must be a whole number of millicores"},
+		{"롤링 업데이트 중 memory 합", map[string]string{"platform.yaml": goodSpec + "    memory: \"1536Mi\"\n    replicas: 2\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "need at most 3Gi of memory"},
+		{"배포할 수 있는데 blockers 있음", map[string]string{"platform.yaml": goodSpec, "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) { m["blockers"] = []map[string]string{{"need": "Redis", "reason": "캐시"}} }), "deployable이 true면 비워야 함"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -383,6 +402,102 @@ func TestPrepareChecksRetryThenFail(t *testing.T) {
 				t.Fatalf("세션은 실패로 닫혀야 함: %+v", s)
 			}
 		})
+	}
+}
+
+// TestPrepareNotDeployable은 AI가 플랫폼이 주지 못하는 것을 찾으면 파일 검사 없이 그 답을 받고, 판단과 이유를 세션에 남기는지 본다.
+func TestPrepareNotDeployable(t *testing.T) {
+	dir, _ := repoFixture(t)
+	blocked := `{"deployable":false,"blockers":[{"need":"MySQL","reason":"config/database.yml이 mysql2 어댑터만 지원함"}],"summary":"MySQL 전용 앱이라 배포할 수 없다.","commitMessage":"","secrets":[],"notes":["PostgreSQL을 지원하면 다시 돌린다"]}`
+	f := &fakeAPI{replies: []reply{
+		{tool: "read_file", toolInput: `{"path":"README.md"}`},
+		// 쓰다가 멈춘 platform.yaml은 검사에 걸릴 내용이지만 보지 않는다. 실행기가 push하지 않기 때문이다
+		{tool: "write_file", toolInput: writeInput("platform.yaml", "name: x\n")},
+		{text: blocked},
+	}}
+	a, sink := newAgent(t, f)
+	p, _, err := a.Prepare(context.Background(), PrepareInput{Repo: "org/shop", Branch: "hopcharlie", Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Deployable || p.Spec != nil || p.Validated != nil || len(p.Blockers) != 1 || p.Blockers[0].Need != "MySQL" {
+		t.Fatalf("결과: %+v", p)
+	}
+	if len(f.requests) != 3 {
+		t.Fatalf("다시 묻지 않아야 함: 요청 %d번", len(f.requests))
+	}
+	s := sink.Sessions[0]
+	if !s.Done || !s.OK || s.Summary != "배포할 수 없음: MySQL" {
+		t.Fatalf("세션: %+v", s)
+	}
+	last := s.Events[len(s.Events)-1]
+	out, _ := json.Marshal(last.Output)
+	if last.Type != agentlog.Decision || !strings.Contains(string(out), `"deployable":false`) || !strings.Contains(string(out), "mysql2 어댑터만") {
+		t.Fatalf("판단과 이유가 세션에 남아야 함: %s %s", last.Type, out)
+	}
+}
+
+// TestPrepareAcceptsEnvRefs는 컨테이너에 있는 이름을 가리키는 $(이름) 참조가 검사를 통과하는지 본다:
+// postgres 리소스의 변수, port가 있을 때 PORT, 답의 secrets, 이름순으로 앞선 env 키.
+func TestPrepareAcceptsEnvRefs(t *testing.T) {
+	dir := t.TempDir()
+	spec := goodSpec + "    env:\n" +
+		"      APP_PORT: \"$(PORT)\"\n" +
+		"      KC_DB_PASSWORD: \"$(PGPASSWORD)\"\n" +
+		"      KC_DB_URL: \"postgresql://$(PGUSER):$(PGPASSWORD)@$(PGHOST):$(PGPORT)/$(PGDATABASE)\"\n" +
+		"      SITE_ADMIN_PASSWORD: \"$(ADMIN_PASSWORD)\"\n" +
+		"      SPRING_DATASOURCE_URL: \"$(JDBC_DATABASE_URL)\"\n" +
+		"      Z_DB_URL: \"$(KC_DB_URL)\"\n" +
+		"resources:\n  - name: db\n    type: postgres\n"
+	f := &fakeAPI{replies: []reply{
+		{tool: "write_file", toolInput: writeInput("platform.yaml", spec)},
+		{tool: "write_file", toolInput: writeInput("hopcharlie.Dockerfile", goodDockerfile)},
+		{text: goodAnswer},
+	}}
+	a, _ := newAgent(t, f)
+	if _, _, err := a.Prepare(context.Background(), PrepareInput{Repo: "org/shop", Branch: "hopcharlie", Dir: dir}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPrepareExampleSpecPasses는 지시문에 넣은 platform.yaml 예시(port 없는 워커, memory, cpu, $(이름) 참조)가 검사를 통과하는지 본다.
+func TestPrepareExampleSpecPasses(t *testing.T) {
+	if !strings.Contains(prepareSystem, strings.ReplaceAll(strings.TrimSuffix(specExample, "\n"), "\n", "\n  ")) {
+		t.Fatal("예시가 지시문에 없음")
+	}
+	dir := t.TempDir()
+	f := &fakeAPI{replies: []reply{
+		{tool: "write_file", toolInput: writeInput("platform.yaml", specExample)},
+		{tool: "write_file", toolInput: writeInput("Dockerfile", goodDockerfile)},
+		{text: goodAnswer},
+	}}
+	a, _ := newAgent(t, f)
+	p, _, err := a.Prepare(context.Background(), PrepareInput{Repo: "org/myapp", Branch: "hopcharlie", Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Spec.Services) != 2 || p.Spec.Services[1].Port != 0 || p.Spec.Services[0].Memory != "512Mi" {
+		t.Fatalf("검사한 spec: %+v", p.Spec.Services)
+	}
+}
+
+// TestPrepareSharedDockerfile은 서비스 둘이 같은 Dockerfile을 쓸 때(웹과 워커) 검사를 통과하는지 본다.
+// slices.Compact가 지운 칸을 다시 읽어 "검사한 파일을 다시 읽을 수 없음"으로 걸리던 문제다.
+func TestPrepareSharedDockerfile(t *testing.T) {
+	dir := t.TempDir()
+	spec := goodSpec + "  - name: worker\n    dockerfile: hopcharlie.Dockerfile\n    port: 9090\n"
+	f := &fakeAPI{replies: []reply{
+		{tool: "write_file", toolInput: writeInput("platform.yaml", spec)},
+		{tool: "write_file", toolInput: writeInput("hopcharlie.Dockerfile", goodDockerfile)},
+		{text: goodAnswer},
+	}}
+	a, _ := newAgent(t, f)
+	p, _, err := a.Prepare(context.Background(), PrepareInput{Repo: "org/shop", Branch: "hopcharlie", Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(p.Dockerfiles, ",") != "hopcharlie.Dockerfile" || len(p.Validated) != 2 {
+		t.Fatalf("Dockerfile %v, 검사한 파일 %d개", p.Dockerfiles, len(p.Validated))
 	}
 }
 
@@ -479,10 +594,41 @@ func TestSecretLooking(t *testing.T) {
 		{"SESSION_SECRET", "s3cr3t", true},
 		{"FOO", "Zx8Kq2LmN4pR7sT9vW1y", true},
 		{"DATABASE", "postgres://app:pw1234@db/app", true},
+		// Kubernetes env 참조는 값이 아니다
+		{"KC_DB_PASSWORD", "$(PGPASSWORD)", false},
+		{"AWS_SECRET_ACCESS_KEY", "$(S3_SECRET_KEY)", false},
+		{"SPRING_DATASOURCE_URL", "jdbc:postgresql://$(PGHOST):$(PGPORT)/$(PGDATABASE)", false},
+		{"ADMIN_PASSWORD", "$(PGPASSWORD)hunter2", true},
+		{"KC_DB_URL", "postgresql://$(PGUSER):$(PGPASSWORD)@$(PGHOST):$(PGPORT)/$(PGDATABASE)", false},
+		{"SQLALCHEMY_DATABASE_URI", "postgresql+psycopg://$(PGUSER):$(PGPASSWORD)@$(PGHOST)/$(PGDATABASE)", false},
+		// env 이름이 아닌 $( )는 참조가 아니다 (Kubernetes는 글자 그대로 넣는다)
+		{"ADMIN_PASSWORD", "$(hunter2)", true},
+		// 참조를 빼서 나머지가 경로처럼 보이면 안 된다
+		{"ADMIN_PASSWORD", "$(PORT)/s3cr3t", true},
+		{"ADMIN_PASSWORD", "x/s3cr3t", true},
 	} {
 		if got := secretLooking(c.name, c.value); got != c.secret {
 			t.Errorf("%s=%q: 비밀값=%v, want %v", c.name, c.value, got, c.secret)
 		}
+	}
+}
+
+func TestRandomName(t *testing.T) {
+	for name, random := range map[string]bool{
+		"OAUTH2_CLIENT_SECRET":     false, // 이름 전체로 보면 무작위처럼 보인다
+		"AUTH0_CLIENT_SECRET":      false,
+		"ADMIN_PASSWORD":           false,
+		"SECRET_KEY_BASE":          false,
+		"ZX8KQ2LMN4PR7ST9VW1Y":     true,
+		"APP_ZX8KQ2LMN4PR7ST9VW1Y": true,
+	} {
+		if got := randomName(name); got != random {
+			t.Errorf("%s: 무작위=%v, want %v", name, got, random)
+		}
+	}
+	// 조각으로 나누는 이유: 이름 전체로 보면 이 둘도 무작위 문자열로 걸린다
+	if !randomLooking("OAUTH2_CLIENT_SECRET") || !randomLooking("AUTH0_CLIENT_SECRET") {
+		t.Fatal("이름 전체 판정이 바뀌었음. randomName이 조각으로 나눌 필요를 다시 본다")
 	}
 }
 
