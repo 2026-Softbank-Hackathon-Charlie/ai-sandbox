@@ -31,7 +31,7 @@ ai-sandbox에 main으로 합쳐진 순서대로 무엇이 생겼는지 정리했
 | [v24](#v24--실제-eks-리허설-수정) | [#28](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/28) | 11/5 14:21 | 실제 EKS에서 리허설 임시 원본이 뜨지 않던 문제 4가지 수정 | 116 |
 | [v25](#v25--ai-계획-파일-저장) | [#29](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/29) | 11/5 14:21 | AI 계획을 리포트 옆 파일로 저장 | 117 |
 | [v26](#v26--들여온-오픈소스-앱-배포-준비) | [#33](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/33) | 11/5 17:58 | 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie`로 push | 158 |
-| [v29](#v29-배포할-수-없는-앱-알리기) | [#36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36) | 머지 전 | `hopai prepare`가 플랫폼이 주지 못하는 것을 찾으면 push하지 않고 알림, 새 `platform.yaml` 계약 | 171 |
+| [v29](#v29-배포할-수-없는-앱-알리기) | [#36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36) | 머지 전 | `hopai prepare`가 플랫폼이 주지 못하는 것을 찾으면 push하지 않고 알림, 새 `platform.yaml` 계약 | 172 |
 
 - 머지 시각은 한국 시간이고, "테스트"는 그 버전에 들어 있던 테스트 함수 개수입니다.
 - 닫힌 PR #1, #2는 플랫폼의 계획 형식이 정해진 뒤 #4~#8로 나눠 다시 올렸습니다.
@@ -550,7 +550,7 @@ AI는 조사 도구로 대상 StorageClass를 보고 처음부터 맞게 고르�
 
 ## v29 배포할 수 없는 앱 알리기
 
-[PR #36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36), 머지 전, 9파일 +493 −49, 패키지 `llm`, `cmd/hopai`, `mask`
+[PR #36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36), 머지 전, 9파일 +582 −56, 패키지 `llm`, `cmd/hopai`, `mask`
 
 **무엇이 달라졌나**
 
