@@ -437,3 +437,79 @@ func PrepareTempSource(src *unstructured.Unstructured, sc *plan.SourceCluster, t
 	}
 	return unstructured.SetNestedField(src.Object, img, "spec", "imageName")
 }
+
+// SandboxStorageClasses는 샌드박스에 띄울 대상 매니페스트의 storage·walStorage StorageClass 가운데
+// reclaimPolicy가 Retain인 것을 같은 프로비저너의 Delete 클래스로 바꾼다. Retain이면 샌드박스를 지워도
+// EBS 같은 디스크가 Released로 남아 리허설마다 쌓인다(2026-11-05 실제 EKS, cnpg-gp3-retain 10Gi).
+// 운영 매니페스트는 바꾸지 않는다. 바꾼 것은 notes로 돌려주어 리허설 기록에 남긴다.
+// 이 클러스터에 없는 클래스는 그대로 둔다. 그 값이 대상에서 되는지는 리허설이 잡아야 하는 것이다.
+func SandboxStorageClasses(manifest string, scs []storagev1.StorageClass) (string, []string, error) {
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(manifest), &doc); err != nil {
+		return "", nil, fmt.Errorf("대상 매니페스트를 읽을 수 없음: %w", err)
+	}
+	spec, _ := doc["spec"].(map[string]any)
+	if spec == nil {
+		return manifest, nil, nil
+	}
+	byName := map[string]storagev1.StorageClass{}
+	for _, s := range scs {
+		byName[s.Name] = s
+	}
+	deletes := func(s storagev1.StorageClass) bool {
+		return s.ReclaimPolicy == nil || *s.ReclaimPolicy == corev1.PersistentVolumeReclaimDelete
+	}
+	var notes []string
+	for _, key := range []string{"storage", "walStorage"} {
+		st, _ := spec[key].(map[string]any)
+		name, _ := st["storageClass"].(string)
+		cur, ok := byName[name]
+		if name == "" || !ok || deletes(cur) {
+			continue
+		}
+		// 같은 프로비저너 가운데 운영과 가장 비슷한 것: 같은 volumeBindingMode(다르면 다중 AZ에서 운영에 없는
+		// 스케줄 실패가 날 수 있음), 그다음 같은 parameters가 많은 것(type, encrypted, iops 등), 그다음 이름순.
+		var cands []storagev1.StorageClass
+		for _, s := range scs {
+			if deletes(s) && s.Provisioner == cur.Provisioner {
+				cands = append(cands, s)
+			}
+		}
+		if len(cands) == 0 {
+			return "", nil, fmt.Errorf("%s.storageClass %s는 Retain인데 같은 프로비저너(%s)의 Delete StorageClass가 없어 샌드박스 디스크가 남게 됨", key, name, cur.Provisioner)
+		}
+		sameParams := func(s storagev1.StorageClass) int {
+			n := 0
+			for k, v := range cur.Parameters {
+				if s.Parameters[k] == v {
+					n++
+				}
+			}
+			return n
+		}
+		sort.SliceStable(cands, func(i, j int) bool {
+			if mi, mj := bindingMode(cands[i]) == bindingMode(cur), bindingMode(cands[j]) == bindingMode(cur); mi != mj {
+				return mi
+			}
+			if pi, pj := sameParams(cands[i]), sameParams(cands[j]); pi != pj {
+				return pi > pj
+			}
+			return cands[i].Name < cands[j].Name
+		})
+		st["storageClass"] = cands[0].Name
+		notes = append(notes, fmt.Sprintf("%s.storageClass %s(Retain) → %s(Delete, 같은 프로비저너): 샌드박스를 지울 때 디스크도 지움", key, name, cands[0].Name))
+	}
+	if len(notes) == 0 {
+		return manifest, nil, nil
+	}
+	out, err := yaml.Marshal(doc)
+	return string(out), notes, err
+}
+
+// bindingMode는 비어 있으면 쿠버네티스 기본값(Immediate)이다.
+func bindingMode(s storagev1.StorageClass) storagev1.VolumeBindingMode {
+	if s.VolumeBindingMode == nil {
+		return storagev1.VolumeBindingImmediate
+	}
+	return *s.VolumeBindingMode
+}

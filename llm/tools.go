@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -79,7 +80,7 @@ func PlanTools(scope PlanScope, platform *client.Client, clusters map[string]Clu
 		},
 		{
 			Name:        "node_capacity",
-			Description: "환경의 노드 수와 노드별 할당 가능 CPU, 메모리, 준비 상태를 본다. 대상 매니페스트의 resources와 instances를 정할 때 쓴다.",
+			Description: "환경의 노드별 할당 가능(cpu, memory), 이미 떠 있는 Pod가 요청한 양(requestedCpu, requestedMemory), 남은 여유(freeCpu, freeMemory), 준비 상태, 새 Pod를 받지 않는 노드(unschedulable, NoSchedule taint)를 본다. 대상 매니페스트의 resources와 instances를 정할 때 쓴다. Pod를 읽지 못하면 free 없이 할당 가능만 준다.",
 			Properties:  envProp, Required: []string{"env"},
 			Run: func(ctx context.Context, raw json.RawMessage) (any, error) {
 				var in struct{ Env string }
@@ -93,6 +94,9 @@ func PlanTools(scope PlanScope, platform *client.Client, clusters map[string]Clu
 				if err != nil {
 					return nil, err
 				}
+				// 노드마다 떠 있는 Pod의 requests 합. 스케줄러가 보는 것은 할당 가능이 아니라 이 여유다.
+				// 2026-11-05 실제 EKS: 할당 가능 1930m만 보고 2인스턴스×500m를 잡아 리허설 1회차가 CPU 부족으로 멈췄다.
+				reqs, podErr := nodeRequests(ctx, clusters[in.Env].Typed)
 				out := []map[string]any{}
 				for _, n := range list.Items {
 					ready := false
@@ -101,11 +105,35 @@ func PlanTools(scope PlanScope, platform *client.Client, clusters map[string]Clu
 							ready = true
 						}
 					}
-					out = append(out, map[string]any{
+					m := map[string]any{
 						"name": n.Name, "ready": ready,
 						"cpu": n.Status.Allocatable.Cpu().String(), "memory": n.Status.Allocatable.Memory().String(),
 						"arch": n.Status.NodeInfo.Architecture,
-					})
+					}
+					// 새 Pod가 못 오는 노드: cordon, NoSchedule·NoExecute taint (control-plane 등). 여유가 있어도 쓸 수 없다.
+					var taints []string
+					for _, tt := range n.Spec.Taints {
+						if tt.Effect == corev1.TaintEffectNoSchedule || tt.Effect == corev1.TaintEffectNoExecute {
+							taints = append(taints, tt.Key+":"+string(tt.Effect))
+						}
+					}
+					if n.Spec.Unschedulable {
+						m["unschedulable"] = true
+					}
+					if len(taints) > 0 {
+						m["taints"] = taints
+					}
+					if podErr == nil {
+						r := reqs[n.Name]
+						freeCPU, freeMem := n.Status.Allocatable.Cpu().DeepCopy(), n.Status.Allocatable.Memory().DeepCopy()
+						freeCPU.Sub(r.cpu)
+						freeMem.Sub(r.mem)
+						m["requestedCpu"], m["requestedMemory"] = r.cpu.String(), r.mem.String()
+						m["freeCpu"], m["freeMemory"] = freeCPU.String(), freeMem.String()
+					} else {
+						m["free"] = "unknown: " + podErr.Error()
+					}
+					out = append(out, m)
 				}
 				sort.Slice(out, func(i, j int) bool { return out[i]["name"].(string) < out[j]["name"].(string) })
 				return out, nil
@@ -169,4 +197,56 @@ func PlanTools(scope PlanScope, platform *client.Client, clusters map[string]Clu
 		})
 	}
 	return tools
+}
+
+type podRequests struct{ cpu, mem resource.Quantity }
+
+// nodeRequests는 끝나지 않은 Pod의 requests를 노드별로 더한다. 스케줄러처럼 컨테이너 합과
+// init 컨테이너 가운데 큰 값 중 큰 것을 Pod 하나의 요청으로 본다.
+func nodeRequests(ctx context.Context, cs kubernetes.Interface) (map[string]podRequests, error) {
+	pods, err := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{FieldSelector: "status.phase!=Succeeded,status.phase!=Failed"})
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]podRequests{}
+	for _, p := range pods.Items {
+		// field selector를 지원하지 않는 API(가짜 클라이언트 포함)에서도 끝난 Pod는 세지 않는다.
+		if p.Spec.NodeName == "" || p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		var cpu, mem, initCPU, initMem resource.Quantity
+		for _, c := range p.Spec.Containers {
+			cpu.Add(*c.Resources.Requests.Cpu())
+			mem.Add(*c.Resources.Requests.Memory())
+		}
+		for _, c := range p.Spec.InitContainers {
+			// 사이드카(restartPolicy: Always)는 앱 컨테이너와 함께 계속 떠 있으므로 스케줄러처럼 더한다.
+			if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+				cpu.Add(*c.Resources.Requests.Cpu())
+				mem.Add(*c.Resources.Requests.Memory())
+				continue
+			}
+			if q := c.Resources.Requests.Cpu(); q.Cmp(initCPU) > 0 {
+				initCPU = q.DeepCopy()
+			}
+			if q := c.Resources.Requests.Memory(); q.Cmp(initMem) > 0 {
+				initMem = q.DeepCopy()
+			}
+		}
+		if initCPU.Cmp(cpu) > 0 {
+			cpu = initCPU
+		}
+		if initMem.Cmp(mem) > 0 {
+			mem = initMem
+		}
+		if p.Spec.Overhead != nil {
+			cpu.Add(*p.Spec.Overhead.Cpu())
+			mem.Add(*p.Spec.Overhead.Memory())
+		}
+		r := out[p.Spec.NodeName]
+		r.cpu.Add(cpu)
+		r.mem.Add(mem)
+		out[p.Spec.NodeName] = r
+	}
+	return out, nil
 }

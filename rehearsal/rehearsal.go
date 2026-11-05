@@ -81,9 +81,11 @@ type Attempt struct {
 	Isolation []sandbox.CheckResult `json:"isolation,omitempty"`
 	Error     string                `json:"error,omitempty"`
 	Evidence  []string              `json:"evidence,omitempty"`
-	Diagnosis *plan.Diagnosis       `json:"diagnosis,omitempty"`
-	FixDiff   string                `json:"fixDiff,omitempty"`
-	DurationS float64               `json:"durationSec"`
+	// SandboxNotes는 샌드박스에서만 바꾼 것(Retain StorageClass 대체 등)이다. 진단 AI가 이것을 운영 매니페스트 문제로 오해하지 않게 실패 로그에도 넣는다.
+	SandboxNotes []string        `json:"sandboxNotes,omitempty"`
+	Diagnosis    *plan.Diagnosis `json:"diagnosis,omitempty"`
+	FixDiff      string          `json:"fixDiff,omitempty"`
+	DurationS    float64         `json:"durationSec"`
 }
 
 // CleanupResult distinguishes an accepted deletion request from a cleanup failure.
@@ -289,7 +291,18 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 		failf("샌드박스 클러스터의 StorageClass를 읽을 수 없음: %v", err)
 		return a, nil, nil
 	}
-	tempSC, err := TempStorageClass(scs.Items, cur.Manifest)
+	// 대상 매니페스트의 Retain StorageClass를 샌드박스용 Delete 클래스로 바꾼 사본. 임시 원본과 대상이 같은 클래스를 보게
+	// 이 사본으로 임시 원본 클래스도 고르고, 바꿀 수 없으면 임시 원본을 만들기 전에 멈춘다.
+	sbManifest, scNotes, err := SandboxStorageClasses(cur.Manifest, scs.Items)
+	if err != nil {
+		failf("샌드박스 대상 디스크: %v", err)
+		return a, nil, nil
+	}
+	a.SandboxNotes = scNotes
+	for _, n := range scNotes {
+		ses.Log(ctx, agentlog.Event{Type: agentlog.Message, Tool: "sandbox_target", Output: n})
+	}
+	tempSC, err := TempStorageClass(scs.Items, sbManifest)
 	if err != nil {
 		failf("임시 원본 디스크: %v", err)
 		return a, nil, nil
@@ -351,7 +364,7 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 	if err != nil {
 		return a, nil, err
 	}
-	manifest, err := TargetManifest(cur.Manifest, &cur.Plan, sb.Namespace)
+	manifest, err := TargetManifest(sbManifest, &cur.Plan, sb.Namespace)
 	if err != nil {
 		failf("%v", err)
 		return a, nil, nil
@@ -557,6 +570,12 @@ func failureLog(a Attempt, st engine.State, engineTail []string) string {
 	sb.WriteString("--- engine events\n")
 	for _, l := range engineTail {
 		sb.WriteString(l + "\n")
+	}
+	if len(a.SandboxNotes) > 0 {
+		sb.WriteString("--- sandbox-only substitutions (the sandbox ran these instead of the manifest; do not change the manifest for them)\n")
+		for _, l := range a.SandboxNotes {
+			sb.WriteString(l + "\n")
+		}
 	}
 	sb.WriteString("--- kubernetes warning events\n")
 	for _, l := range a.Evidence {
