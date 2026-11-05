@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -228,5 +229,29 @@ func TestTruncateKeepsRunes(t *testing.T) {
 	}
 	if Truncate("짧음", 50) != "짧음" {
 		t.Fatal("짧으면 그대로")
+	}
+}
+
+func TestWriterStripsTerminalControls(t *testing.T) {
+	var buf bytes.Buffer
+	mem := &Memory{}
+	s, err := Tee{mem, Writer{W: &buf}}.Start(context.Background(), Start{Kind: KindOther, Title: "org/shop‮ 배포 준비"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 레포 파일 이름에서 온 글: 양방향 글자, C1 제어 문자(JSON 인코딩이 그대로 두는 것), ESC
+	evil := "evil‮txt.exe\u0085\u009b2J\x1b[2J"
+	s.Log(context.Background(), Event{Type: ToolResult, Tool: "list_files", Output: map[string]any{"entries": []string{evil}}})
+	_ = s.Finish(context.Background(), true, "끝⁦")
+	out := buf.String()
+	if strings.ContainsAny(out, "‮\u0085\u009b\x1b⁦") {
+		t.Fatalf("터미널 제어 문자나 서식 문자가 찍힘: %q", out)
+	}
+	if !strings.Contains(out, "eviltxt.exe") || !strings.Contains(out, "org/shop 배포 준비") {
+		t.Fatalf("글자는 남아야 함: %q", out)
+	}
+	// 플랫폼과 메모리에 남는 기록은 그대로다
+	if got := fmt.Sprint(mem.Sessions[0].Events[0].Output); !strings.Contains(got, evil) {
+		t.Fatalf("기록은 바꾸지 않아야 함: %q", got)
 	}
 }
