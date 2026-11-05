@@ -171,7 +171,7 @@ AI의 출력은 엔진 Plan, 대상 CNPG 매니페스트, 근거를 묶은 JSON�
 
 | 구분 | 규칙 |
 |---|---|
-| 초안과 같아야 함 | id, source 전체, target의 env·context·namespace·cluster·dsn, gateway, files 전체(위치, rclone, flags. 빼거나 더할 수 없음), verify의 schemas·writtenRecords (없음과 빈 목록은 같게 봄). AI가 데이터나 비밀번호를 다른 곳으로 보내지 못하게 한다 |
+| 초안과 같아야 함 | id, source 전체, target의 env·context·namespace·cluster·dsn, gateway, decommission(엔진의 원본 정리, 빼거나 더하거나 바꿀 수 없음), files 전체(위치, rclone, flags. 빼거나 더할 수 없음), verify의 schemas·writtenRecords (없음과 빈 목록은 같게 봄). AI가 데이터나 비밀번호를 다른 곳으로 보내지 못하게 한다 |
 | 고정 규칙 | `verify.fenceGate` 생략은 `true`로 정규화하고 `false`는 거절. `target.manifest`는 비우거나 `attachment:target.yaml`. 검증 테이블은 초안보다 줄일 수 없음(기존 필터의 테이블도 유지) |
 | 상한값 범위 (제안값) | 네 값 모두 필수이며 0은 거절. maxDowntime(쓰기 보류) 5s~50s (게이트웨이는 55s(`-max-hold`, 앞단 ALB의 유휴 타임아웃 60s보다 짧게) 넘게 붙잡힌 쓰기에 503을 돌려주므로, 그 전에 끝나 실패한 요청이 없게 한다), switchoverTimeout 30s~3m, catchupTimeout 1m~15m, maxLagBytes 1 KiB~64 MiB |
 | 매니페스트 | `postgresql.cnpg.io/v1` Cluster 하나(64 KiB 이하, `---`나 `...`로 문서를 더 붙일 수 없음). 엔진이 Force로 적용하므로 최상위는 apiVersion·kind·metadata·spec만, metadata는 name·namespace만 (annotations·finalizers·ownerReferences로 대상 DB를 멈추거나 지우지 못하게). 이름·네임스페이스는 Plan의 대상과 같음 |

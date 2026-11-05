@@ -31,7 +31,7 @@ ai-sandbox에 main으로 합쳐진 순서대로 무엇이 생겼는지 정리했
 | [v24](#v24--실제-eks-리허설-수정) | [#28](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/28) | 11/5 14:21 | 실제 EKS에서 리허설 임시 원본이 뜨지 않던 문제 4가지 수정 | 116 |
 | [v25](#v25--ai-계획-파일-저장) | [#29](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/29) | 11/5 14:21 | AI 계획을 리포트 옆 파일로 저장 | 117 |
 | [v26](#v26--들여온-오픈소스-앱-배포-준비) | [#33](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/33) | 11/5 17:58 | 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie`로 push | 158 |
-| [v29](#v29-배포할-수-없는-앱-알리기) | [#36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36) | 머지 전 | `hopai prepare`가 플랫폼이 주지 못하는 것을 찾으면 push하지 않고 알림, 새 `platform.yaml` 계약 | 173 |
+| [v29](#v29-배포할-수-없는-앱-알리기) | [#36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36) | 머지 전 | `hopai prepare`가 플랫폼이 주지 못하는 것을 찾으면 push하지 않고 알림, 새 `platform.yaml` 계약 | 175 |
 
 - 머지 시각은 한국 시간이고, "테스트"는 그 버전에 들어 있던 테스트 함수 개수입니다.
 - 닫힌 PR #1, #2는 플랫폼의 계획 형식이 정해진 뒤 #4~#8로 나눠 다시 올렸습니다.
@@ -550,7 +550,7 @@ AI는 조사 도구로 대상 StorageClass를 보고 처음부터 맞게 고르�
 
 ## v29 배포할 수 없는 앱 알리기
 
-[PR #36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36), 머지 전, 11파일 +524 −76, 패키지 `llm`, `cmd/hopai`, `mask`
+[PR #36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36), 머지 전, 13파일 +593 −79, 패키지 `llm`, `cmd/hopai`, `mask`, `plan`
 
 **무엇이 달라졌나**
 
@@ -563,6 +563,8 @@ MySQL, Redis, 볼륨 같은 리소스 종류를 늘리려면 eks, gke, 온프레
 5. 지시문을 새 `platform.yaml` 계약에 맞췄습니다. `postgres` 리소스가 넣는 `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `JDBC_DATABASE_URL`을 앱이 읽는 이름에 `$(이름)`으로 잇습니다(예: `SPRING_DATASOURCE_URL: "$(JDBC_DATABASE_URL)"`). 시작 스크립트로 `DATABASE_URL`을 나누라는 문장은 뺐습니다. S3도 앱이 `AWS_*` 이름만 읽을 때 `$(S3_ACCESS_KEY)`처럼 잇습니다. 요청을 받지 않는 워커는 port를 비웁니다. 고정 256Mi 대신 서비스마다 `memory`(256Mi~1536Mi, 바이트 정수)와 `cpu`(50m~500m, 밀리코어 정수)를 정하고, 서비스마다 (replicas + 1) × 값을 더한 합은 memory 3Gi, cpu 1500m 이하입니다(+1은 롤링 업데이트 중에 하나 더 뜨는 Pod). 지시문의 값은 platform `pkg/appspec`의 상수에서 넣고, 범위와 합은 `appspec.Check`가 봅니다. 이를 위해 platform 모듈을 `d138f93`에서 #69가 들어간 platform main(`84e257b`)으로 올렸고, platform이 요구하는 migration-engine도 `f3b9fd8`에서 `c336658`로 올랐습니다.
 6. env와 시크릿 이름에 새 플랫폼 이름 6개를 쓰면 걸립니다. env 값의 `$(PGPASSWORD)` 같은 참조는 비밀값으로 보지 않고, `mask`도 `${VAR}`처럼 그대로 둡니다. 대신 참조는 컨테이너에 실제로 있는 이름(리소스가 있을 때 플랫폼 변수, port가 있을 때 `PORT`, 답의 시크릿, 같은 서비스 env에서 이름순으로 앞선 키)만 가리킬 수 있습니다. 없는 이름은 Kubernetes가 글자 그대로 넣기 때문에, 이렇게 막지 않으면 `$(hunter2)`처럼 비밀값을 감싸 커밋할 수 있었습니다(독립 리뷰에서 찾음). 비밀값을 시크릿 이름으로 적고 `$( )`로 감싸는 것은 시크릿 이름의 `_` 조각이 무작위 문자열처럼 보이면 막습니다. 참조와 글자가 섞인 값(`$(PORT)/s3cr3t`)은 참조 자리를 글자 하나로 두고 봅니다. 이 판정은 휴리스틱입니다.
 7. 서비스 둘이 같은 Dockerfile을 쓰면(웹과 워커) 검사를 다 통과하고도 "검사한 파일을 다시 읽을 수 없음"으로 걸리던 문제를 고쳤습니다. 겹친 Dockerfile 경로를 줄이는 `slices.Compact`가 남는 칸을 빈 문자열로 지워서, 그 빈 경로를 다시 읽으려 했습니다. v26부터 있던 문제로, 지시문의 예시 `platform.yaml`을 검사에 통과시키다 찾았습니다.
+8. 지시문에 public 서비스의 Service는 80번으로 듣는다고 적었습니다(eks, gke의 `publicService.port`). 다른 서비스는 `<name>-<서비스 이름>:<port>`로 부르고, public 서비스는 `:80`으로 부릅니다.
+9. migration-engine이 `c336658`로 오르면서 Plan에 원본 정리(`decommission`)가 생겼습니다. AI가 이것을 초안과 다르게 넣거나 빼거나 바꾸지 못하게 `CheckAgainstDraft`가 비교합니다.
 
 **어떻게 확인했나**
 
