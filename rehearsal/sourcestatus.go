@@ -10,11 +10,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/agentlog"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/mask"
 )
 
 // maxStatusLine은 상태 한 줄의 최대 글자 수다. 스케줄러 메시지는 노드마다 사유를 나열해서 길다.
 const maxStatusLine = 300
+
+// maxEvidenceBytes는 단서 전체 크기의 상한이다 (clipEvidence).
+const maxEvidenceBytes = 48 << 10
 
 // sourceNotReadyEvidence는 임시 원본이 제때 healthy가 되지 못했을 때 원인을 찾을 단서를 모은다.
 // 2026-11-05 실제 EKS 리허설이 "임시 원본이 준비되지 않음: 6m0s 안에 healthy가 되지 않음"만 남기고 끝나서,
@@ -64,7 +68,34 @@ func sourceNotReadyEvidence(ctx context.Context, cs kubernetes.Interface, ns str
 	if len(problems) > 3 {
 		problems = problems[:3]
 	}
-	return lines, strings.Join(problems, "; ")
+	return clipEvidence(lines), strings.Join(problems, "; ")
+}
+
+// logSourceStatus는 모은 줄을 줄마다 이벤트 하나로 리허설 세션에 남긴다.
+// 한 이벤트에 여러 줄을 넣으면 콘솔이 줄바꿈을 접어서 읽기 어려울 수 있고, 격리 검사 결과도 줄마다 이벤트로 남기는 방식과 같다.
+func logSourceStatus(ctx context.Context, ses agentlog.Session, lines []string) {
+	for _, l := range lines {
+		ses.Log(ctx, agentlog.Event{Type: agentlog.ToolResult, Tool: "sandbox_source_status", Status: "not_ready", Output: l})
+	}
+}
+
+// clipEvidence는 줄마다 길이를 제한하고 전체 크기를 maxEvidenceBytes 안으로 맞춘다.
+// 플랫폼은 이벤트 한 개의 입력과 출력을 64 KiB까지만 받는다. 경고 이벤트의 메시지는 길이 제한이 없어서 여기서 줄인다.
+func clipEvidence(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	total := 0
+	for i, l := range lines {
+		if r := []rune(l); len(r) > maxStatusLine {
+			l = string(r[:maxStatusLine]) + "…"
+		}
+		if total+len(l) > maxEvidenceBytes {
+			out = append(out, fmt.Sprintf("… (%d줄 생략)", len(lines)-i))
+			break
+		}
+		total += len(l)
+		out = append(out, l)
+	}
+	return out
 }
 
 // podDetail은 Pod가 왜 준비되지 않았는지 알려 주는 한 구절이다: 스케줄되지 않은 이유, 컨테이너가 기다리는 이유나 종료 코드.
