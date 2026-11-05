@@ -30,7 +30,8 @@ ai-sandbox에 main으로 합쳐진 순서대로 무엇이 생겼는지 정리했
 | [v23](#v23--격리-검사-대기) | [#27](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/27) | 11/5 14:20 | 격리 검사 Pod가 정책이 붙은 뒤에 연결, 실패 항목을 메시지에 남김 | 114 |
 | [v24](#v24--실제-eks-리허설-수정) | [#28](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/28) | 11/5 14:21 | 실제 EKS에서 리허설 임시 원본이 뜨지 않던 문제 4가지 수정 | 116 |
 | [v25](#v25--ai-계획-파일-저장) | [#29](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/29) | 11/5 14:21 | AI 계획을 리포트 옆 파일로 저장 | 117 |
-| [v26](#v26--들여온-오픈소스-앱-배포-준비) | [#33](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/33) | 머지 전 | 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie`로 push | 158 |
+| [v26](#v26--들여온-오픈소스-앱-배포-준비) | [#33](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/33) | 11/5 17:58 | 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie`로 push | 158 |
+| [v29](#v29-배포할-수-없는-앱-알리기) | [#36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36) | 머지 전 | `hopai prepare`가 플랫폼이 주지 못하는 것을 찾으면 push하지 않고 알림, 새 `platform.yaml` 계약 | 171 |
 
 - 머지 시각은 한국 시간이고, "테스트"는 그 버전에 들어 있던 테스트 함수 개수입니다.
 - 닫힌 PR #1, #2는 플랫폼의 계획 형식이 정해진 뒤 #4~#8로 나눠 다시 올렸습니다.
@@ -505,7 +506,7 @@ AI는 조사 도구로 대상 StorageClass를 보고 처음부터 맞게 고르�
 
 ## v26 · 들여온 오픈소스 앱 배포 준비
 
-[PR #33](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/33) · 머지 전 · 12파일 +3,645 −8 · 패키지 `llm`, `cmd/hopai` · platform ADR 0023(푸시 토큰)과 짝
+[PR #33](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/33) · 11/5 17:58 · 12파일 +3,645 −8 · 패키지 `llm`, `cmd/hopai` · platform ADR 0023(푸시 토큰)과 짝
 
 **무엇이 달라졌나**
 
@@ -544,6 +545,41 @@ AI는 조사 도구로 대상 StorageClass를 보고 처음부터 맞게 고르�
 | 토큰 찾기 | 출력, 에이전트 기록, git 명령줄, AI 요청, 플랫폼 요청 어디에도 없음 |
 
 운영자 설정 없이도 실제 GitHub(`git ls-remote https://github.com/octocat/Hello-World.git`)에 닿는 것을 Git for Windows에서 확인했습니다. 실제 Claude와 플랫폼 푸시 토큰 API로는 돌려 보지 못했습니다.
+
+---
+
+## v29 배포할 수 없는 앱 알리기
+
+[PR #36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36), 머지 전, STATS, 패키지 `llm`, `cmd/hopai`, `mask`
+
+**무엇이 달라졌나**
+
+MySQL, Redis, 볼륨 같은 리소스 종류를 늘리려면 eks, gke, 온프레미스 모두에서 만드는 기능과 이전 엔진의 데이터 이전이 함께 있어야 합니다. 그래서 종류를 늘리지 않고, `hopai prepare`가 그런 것이 꼭 필요한 앱을 옮기기 전에 찾아 알리게 했습니다.
+
+1. AI 답에 `deployable`과 `blockers`(`{need, reason}`, 5개까지)가 생겼습니다.
+2. 우회할 수 없으면 AI가 `deployable: false`로 답합니다. 예: MySQL이나 MongoDB만 지원함, 남아야 하는 볼륨이 꼭 필요함, HTTP가 아닌 TCP나 UDP 포트를 밖에 열어야 함, SMTP 서버에 붙지 못하면 시작하지 않음. 그러면 파일 검사, 커밋, push를 하지 않고, 플랫폼이 주지 못하는 것과 근거를 출력하고, 에이전트 세션(콘솔)에 `decision` 이벤트와 요약 `배포할 수 없음: MySQL`로 남기고, 종료 코드 3으로 끝납니다.
+3. 우회할 수 있으면 우회하고 메모에 적습니다. 캐시로만 쓰는 Redis는 앱의 서비스 하나로(따로 Dockerfile, 1024 이상 port, root 아님, 볼륨 없음), 따로 뜨는 프런트엔드와 백엔드는 공개 프록시 서비스 하나로, 로컬 디스크의 업로드 파일은 `s3` 리소스로 바꿉니다.
+4. AI가 정하는 것은 "배포할 수 없음"뿐입니다. `deployable: true`여도 배포할 수 있는지는 지금과 같은 검사가 정하고, 걸리면 지금처럼 다시 묻습니다. `true`인데 `blockers`가 있거나 `false`인데 `blockers`가 없으면 걸립니다.
+5. 지시문을 새 `platform.yaml` 계약에 맞췄습니다. `postgres` 리소스가 넣는 `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `JDBC_DATABASE_URL`을 앱이 읽는 이름에 `$(이름)`으로 잇습니다(예: `SPRING_DATASOURCE_URL: "$(JDBC_DATABASE_URL)"`). 시작 스크립트로 `DATABASE_URL`을 나누라는 문장은 뺐습니다. S3도 앱이 `AWS_*` 이름만 읽을 때 `$(S3_ACCESS_KEY)`처럼 잇습니다. 요청을 받지 않는 워커는 port를 비웁니다. 고정 256Mi 대신 서비스마다 `memory`와 `cpu`를 정하고, 범위와 앱 전체 합은 `llm/prepare.go`의 상수 블록 한 곳에 두어 지시문과 검사가 같이 씁니다.
+6. env와 시크릿 이름에 새 플랫폼 이름 6개를 쓰면 걸립니다. env 값의 `$(PGPASSWORD)` 같은 참조는 비밀값으로 보지 않고, `mask`도 `${VAR}`처럼 그대로 둡니다.
+
+**어떻게 확인했나**
+
+가짜 AI, 가짜 플랫폼, 로컬 git 원격으로 확인했습니다.
+
+| 경우 | 결과 |
+| --- | --- |
+| AI가 MySQL과 TCP 25 수신을 이유로 `deployable: false` (쓰다 만 `platform.yaml` 있음) | 다시 묻지 않음, 커밋과 push 없음, `hopcharlie` 브랜치 없음, 이유 출력, 플랫폼 세션 기록에 `need`와 요약, 종료 코드 3 |
+| docker-doom처럼 서비스 하나짜리 앱에 `deployable: true` | 지금처럼 커밋하고 push, 종료 코드 0 |
+| `false`인데 `blockers` 없음, `true`인데 `blockers` 있음, env `PGHOST`, 시크릿 `PGPASSWORD` | 세 번 묻고 실패 |
+| env `KC_DB_PASSWORD: "$(PGPASSWORD)"`, `jdbc:postgresql://$(PGHOST):$(PGPORT)/$(PGDATABASE)` | 비밀값으로 보지 않음 (`$(PGPASSWORD)hunter2`는 걸림) |
+| `memory`, `cpu` 범위 밖, 수량이 아닌 값(`512MB`), 앱 전체 합 초과 | 걸림. 경계값은 상수 블록에서 만들어 값이 바뀌어도 그대로 돔 |
+
+`go vet`, gofmt, `go test ./...`가 통과했습니다. 실제 Claude와 플랫폼으로는 돌려 보지 못했습니다.
+
+**남은 일**
+
+- 고정한 platform 모듈(`d138f93`)의 `appspec`은 아직 port를 필수로 보고 `memory`, `cpu`를 모르는 키로 거절합니다. 새 계약이 platform에 들어간 뒤 모듈을 올려야 port 없는 워커와 자원 값이 검사를 통과합니다.
 
 ---
 
