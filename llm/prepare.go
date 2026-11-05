@@ -355,7 +355,7 @@ func (r *repoDir) checkPreparation(raw []byte) (*Preparation, plan.Issues) {
 	if len(is) > 0 {
 		return nil, is
 	}
-	paths := append(append([]string{appspec.FileName}, dockerfiles...), p.Files...)
+	paths := append(append([]string{appspec.FileName}, p.Dockerfiles...), p.Files...)
 	slices.Sort(paths)
 	var err error
 	if p.Validated, err = r.snapshot(slices.Compact(paths)); err != nil {

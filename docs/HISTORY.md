@@ -562,6 +562,7 @@ MySQL, Redis, 볼륨 같은 리소스 종류를 늘리려면 eks, gke, 온프레
 4. AI가 정하는 것은 "배포할 수 없음"뿐입니다. `deployable: true`여도 배포할 수 있는지는 지금과 같은 검사가 정하고, 걸리면 지금처럼 다시 묻습니다. `true`인데 `blockers`가 있거나 `false`인데 `blockers`가 없으면 걸립니다.
 5. 지시문을 새 `platform.yaml` 계약에 맞췄습니다. `postgres` 리소스가 넣는 `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `JDBC_DATABASE_URL`을 앱이 읽는 이름에 `$(이름)`으로 잇습니다(예: `SPRING_DATASOURCE_URL: "$(JDBC_DATABASE_URL)"`). 시작 스크립트로 `DATABASE_URL`을 나누라는 문장은 뺐습니다. S3도 앱이 `AWS_*` 이름만 읽을 때 `$(S3_ACCESS_KEY)`처럼 잇습니다. 요청을 받지 않는 워커는 port를 비웁니다. 고정 256Mi 대신 서비스마다 `memory`(256Mi~1536Mi)와 `cpu`(50m~500m)를 정하고, 서비스마다 (replicas + 1) × 값을 더한 합은 memory 3Gi, cpu 1500m 이하입니다(+1은 롤링 업데이트 중에 하나 더 뜨는 Pod). 값은 platform #69와 같고 `llm/prepare.go`의 상수 블록 한 곳에 두어 지시문과 검사가 같이 씁니다.
 6. env와 시크릿 이름에 새 플랫폼 이름 6개를 쓰면 걸립니다. env 값의 `$(PGPASSWORD)` 같은 참조는 비밀값으로 보지 않고, `mask`도 `${VAR}`처럼 그대로 둡니다. 대신 참조는 컨테이너에 실제로 있는 이름(리소스가 있을 때 플랫폼 변수, port가 있을 때 `PORT`, 답의 시크릿, 같은 서비스 env에서 이름순으로 앞선 키)만 가리킬 수 있습니다. 없는 이름은 Kubernetes가 글자 그대로 넣기 때문에, 이렇게 막지 않으면 `$(hunter2)`처럼 비밀값을 감싸 커밋할 수 있었습니다(독립 리뷰에서 찾음).
+7. 서비스 둘이 같은 Dockerfile을 쓰면(웹과 워커) 검사를 다 통과하고도 "검사한 파일을 다시 읽을 수 없음"으로 걸리던 문제를 고쳤습니다. 겹친 Dockerfile 경로를 줄이는 `slices.Compact`가 남는 칸을 빈 문자열로 지워서, 그 빈 경로를 다시 읽으려 했습니다. v26부터 있던 문제로, 지시문의 예시 `platform.yaml`을 검사에 통과시키다 찾았습니다.
 
 **어떻게 확인했나**
 

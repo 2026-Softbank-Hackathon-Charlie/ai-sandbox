@@ -453,6 +453,26 @@ func TestPrepareAcceptsEnvRefs(t *testing.T) {
 	}
 }
 
+// TestPrepareSharedDockerfile은 서비스 둘이 같은 Dockerfile을 쓸 때(웹과 워커) 검사를 통과하는지 본다.
+// slices.Compact가 지운 칸을 다시 읽어 "검사한 파일을 다시 읽을 수 없음"으로 걸리던 문제다.
+func TestPrepareSharedDockerfile(t *testing.T) {
+	dir := t.TempDir()
+	spec := goodSpec + "  - name: worker\n    dockerfile: hopcharlie.Dockerfile\n    port: 9090\n"
+	f := &fakeAPI{replies: []reply{
+		{tool: "write_file", toolInput: writeInput("platform.yaml", spec)},
+		{tool: "write_file", toolInput: writeInput("hopcharlie.Dockerfile", goodDockerfile)},
+		{text: goodAnswer},
+	}}
+	a, _ := newAgent(t, f)
+	p, _, err := a.Prepare(context.Background(), PrepareInput{Repo: "org/shop", Branch: "hopcharlie", Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(p.Dockerfiles, ",") != "hopcharlie.Dockerfile" || len(p.Validated) != 2 {
+		t.Fatalf("Dockerfile %v, 검사한 파일 %d개", p.Dockerfiles, len(p.Validated))
+	}
+}
+
 func TestPrepareShowsLastDeployment(t *testing.T) {
 	dir := t.TempDir()
 	f := &fakeAPI{replies: []reply{
