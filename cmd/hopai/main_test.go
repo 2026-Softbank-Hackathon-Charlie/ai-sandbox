@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -217,5 +219,29 @@ func TestSourceCluster(t *testing.T) {
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvr)
 	if _, err := sourceCluster(context.Background(), dyn, "moimroom", "moimroom-db-gke"); err == nil {
 		t.Fatal("원본 클러스터가 없으면 오류여야 함")
+	}
+}
+
+func TestSaveProposal(t *testing.T) {
+	raw, err := os.ReadFile("../../plan/testdata/proposal.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prop plan.Proposal
+	if err := json.Unmarshal(raw, &prop); err != nil {
+		t.Fatal(err)
+	}
+	prop.Plan.Source.DSN = "postgres://app:s3cr3t-plain@db:5432/app"
+	out := filepath.Join(t.TempDir(), "report-gke-to-eks.json")
+	path, err := saveProposal(out, &prop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(path) != "report-gke-to-eks-proposal.json" {
+		t.Fatalf("리포트 옆에 써야 함: %s", path)
+	}
+	b, _ := os.ReadFile(path)
+	if strings.Contains(string(b), "s3cr3t-plain") || !strings.Contains(string(b), "manifest") {
+		t.Fatalf("비밀값은 가리고 매니페스트는 남겨야 함:\n%s", b)
 	}
 }

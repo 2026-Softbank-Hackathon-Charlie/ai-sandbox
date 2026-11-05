@@ -20,6 +20,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -161,6 +163,15 @@ func main() {
 	rec, submitted, err := submit(ctx, pc, prop)
 	must(err)
 	fmt.Fprintf(os.Stderr, "Plan %s 제출 (revision %d, 계획 세션 %s)\n", rec.Ref, rec.Revision, planSession)
+	// AI가 쓴 Plan·대상 매니페스트·근거를 리포트 옆에 바로 남긴다. 플랫폼에는 첨부를 내려받는 API가 없고,
+	// 리허설이 실패하거나 중간에 멈춰도 무엇을 리허설했는지 볼 수 있어야 한다. 비밀값은 가린다.
+	if *out != "" {
+		if path, err := saveProposal(*out, prop); err != nil {
+			fmt.Fprintln(os.Stderr, "경고: AI 계획을 파일로 남기지 못함:", err)
+		} else {
+			fmt.Fprintln(os.Stderr, "AI 계획:", path)
+		}
+	}
 	if demo != nil {
 		if err := logDemoSetting(ctx, sink, rec.Ref, *demo); err != nil {
 			fmt.Fprintln(os.Stderr, "경고: 데모 설정을 에이전트 기록에 남기지 못함:", err)
@@ -449,4 +460,18 @@ func sourceCluster(ctx context.Context, dyn dynamic.Interface, ns, name string) 
 		}
 	}
 	return sc, nil
+}
+
+// saveProposal은 AI 계획을 리포트 파일 옆(<리포트 이름>-proposal.json)에 비밀값을 가려 쓴다.
+func saveProposal(out string, prop *plan.Proposal) (string, error) {
+	b, err := mask.JSON(prop)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, b, "", "  "); err != nil {
+		return "", err
+	}
+	path := strings.TrimSuffix(out, filepath.Ext(out)) + "-proposal.json"
+	return path, os.WriteFile(path, buf.Bytes(), 0o600)
 }
