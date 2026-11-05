@@ -550,7 +550,7 @@ AI는 조사 도구로 대상 StorageClass를 보고 처음부터 맞게 고르�
 
 ## v29 배포할 수 없는 앱 알리기
 
-[PR #36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36), 머지 전, 13파일 +593 −79, 패키지 `llm`, `cmd/hopai`, `mask`, `plan`
+[PR #36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36), 머지 전, 13파일 +596 −80, 패키지 `llm`, `cmd/hopai`, `mask`, `plan`
 
 **무엇이 달라졌나**
 
