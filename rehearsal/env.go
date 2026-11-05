@@ -2,7 +2,10 @@ package rehearsal
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -12,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -273,12 +277,30 @@ func DSN(db DBInfo, password string, port int) string {
 // 몇 초 뒤 같은 비밀번호·같은 프록시로는 바로 접속됐다. kind에서는 드러나지 않았다.
 var SeedConnectWait = 60 * time.Second
 
-// connectRetry는 wait 동안 3초마다 다시 접속해 본다. 마지막 오류를 돌려준다.
+// retryableConnectErr는 임시 원본이 막 healthy가 된 때 잠깐 나타나는 접속 오류만 true다.
+// 비밀번호 인증 실패(28P01), 서버가 아직 연결을 받지 못함(57P03), 접속 수 초과(53300),
+// 그리고 프록시 쪽 연결 오류(연결 거부·끊김)가 대상이다. 잘못된 DSN이나 DB 없음 같은 영구 오류는
+// 60초를 기다리지 않고 바로 돌려준다.
+func retryableConnectErr(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "28P01", "57P03", "53300":
+			return true
+		}
+		return false
+	}
+	var opErr *net.OpError
+	return errors.As(err, &opErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// connectRetry는 wait 동안 3초마다 다시 접속해 본다. 일시적인 오류(retryableConnectErr)만 다시 시도하고,
+// 마지막 오류를 돌려준다.
 func connectRetry(ctx context.Context, dsn string, wait time.Duration) (*pgx.Conn, error) {
 	deadline := time.Now().Add(wait)
 	for {
 		conn, err := pgx.Connect(ctx, dsn)
-		if err == nil || time.Now().After(deadline) || ctx.Err() != nil {
+		if err == nil || !retryableConnectErr(err) || time.Now().After(deadline) || ctx.Err() != nil {
 			return conn, err
 		}
 		select {
@@ -322,16 +344,22 @@ func Seed(ctx context.Context, dsn string, schemas []string, rows int) error {
 // 임시 원본은 리허설 대상이 아니라 실제 원본을 대신하는 것이므로, 샌드박스 클러스터에서 반드시 뜨는 곳을 골라야 한다.
 // 기본 StorageClass가 없는 클러스터(예: 워크로드 EKS)에서 비워 두면 PVC가 영원히 Pending이 되고
 // 경고 이벤트도 되풀이되지 않아 멈춤 감지에 걸리지 않는다 (2026-11-05 실제 EKS에서 확인).
-//   - 기본 StorageClass가 있으면 비운다.
+//   - 기본 StorageClass가 있고 지우면 디스크도 지우는 것(Delete)이면 비운다. 기본값이 Retain이면 아래 규칙으로 Delete인 것을 찾고, 없을 때만 기본값을 쓴다.
 //   - 대상 매니페스트의 StorageClass가 이 클러스터에 있고 지우면 디스크도 지우는 것(Delete)이면 그것.
 //   - 아니면 Delete인 것 중 CSI 드라이버를 먼저, 이름순으로 첫 번째. Retain은 샌드박스를 지워도 디스크가 남으므로 고르지 않는다.
 func TempStorageClass(scs []storagev1.StorageClass, targetManifest string) (string, error) {
 	deletes := func(s storagev1.StorageClass) bool {
 		return s.ReclaimPolicy == nil || *s.ReclaimPolicy == corev1.PersistentVolumeReclaimDelete
 	}
+	// 기본값이 지우면 디스크도 지우는 것이면 그대로 쓴다. 기본값이 Retain이면 샌드박스를 지워도 디스크가 남으므로
+	// 아래에서 Delete인 것을 찾고, 없을 때만 기본값을 쓴다.
+	hasDefault := false
 	for _, s := range scs {
 		if s.Annotations["storageclass.kubernetes.io/is-default-class"] == "true" {
-			return "", nil
+			if deletes(s) {
+				return "", nil
+			}
+			hasDefault = true
 		}
 	}
 	var doc map[string]any
@@ -350,6 +378,9 @@ func TempStorageClass(scs []storagev1.StorageClass, targetManifest string) (stri
 		cands = append(cands, s)
 	}
 	if len(cands) == 0 {
+		if hasDefault {
+			return "", nil // Delete인 것이 없으면 Retain 기본값이라도 써서 뜨게 한다
+		}
 		return "", fmt.Errorf("샌드박스 클러스터에 기본 StorageClass도, 지우면 디스크도 지우는(Delete) StorageClass도 없음")
 	}
 	csi := func(s storagev1.StorageClass) bool { return strings.Contains(s.Provisioner, ".csi.") }

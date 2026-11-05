@@ -543,3 +543,43 @@ func TestIsolationTargetsForCNPG(t *testing.T) {
 		t.Fatalf("CNPG: %v", got)
 	}
 }
+
+func TestFailed(t *testing.T) {
+	rs := []CheckResult{
+		{Name: "dns", Expect: ExpectOpen, Got: "open", Pass: true},
+		{Name: "db", Expect: ExpectBlocked, Got: "open", Pass: false},
+		{Name: "metadata", Expect: ExpectBlocked, Got: "open", Pass: false},
+	}
+	got := Failed(rs)
+	want := []string{"db: blocked 기대, open", "metadata: blocked 기대, open"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("실패 항목 = %v, want %v", got, want)
+	}
+	if len(Failed([]CheckResult{{Name: "dns", Expect: ExpectOpen, Got: "open", Pass: true}})) != 0 {
+		t.Fatal("모두 통과하면 비어 있어야 함")
+	}
+	if len(Failed(nil)) != 0 {
+		t.Fatal("검사가 없으면 비어 있어야 함")
+	}
+}
+
+func TestEffectiveSettle(t *testing.T) {
+	for _, c := range []struct{ in, want time.Duration }{
+		{0, DefaultSettle}, // 비우면 기본값
+		{-1, 0},            // 음수는 기다리지 않음 (strict 모드 직접 확인)
+		{-time.Hour, 0},    //
+		{3 * time.Second, 3 * time.Second},
+	} {
+		if got := effectiveSettle(c.in); got != c.want {
+			t.Errorf("effectiveSettle(%s) = %s, want %s", c.in, got, c.want)
+		}
+	}
+	// 대기 0초도 검사 Pod 인자로 만들 수 있어야 한다
+	p, err := ProbePod("ns", "busybox", effectiveSettle(-1), []Target{{Name: "x", Host: "10.0.0.1", Port: 80, Expect: ExpectBlocked}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args := p.Spec.Containers[0].Args; args[3] != "0" {
+		t.Fatalf("대기 없음은 인자 0이어야 함: %v", args[:4])
+	}
+}
