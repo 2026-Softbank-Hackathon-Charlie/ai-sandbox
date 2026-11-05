@@ -307,8 +307,17 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 		return a, nil, nil
 	}
 	if err := waitHealthy(ctx, aiDyn, sb.Namespace, cur.Plan.Source.Cluster, c.SourceTimeout); err != nil {
-		a.Evidence = warningEvents(ctx, aiCS, sb.Namespace)
-		failf("임시 원본이 준비되지 않음: %v", err)
+		// 샌드박스를 곧 지우므로 원인 단서(Pod·PVC 상태, 경고 이벤트)를 지우기 전에 세션 로그와 리포트에 남긴다.
+		var brief string
+		a.Evidence, brief = sourceNotReadyEvidence(ctx, aiCS, sb.Namespace)
+		if len(a.Evidence) > 0 {
+			ses.Log(ctx, agentlog.Event{Type: agentlog.ToolResult, Tool: "sandbox_source_status", Status: "not_ready", Output: strings.Join(a.Evidence, "\n")})
+		}
+		if brief != "" {
+			failf("임시 원본이 준비되지 않음: %v (%s)", err, brief)
+		} else {
+			failf("임시 원본이 준비되지 않음: %v", err)
+		}
 		return a, nil, nil
 	}
 	sec, err := aiCS.CoreV1().Secrets(sb.Namespace).Get(ctx, cur.Plan.Source.Cluster+"-app", metav1.GetOptions{})
