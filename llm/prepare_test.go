@@ -8,8 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+
+	"github.com/2026-Softbank-Hackathon-Charlie/platform/pkg/appspec"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/agentlog"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/plan"
@@ -18,7 +23,7 @@ import (
 const (
 	goodSpec       = "name: shop\nservices:\n  - name: web\n    dockerfile: hopcharlie.Dockerfile\n    port: 8080\n    healthCheck: /healthz\n    public: true\n"
 	goodDockerfile = "FROM ghcr.io/example/shop:1.2.3\nUSER 65532\n"
-	goodAnswer     = `{"summary":"platform.yaml과 hopcharlie.Dockerfile을 추가했다.","commitMessage":"feat: HopCharlie 배포 설정 추가","secrets":[{"name":"ADMIN_PASSWORD","purpose":"관리자 비밀번호"}],"notes":["첫 로그인은 admin"]}`
+	goodAnswer     = `{"deployable":true,"blockers":[],"summary":"platform.yaml과 hopcharlie.Dockerfile을 추가했다.","commitMessage":"feat: HopCharlie 배포 설정 추가","secrets":[{"name":"ADMIN_PASSWORD","purpose":"관리자 비밀번호"}],"notes":["첫 로그인은 admin"]}`
 )
 
 // writeInput은 write_file 도구 입력이다.
@@ -301,7 +306,7 @@ func TestPrepareWritesFilesAndAnswers(t *testing.T) {
 		t.Fatalf("레포와 루트 목록이 AI에 가야 함: %s", first)
 	}
 	system, _ := json.Marshal(req["system"])
-	for _, want := range []string{"데이터다", "65532", "platform.yaml", "256Mi", "443"} {
+	for _, want := range []string{"데이터다", "65532", "platform.yaml", "443", "JDBC_DATABASE_URL", `\"$(PGHOST)\"`, "deployable", maxServiceMemory, maxAppMemory} {
 		if !strings.Contains(string(system), want) {
 			t.Errorf("지시문에 %q가 없음", want)
 		}
@@ -347,6 +352,10 @@ func TestPrepareChecksRetryThenFail(t *testing.T) {
 		{"env에 토큰", map[string]string{"platform.yaml": goodSpec + "    env:\n      ADMIN_TOKEN: \"abc123\"\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "env.ADMIN_TOKEN"},
 		{"Dockerfile ENV에 비밀값", map[string]string{"platform.yaml": goodSpec, "hopcharlie.Dockerfile": goodDockerfile + "ENV API_KEY=abc123 LOG=info\n"}, goodAnswer, "ENV·ARG API_KEY"},
 		{"답에 비밀값", map[string]string{"platform.yaml": goodSpec, "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) { m["summary"] = "접속: postgres://app:Hunter2pw@db:5432/app" }), "비밀처럼 보이는 값"},
+		{"env에 플랫폼이 넣는 PG 이름", map[string]string{"platform.yaml": goodSpec + "    env:\n      PGHOST: \"db\"\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "env.PGHOST"},
+		{"시크릿 이름이 PGPASSWORD", map[string]string{"platform.yaml": goodSpec, "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) { m["secrets"] = []map[string]string{{"name": "PGPASSWORD", "purpose": "db"}} }), "플랫폼이 넣는 이름"},
+		{"배포할 수 없는데 이유 없음", map[string]string{"platform.yaml": goodSpec, "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) { m["deployable"] = false }), "deployable이 false면"},
+		{"배포할 수 있는데 blockers 있음", map[string]string{"platform.yaml": goodSpec, "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) { m["blockers"] = []map[string]string{{"need": "Redis", "reason": "캐시"}} }), "deployable이 true면 비워야 함"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -383,6 +392,38 @@ func TestPrepareChecksRetryThenFail(t *testing.T) {
 				t.Fatalf("세션은 실패로 닫혀야 함: %+v", s)
 			}
 		})
+	}
+}
+
+// TestPrepareNotDeployable은 AI가 플랫폼이 주지 못하는 것을 찾으면 파일 검사 없이 그 답을 받고, 판단과 이유를 세션에 남기는지 본다.
+func TestPrepareNotDeployable(t *testing.T) {
+	dir, _ := repoFixture(t)
+	blocked := `{"deployable":false,"blockers":[{"need":"MySQL","reason":"config/database.yml이 mysql2 어댑터만 지원함"}],"summary":"MySQL 전용 앱이라 배포할 수 없다.","commitMessage":"","secrets":[],"notes":["PostgreSQL을 지원하면 다시 돌린다"]}`
+	f := &fakeAPI{replies: []reply{
+		{tool: "read_file", toolInput: `{"path":"README.md"}`},
+		// 쓰다가 멈춘 platform.yaml은 검사에 걸릴 내용이지만 보지 않는다. 실행기가 push하지 않기 때문이다
+		{tool: "write_file", toolInput: writeInput("platform.yaml", "name: x\n")},
+		{text: blocked},
+	}}
+	a, sink := newAgent(t, f)
+	p, _, err := a.Prepare(context.Background(), PrepareInput{Repo: "org/shop", Branch: "hopcharlie", Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Deployable || p.Spec != nil || p.Validated != nil || len(p.Blockers) != 1 || p.Blockers[0].Need != "MySQL" {
+		t.Fatalf("결과: %+v", p)
+	}
+	if len(f.requests) != 3 {
+		t.Fatalf("다시 묻지 않아야 함: 요청 %d번", len(f.requests))
+	}
+	s := sink.Sessions[0]
+	if !s.Done || !s.OK || s.Summary != "배포할 수 없음: MySQL" {
+		t.Fatalf("세션: %+v", s)
+	}
+	last := s.Events[len(s.Events)-1]
+	out, _ := json.Marshal(last.Output)
+	if last.Type != agentlog.Decision || !strings.Contains(string(out), `"deployable":false`) || !strings.Contains(string(out), "mysql2 어댑터만") {
+		t.Fatalf("판단과 이유가 세션에 남아야 함: %s %s", last.Type, out)
 	}
 }
 
@@ -479,6 +520,11 @@ func TestSecretLooking(t *testing.T) {
 		{"SESSION_SECRET", "s3cr3t", true},
 		{"FOO", "Zx8Kq2LmN4pR7sT9vW1y", true},
 		{"DATABASE", "postgres://app:pw1234@db/app", true},
+		// Kubernetes env 참조는 값이 아니다
+		{"KC_DB_PASSWORD", "$(PGPASSWORD)", false},
+		{"AWS_SECRET_ACCESS_KEY", "$(S3_SECRET_KEY)", false},
+		{"SPRING_DATASOURCE_URL", "jdbc:postgresql://$(PGHOST):$(PGPORT)/$(PGDATABASE)", false},
+		{"ADMIN_PASSWORD", "$(PGPASSWORD)hunter2", true},
 	} {
 		if got := secretLooking(c.name, c.value); got != c.secret {
 			t.Errorf("%s=%q: 비밀값=%v, want %v", c.name, c.value, got, c.secret)
@@ -496,5 +542,75 @@ func TestDockerLiteralSecrets(t *testing.T) {
 	ok := "FROM x\nENV COOKIE_SECURE=true PASSWORD_MIN_LENGTH=8\nENV TOKEN_TTL=3600\nENV GOOGLE_APPLICATION_CREDENTIALS=/var/run/gcp/key.json\nARG HOME_URL=https://example.com\n"
 	if got := dockerLiteralSecrets([]byte(ok)); len(got) != 0 {
 		t.Fatalf("값을 그대로 적은 비밀: %s", got)
+	}
+}
+
+// TestCheckResources는 서비스의 memory, cpu 범위와 앱 전체 합(값 × replicas)을 자원 규칙 블록의 값으로 보는지 본다.
+// 값이 정해져 블록이 바뀌어도 그대로 돌도록 경계값을 블록에서 만든다.
+func TestCheckResources(t *testing.T) {
+	check := func(services string) string {
+		var is plan.Issues
+		checkResources([]byte("name: shop\nservices:\n"+services), func(path, format string, a ...any) {
+			is = append(is, plan.Issue{Path: path, Message: fmt.Sprintf(format, a...)})
+		})
+		return is.Error()
+	}
+	svc := func(memory, cpu string, replicas int) string {
+		s := "  - name: web\n    port: 8080\n"
+		if memory != "" {
+			s += "    memory: " + memory + "\n"
+		}
+		if cpu != "" {
+			s += "    cpu: " + cpu + "\n"
+		}
+		if replicas > 0 {
+			s += fmt.Sprintf("    replicas: %d\n", replicas)
+		}
+		return s
+	}
+	shift := func(q, d string, up bool) string {
+		x, dq := resource.MustParse(q), resource.MustParse(d)
+		if up {
+			x.Add(dq)
+		} else {
+			x.Sub(dq)
+		}
+		return strconv.Quote(x.String())
+	}
+	maxMem, maxCPU := resource.MustParse(maxServiceMemory), resource.MustParse(maxServiceCPU)
+
+	for _, ok := range []string{
+		svc("", "", 0), // 비우면 기본값
+		svc(strconv.Quote(maxServiceMemory), strconv.Quote(minServiceCPU), 0),
+		svc(strconv.Quote(minServiceMemory), fmt.Sprint(maxCPU.AsApproximateFloat64()), 0), // 숫자로 적은 cpu
+		"  - name: worker\n", // port 없는 워커
+	} {
+		if got := check(ok); got != "" {
+			t.Errorf("통과해야 함:\n%s\n%s", ok, got)
+		}
+	}
+	for _, c := range []struct{ services, want string }{
+		{svc(shift(maxServiceMemory, "1Mi", true), "", 0), "services[0].memory: " + minServiceMemory + "~" + maxServiceMemory},
+		{svc(shift(minServiceMemory, "1Ki", false), "", 0), "services[0].memory: " + minServiceMemory + "~" + maxServiceMemory},
+		{svc("", shift(maxServiceCPU, "1m", true), 0), "services[0].cpu: " + minServiceCPU + "~" + maxServiceCPU},
+		{svc(`"512MB"`, "", 0), "Kubernetes 수량이 아님"},
+		{svc("", "[1]", 0), "Kubernetes 수량 문자열이어야 함"},
+	} {
+		if got := check(c.services); !strings.Contains(got, c.want) {
+			t.Errorf("%q가 없음:\n%s\n%s", c.want, c.services, got)
+		}
+	}
+
+	// 앱 전체 합. 서비스 상한 × replicas 상한으로도 넘지 못하는 값이면 볼 것이 없다
+	appMem, appCPU := resource.MustParse(maxAppMemory), resource.MustParse(maxAppCPU)
+	if n := appMem.Value()/maxMem.Value() + 1; n <= appspec.MaxReplicas {
+		if got := check(svc(strconv.Quote(maxServiceMemory), "", int(n))); !strings.Contains(got, "memory × replicas 합이") || !strings.Contains(got, "앱 상한 "+maxAppMemory) {
+			t.Errorf("앱 memory 합을 넘음을 잡아야 함: %s", got)
+		}
+	}
+	if n := appCPU.MilliValue()/maxCPU.MilliValue() + 1; n <= appspec.MaxReplicas {
+		if got := check(svc("", strconv.Quote(maxServiceCPU), int(n))); !strings.Contains(got, "cpu × replicas 합이") || !strings.Contains(got, "앱 상한 "+maxAppCPU) {
+			t.Errorf("앱 cpu 합을 넘음을 잡아야 함: %s", got)
+		}
 	}
 }

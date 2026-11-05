@@ -1,8 +1,21 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["summary", "commitMessage", "secrets", "notes"],
+  "required": ["deployable", "blockers", "summary", "commitMessage", "secrets", "notes"],
   "properties": {
+    "deployable": { "type": "boolean" },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["need", "reason"],
+        "properties": {
+          "need": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    },
     "summary": { "type": "string" },
     "commitMessage": { "type": "string" },
     "secrets": {

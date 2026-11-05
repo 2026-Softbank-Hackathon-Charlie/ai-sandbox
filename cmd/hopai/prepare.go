@@ -6,6 +6,7 @@ package main
 //	→ git으로 클론(hopcharlie 브랜치가 있으면 그 위에서, 없으면 기본 브랜치에서 새로)
 //	→ (-deployment) 지난 배포의 실패 줄을 가려서 AI에 넣음
 //	→ AI가 클론 안의 파일만 읽고 씀(llm.Prepare): platform.yaml과 Dockerfile
+//	→ AI가 플랫폼이 주지 못하는 것(MySQL, 남아야 하는 볼륨 등)을 찾았으면 push하지 않고 그것을 출력, 종료 코드 3
 //	→ 검사를 통과하면 고정 작성자로 커밋하고 hopcharlie에 fast-forward로만 push
 //	→ 운영자가 할 일 출력(시크릿 넣기, 앱 등록 또는 자동 재배포)
 //
@@ -44,7 +45,13 @@ const prepareBranch = "hopcharlie"
 
 const prepareUsage = "사용법: hopai prepare -repo OWNER/NAME [-deployment DEP_ID]"
 
-// prepareMain은 hopai prepare의 진입점이다. 종료 코드는 hopai run과 같다 (성공 0, 실패 1, 사용법 2).
+// exitNotDeployable은 AI가 플랫폼이 주지 못하는 것을 찾아 push하지 않았을 때의 종료 코드다.
+const exitNotDeployable = 3
+
+// errNotDeployable은 AI가 플랫폼이 주지 못하는 것(blockers)을 찾아 push하지 않았을 때다.
+var errNotDeployable = errors.New("플랫폼이 주지 못하는 것이 필요한 앱이라 push하지 않음")
+
+// prepareMain은 hopai prepare의 진입점이다. 종료 코드는 hopai run과 같고(성공 0, 실패 1, 사용법 2), 배포할 수 없는 앱이면 3이다.
 func prepareMain(args []string) int {
 	fs := flag.NewFlagSet("prepare", flag.ContinueOnError)
 	repo := fs.String("repo", "", "들여온 레포 OWNER/NAME (플랫폼 scripts/import-repo.sh로 만든 비공개 사본)")
@@ -81,11 +88,20 @@ func prepareMain(args []string) int {
 		githubAPI: "https://api.github.com",
 		stdout:    os.Stdout, stderr: os.Stderr,
 	}, *repo, *dep)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "오류:", err)
-		return 1
+	return prepareExit(os.Stderr, err)
+}
+
+// prepareExit은 runPrepare의 결과를 종료 코드로 바꾼다.
+func prepareExit(w io.Writer, err error) int {
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, errNotDeployable):
+		fmt.Fprintln(w, "중단:", err)
+		return exitNotDeployable
 	}
-	return 0
+	fmt.Fprintln(w, "오류:", err)
+	return 1
 }
 
 // prepareEnv는 hopai prepare가 쓰는 바깥 세계다. 테스트는 가짜 AI·플랫폼과 로컬 git 원격을 넣는다.
@@ -201,6 +217,11 @@ func runPrepare(ctx context.Context, env prepareEnv, requested, depID string) er
 	if err != nil {
 		return fmt.Errorf("AI 배포 준비 실패 (세션 %s): %w", session, err)
 	}
+	// AI가 플랫폼이 주지 못하는 것을 찾았으면 커밋도 push도 하지 않는다. 판단과 이유는 에이전트 세션에 남았다.
+	if !prep.Deployable {
+		printBlocked(env.stdout, repo, session, prep)
+		return fmt.Errorf("%w (AI 세션 %s)", errNotDeployable, session)
+	}
 
 	// 5. 커밋, 검사한 바이트와 같은지 확인, push. 검사를 통과한 뒤에만 한다.
 	sha, changes, err := g.commit(ctx, dir, prep.CommitMessage+"\n\nhopai prepare, AI 세션 "+session+"\n")
@@ -305,6 +326,22 @@ func printPrepared(w io.Writer, r prepared) {
 			fmt.Fprintf(w, "  charlie app secret set %s %s   # %s\n", name, s.Name, printable(s.Purpose))
 		}
 		fmt.Fprintf(w, "  시크릿이 없어 배포가 실패했으면 넣은 뒤 다시 배포합니다: charlie deploy %s --branch %s --watch\n", name, prepareBranch)
+	}
+}
+
+// printBlocked는 AI가 찾은, 플랫폼이 주지 못하는 것을 출력한다. push하지 않았으므로 다음 단계는 없다.
+func printBlocked(w io.Writer, repo, session string, prep *llm.Preparation) {
+	fmt.Fprintf(w, "레포: %s\nAI 세션: %s\n판단: 이 플랫폼에 배포할 수 없는 앱입니다. %s 브랜치에 push하지 않았습니다.\n", repo, session, prepareBranch)
+	fmt.Fprintln(w, "플랫폼이 주지 못하는 것:")
+	for _, b := range prep.Blockers {
+		fmt.Fprintf(w, "  - %s: %s\n", printable(b.Need), printable(b.Reason))
+	}
+	fmt.Fprintln(w, "요약:", printable(prep.Summary))
+	if len(prep.Notes) > 0 {
+		fmt.Fprintln(w, "메모:")
+		for _, n := range prep.Notes {
+			fmt.Fprintln(w, "  - "+printable(n))
+		}
 	}
 }
 
