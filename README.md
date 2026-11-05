@@ -379,7 +379,6 @@ go test ./...
 
 - 가짜 Anthropic API와 가짜 플랫폼으로 요청 형태, 도구 사용과 기록, 재요청, 거절·잘림 처리, 비밀값 가리기를 확인한다.
 - 형식이 깨진 AI 응답과 규칙을 어긴 응답(대상 DSN 바꾸기, fence 비교 끄기, 슈퍼유저 키 등) 사례가 들어 있다.
-- `.github/workflows/ci.yml`이 PR과 main에서 `go vet`, gofmt, `go test ./...`를 조직 self-hosted runner로 돌린다. 비공개 모듈(platform, migration-engine)을 받으려면 저장소 시크릿 `MODULE_READ_TOKEN`이 필요하다. 실제 클러스터가 필요한 `cluster` 태그 테스트는 CI에서 돌리지 않는다.
 
 실제 클러스터(CNPG 설치)에서 리허설을 돌리는 테스트는 따로 있다. AI 없이 예시 계획으로 엔진만 실제로 돌린다.
 
