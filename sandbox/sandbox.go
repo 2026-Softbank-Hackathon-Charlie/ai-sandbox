@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -85,11 +86,30 @@ func ForCNPG(ctx context.Context, cs kubernetes.Interface, c Config) (Config, er
 		}
 		c.AllowEgressCIDRs = append(c.AllowEgressCIDRs, cidr)
 	}
+	// kubernetes 서비스 주소(ClusterIP)도 연다. EKS VPC CNI의 정책 에이전트는 서비스 주소로 판정해서,
+	// 엔드포인트만 열면 Pod 안의 instance manager가 kubernetes.default로 API에 붙지 못한다.
+	// 2026-11-05 실제 EKS에서 엔드포인트 주소는 열리고 172.21.0.1:443은 막혔고, 그 결과 정책이 붙기 전에
+	// API에 붙지 못한 임시 원본은 app 계정 비밀번호를 받지 못했다("User app has no password assigned").
+	if svc, err := cs.CoreV1().Services("default").Get(ctx, "kubernetes", metav1.GetOptions{}); err == nil {
+		for _, ip := range svc.Spec.ClusterIPs {
+			if ip == "" || ip == corev1.ClusterIPNone {
+				continue
+			}
+			cidr := ip + "/32"
+			if strings.Contains(ip, ":") {
+				cidr = ip + "/128"
+			}
+			if !slices.Contains(c.AllowEgressCIDRs, cidr) {
+				c.AllowEgressCIDRs = append(c.AllowEgressCIDRs, cidr)
+			}
+		}
+	}
 	return c, nil
 }
 
 // APIServerIPs는 default 네임스페이스의 kubernetes 서비스 엔드포인트 주소다.
-// NetworkPolicy는 서비스 IP가 아니라 변환된 엔드포인트 주소로 판정하므로 이 주소를 열어야 한다.
+// kindnet 같은 구현은 서비스 IP가 아니라 변환된 엔드포인트 주소로 판정하므로 이 주소를 열어야 한다
+// (EKS는 서비스 주소로 판정해서 ForCNPG가 서비스 주소도 연다).
 func APIServerIPs(ctx context.Context, cs kubernetes.Interface) ([]string, error) {
 	slices, err := cs.DiscoveryV1().EndpointSlices("default").List(ctx, metav1.ListOptions{LabelSelector: "kubernetes.io/service-name=kubernetes"})
 	if err != nil {

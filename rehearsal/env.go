@@ -7,9 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/rest"
@@ -202,7 +206,8 @@ func TokenKubeconfig(dir string, admin *rest.Config, token string) (string, erro
 		ca = b
 	}
 	cfg := clientcmdapi.NewConfig()
-	cfg.Clusters["sandbox"] = &clientcmdapi.Cluster{Server: admin.Host, CertificateAuthorityData: ca, InsecureSkipTLSVerify: admin.Insecure}
+	// TLSServerName은 터널(127.0.0.1)로 붙을 때 인증서의 원래 이름이다. 빠지면 엔진이 인증서 확인에 실패한다.
+	cfg.Clusters["sandbox"] = &clientcmdapi.Cluster{Server: admin.Host, CertificateAuthorityData: ca, InsecureSkipTLSVerify: admin.Insecure, TLSServerName: admin.ServerName}
 	cfg.AuthInfos["ai-sandbox"] = &clientcmdapi.AuthInfo{Token: token}
 	cfg.Contexts["sandbox"] = &clientcmdapi.Context{Cluster: "sandbox", AuthInfo: "ai-sandbox"}
 	cfg.CurrentContext = "sandbox"
@@ -263,13 +268,34 @@ func DSN(db DBInfo, password string, port int) string {
 	return u.String()
 }
 
+// SeedConnectWait는 임시 원본이 healthy가 된 뒤 첫 접속을 다시 시도하는 시간이다.
+// 2026-11-05 실제 EKS(CNPG 1.30.1)에서 healthy 직후의 첫 접속이 app 계정 비밀번호 인증에 실패했고(SQLSTATE 28P01),
+// 몇 초 뒤 같은 비밀번호·같은 프록시로는 바로 접속됐다. kind에서는 드러나지 않았다.
+var SeedConnectWait = 60 * time.Second
+
+// connectRetry는 wait 동안 3초마다 다시 접속해 본다. 마지막 오류를 돌려준다.
+func connectRetry(ctx context.Context, dsn string, wait time.Duration) (*pgx.Conn, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		conn, err := pgx.Connect(ctx, dsn)
+		if err == nil || time.Now().After(deadline) || ctx.Err() != nil {
+			return conn, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
 // Seed는 임시 원본에 테스트 데이터를 넣는다. 검증할 스키마마다 표 두 개를 만든다.
 // 운영 데이터는 넣지 않는다 (설계 문서 6장).
 func Seed(ctx context.Context, dsn string, schemas []string, rows int) error {
 	if rows < 4 {
 		return fmt.Errorf("fixture rows must be at least 4")
 	}
-	conn, err := pgx.Connect(ctx, dsn)
+	conn, err := connectRetry(ctx, dsn, SeedConnectWait)
 	if err != nil {
 		return fmt.Errorf("임시 원본 접속 실패: %w", err)
 	}
@@ -290,6 +316,50 @@ func Seed(ctx context.Context, dsn string, schemas []string, rows int) error {
 		}
 	}
 	return nil
+}
+
+// TempStorageClass는 임시 원본 디스크의 StorageClass를 고른다. 비어 있으면 클러스터 기본값을 쓴다.
+// 임시 원본은 리허설 대상이 아니라 실제 원본을 대신하는 것이므로, 샌드박스 클러스터에서 반드시 뜨는 곳을 골라야 한다.
+// 기본 StorageClass가 없는 클러스터(예: 워크로드 EKS)에서 비워 두면 PVC가 영원히 Pending이 되고
+// 경고 이벤트도 되풀이되지 않아 멈춤 감지에 걸리지 않는다 (2026-11-05 실제 EKS에서 확인).
+//   - 기본 StorageClass가 있으면 비운다.
+//   - 대상 매니페스트의 StorageClass가 이 클러스터에 있고 지우면 디스크도 지우는 것(Delete)이면 그것.
+//   - 아니면 Delete인 것 중 CSI 드라이버를 먼저, 이름순으로 첫 번째. Retain은 샌드박스를 지워도 디스크가 남으므로 고르지 않는다.
+func TempStorageClass(scs []storagev1.StorageClass, targetManifest string) (string, error) {
+	deletes := func(s storagev1.StorageClass) bool {
+		return s.ReclaimPolicy == nil || *s.ReclaimPolicy == corev1.PersistentVolumeReclaimDelete
+	}
+	for _, s := range scs {
+		if s.Annotations["storageclass.kubernetes.io/is-default-class"] == "true" {
+			return "", nil
+		}
+	}
+	var doc map[string]any
+	_ = yaml.Unmarshal([]byte(targetManifest), &doc)
+	spec, _ := doc["spec"].(map[string]any)
+	storage, _ := spec["storage"].(map[string]any)
+	want, _ := storage["storageClass"].(string)
+	var cands []storagev1.StorageClass
+	for _, s := range scs {
+		if !deletes(s) {
+			continue
+		}
+		if s.Name == want {
+			return s.Name, nil
+		}
+		cands = append(cands, s)
+	}
+	if len(cands) == 0 {
+		return "", fmt.Errorf("샌드박스 클러스터에 기본 StorageClass도, 지우면 디스크도 지우는(Delete) StorageClass도 없음")
+	}
+	csi := func(s storagev1.StorageClass) bool { return strings.Contains(s.Provisioner, ".csi.") }
+	sort.SliceStable(cands, func(i, j int) bool {
+		if csi(cands[i]) != csi(cands[j]) {
+			return csi(cands[i])
+		}
+		return cands[i].Name < cands[j].Name
+	})
+	return cands[0].Name, nil
 }
 
 // PrepareTempSource는 임시 원본을 실제 원본처럼 띄운다. 리허설이 보려는 것은 대상이 "실제 원본"의 복제본으로 뜨는지이므로,
