@@ -265,7 +265,11 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 	a.Isolation = rs
 	logIsolation(ctx, ses, rs)
 	if err != nil || !sandbox.AllPass(rs) {
-		failf("격리 검사 실패: %v", err)
+		if err != nil {
+			failf("격리 검사 실패: %v", err)
+		} else {
+			failf("격리 검사 실패: %s", strings.Join(sandbox.Failed(rs), ", "))
+		}
 		return a, nil, ErrIsolation
 	}
 

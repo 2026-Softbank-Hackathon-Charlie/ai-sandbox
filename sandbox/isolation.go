@@ -53,10 +53,19 @@ type IsolationConfig struct {
 	ProbeImage string
 	// Timeout은 검사 Pod가 끝날 때까지 기다리는 시간이다. 기본 90초.
 	Timeout time.Duration
+	// Settle은 검사 Pod가 연결을 시도하기 전에 기다리는 시간이다. 기본 15초 (DefaultSettle).
+	Settle time.Duration
 	// APIServerAllowed면 샌드박스가 CNPG 때문에 API 서버로 나갈 수 있다(ForCNPG).
 	// 그때는 API 서버 대신 다른 네임스페이스의 서비스(CNPG 웹훅)를 정책 동작의 증거로 쓴다.
 	APIServerAllowed bool
 }
+
+// DefaultSettle은 검사 Pod가 뜬 뒤 연결을 시도하기 전에 기다리는 시간이다.
+// EKS VPC CNI의 기본 NetworkPolicy 모드(standard)는 새 Pod에 정책을 붙이기 전 몇 초 동안 모든 통신을 연다.
+// 2026-11-05 실제 EKS에서, 뜨자마자 연결한 검사 Pod는 운영 DB·다른 네임스페이스·메타데이터 주소가 모두 열렸고,
+// 같은 네임스페이스에서 몇 초 지난 Pod는 세 곳 모두 막혔다. 검사는 정책이 붙은 뒤의 상태를 보도록 기다린다.
+// 이 틈은 리허설 Pod에도 있다. 없애려면 클러스터를 strict 모드(NETWORK_POLICY_ENFORCING_MODE=strict)로 둔다.
+const DefaultSettle = 15 * time.Second
 
 // CNPGWitness는 정책이 없으면 열리고, 샌드박스 정책으로는 막혀야 하는 다른 네임스페이스의 서비스다.
 var CNPGWitness = Target{Name: "other-namespace", Host: "cnpg-webhook-service.cnpg-system.svc.cluster.local", Port: 443, Expect: ExpectBlocked, MustResolve: true}
@@ -110,6 +119,17 @@ func AllPass(rs []CheckResult) bool {
 		}
 	}
 	return len(rs) > 0
+}
+
+// Failed는 기대와 다르게 나온 검사의 이름이다 (예: "db: blocked 기대, open").
+func Failed(rs []CheckResult) []string {
+	var out []string
+	for _, r := range rs {
+		if !r.Pass {
+			out = append(out, fmt.Sprintf("%s: %s 기대, %s", r.Name, r.Expect, r.Got))
+		}
+	}
+	return out
 }
 
 func checkRBAC(ctx context.Context, ai kubernetes.Interface, sbNS, prodNS string) []CheckResult {
@@ -242,8 +262,10 @@ func rbacOutcome(err error) (string, string) {
 
 // probeScript는 인자로 받은 "이름 호스트 포트 이름확인" 묶음마다 TCP 연결을 시도하고 PROBE 줄을 찍는다.
 // 이름확인이 1이면 먼저 이름을 찾고, 못 찾으면 unresolved를 찍는다 (연결 실패와 구분).
-// 대상 값은 셸 문자열에 끼워 넣지 않고 인자로만 넘긴다.
+// 대상 값은 셸 문자열에 끼워 넣지 않고 인자로만 넘긴다. 첫 인자는 연결 전에 기다리는 초다(DefaultSettle).
 const probeScript = `
+sleep "$1"
+shift
 if nslookup kubernetes.default.svc.cluster.local >/dev/null 2>&1; then echo "PROBE dns open"; else echo "PROBE dns blocked"; fi
 while [ $# -ge 4 ]; do
   if [ "$4" = 1 ] && ! nslookup "$2" >/dev/null 2>&1; then echo "PROBE $1 unresolved"
@@ -254,8 +276,11 @@ echo "PROBE-END"
 `
 
 // ProbePod는 검사 Pod다. 같은 네임스페이스에 뜨므로 샌드박스 NetworkPolicy를 그대로 받는다.
-func ProbePod(namespace, image string, targets []Target) (*corev1.Pod, error) {
-	args := []string{"-c", probeScript, "probe"}
+func ProbePod(namespace, image string, settle time.Duration, targets []Target) (*corev1.Pod, error) {
+	if settle < 0 || settle > 5*time.Minute {
+		return nil, fmt.Errorf("검사 대기 시간이 범위 밖: %s", settle)
+	}
+	args := []string{"-c", probeScript, "probe", strconv.Itoa(int(settle.Seconds()))}
 	for _, t := range targets {
 		if !nameRe.MatchString(t.Name) || !hostRe.MatchString(t.Host) || t.Port < 1 || t.Port > 65535 {
 			return nil, fmt.Errorf("검사 대상 형식이 잘못됨: %+v", t)
@@ -307,8 +332,13 @@ func checkNetwork(ctx context.Context, admin kubernetes.Interface, ns string, c 
 	if timeout == 0 {
 		timeout = 90 * time.Second
 	}
+	settle := c.Settle
+	if settle == 0 {
+		settle = DefaultSettle
+	}
+	timeout += settle
 	targets := targetsFor(c)
-	pod, err := ProbePod(ns, image, targets)
+	pod, err := ProbePod(ns, image, settle, targets)
 	if err != nil {
 		return nil, err
 	}

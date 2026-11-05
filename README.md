@@ -397,7 +397,7 @@ REHEARSAL_KUBECONFIG=<kubeconfig> REHEARSAL_SC=standard go test -tags cluster -r
 
 알려진 한계:
 
-- 실제 클러스터 확인은 로컬 kind뿐이다. EKS·GKE·k3s에서 NetworkPolicy와 Pod Security가 실제로 동작하는지는 A 영역과 같이 확인해야 한다(6장).
+- 실제 EKS(VPC CNI v1.22.4, 정책 모드 `standard`)에서는 NetworkPolicy가 동작하지만, **새 Pod는 정책이 붙기 전 몇 초 동안 모든 통신이 열린다.** 2026-11-05 첫 실제 리허설에서 뜨자마자 연결한 검사 Pod는 운영 DB·CNPG 웹훅·메타데이터 주소가 모두 열려 격리 검사가 리허설을 멈췄다. 검사 Pod는 이제 15초 기다린 뒤 연결한다(`sandbox.DefaultSettle`). 이 대기 후 같은 EKS에서 격리 검사 12/12 통과. 리허설 CNPG Pod의 첫 몇 초는 여전히 열리므로, 없애려면 클러스터를 `NETWORK_POLICY_ENFORCING_MODE=strict`로 바꿔야 한다(infra). GKE·k3s는 아직 확인하지 않았다.
 - 쿠버네티스 경고 이벤트로도, 작업 Job 실패로도 드러나지 않는 실패(예: 복제가 붙었다가 끊기는 인증서 오류)는 Plan의 `catchupTimeout`까지 기다린다. 메이저 버전 불일치는 원본 이미지를 읽었을 때 계획 단계에서 막고, 못 읽었을 때는 리허설이 Job 실패로 빨리 잡는다.
 - AI가 실제로 계획과 진단을 하는 흐름(`hopai run`)과 플랫폼 세션 기록은 가짜 API로만 확인했다. 실제 API 키와 플랫폼으로 돌려 봐야 한다.
 - 파일(rclone), 게이트웨이와 카나리, 부하(k6)는 리허설하지 않는다.
