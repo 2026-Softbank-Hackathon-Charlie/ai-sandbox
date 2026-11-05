@@ -66,6 +66,8 @@ type Config struct {
 	SourceTimeout time.Duration // 임시 원본이 healthy가 될 때까지, 기본 6분
 	RunTimeout    time.Duration // 엔진 실행 한 번의 상한, 기본 10분
 	OnAttempt     func(Attempt)
+	// Prewarm은 AI 계획과 동시에 미리 준비한 첫 회차 샌드박스다 (StartPrewarm). 쓰지 못하면 Rehearse가 지운다.
+	Prewarm *Prewarm
 }
 
 // Attempt는 실행 한 번의 기록이다.
@@ -142,6 +144,7 @@ func (c *Config) defaults() {
 // failures remain warnings and do not change the execution result.
 func Rehearse(ctx context.Context, c Config) (*Report, error) {
 	c.defaults()
+	defer func() { c.Prewarm.Discard(ctx) }() // 첫 회차가 가져갔으면 아무것도 안 함
 	if c.Proposal == nil || c.Draft == nil {
 		return nil, errors.New("계획과 초안이 필요함")
 	}
@@ -226,133 +229,69 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 		ses.Log(ctx, agentlog.Event{Type: agentlog.Error, Status: fmt.Sprintf("attempt %d", n), Output: a.Error})
 	}
 
-	// 1. 샌드박스
-	base, err := SandboxConfig(SandboxApp(cur.Plan.Source.Namespace), cur.Manifest)
-	if err != nil {
-		return a, nil, err
-	}
-	sc, err := sandbox.ForCNPG(ctx, c.Admin, base)
-	if err != nil {
-		return a, nil, err
-	}
-	ses.Log(ctx, agentlog.Event{Type: agentlog.ToolCall, Tool: "sandbox_create", Input: map[string]any{"attempt": n, "cluster": cur.Plan.Target.Env}})
-	t0 := time.Now()
-	sb, err := sandbox.Create(ctx, c.Admin, sc, time.Now())
-	if err != nil {
-		ses.Log(ctx, agentlog.Event{Type: agentlog.ToolResult, Tool: "sandbox_create", Status: "error", Output: err.Error()})
-		return a, nil, err
-	}
-	a.Namespace = sb.Namespace
-	ses.Log(ctx, agentlog.Event{Type: agentlog.ToolResult, Tool: "sandbox_create", Status: "ok", Duration: time.Since(t0),
-		Output: map[string]any{"namespace": sb.Namespace, "expiresAt": sb.ExpiresAt, "networkPolicy": "기본 차단 + CNPG 오퍼레이터·API 서버", "quota": fmt.Sprintf("CPU %s, 메모리 %s, Pod 20", base.CPU, base.Memory)}})
-	defer cleanupAttempt(ctx, c, ses, &a)
-
-	// 2. AI 권한(샌드박스 토큰)과 격리 검사
-	token, _, err := sandbox.Token(ctx, c.Admin, sb, 0, time.Now())
-	if err != nil {
-		return a, nil, err
-	}
-	aiREST := sandbox.TokenConfig(c.AdminREST, token)
-	aiCS, err := kubernetes.NewForConfig(aiREST)
-	if err != nil {
-		return a, nil, err
-	}
-	aiDyn, err := dynamic.NewForConfig(aiREST)
-	if err != nil {
-		return a, nil, err
-	}
-	iso := c.Isolation
-	iso.APIServerAllowed = true
-	rs, err := sandbox.CheckIsolation(ctx, c.Admin, aiCS, sb, iso)
-	a.Isolation = rs
-	logIsolation(ctx, ses, rs)
-	if err != nil || !sandbox.AllPass(rs) {
-		if err != nil {
-			failf("격리 검사 실패: %v", err)
+	// 1~3. 샌드박스, 격리 검사, 임시 원본. 첫 회차는 AI가 계획하는 동안 미리 준비한 것을 쓴다.
+	var pp *prepared
+	usedPrewarm := false
+	if n == 1 && c.Prewarm != nil {
+		pw := c.Prewarm
+		c.Prewarm = nil
+		if !pw.matches(&cur.Plan) {
+			pw.Discard(ctx)
+			ses.Log(ctx, agentlog.Event{Type: agentlog.Message, Tool: "sandbox_prewarm", Output: "계획의 원본·대상 값이 초안과 달라 미리 준비한 샌드박스를 버리고 새로 만듦"})
 		} else {
-			failf("격리 검사 실패: %s", strings.Join(sandbox.Failed(rs), ", "))
+			pa, ppw, events, err := pw.take(ctx)
+			ses.Log(ctx, agentlog.Event{Type: agentlog.Message, Tool: "sandbox_prewarm", Output: fmt.Sprintf("AI가 계획하는 동안 미리 준비한 샌드박스 사용 (준비 %.0f초)", pa.DurationS)})
+			for _, e := range events {
+				ses.Log(ctx, e)
+			}
+			a.Namespace, a.Isolation, a.Evidence, a.Error = pa.Namespace, pa.Isolation, pa.Evidence, pa.Error
+			pp, fatal, usedPrewarm = ppw, err, true
 		}
-		return a, nil, ErrIsolation
 	}
-
-	// 3. 임시 원본
-	db, err := ParseDB(cur.Plan.Source.DSN)
-	if err != nil {
-		failf("원본 DSN: %v", err)
-		return a, nil, nil
+	if !usedPrewarm {
+		pp, fatal = prepareSandbox(ctx, c, ses, &a, &cur.Plan, cur.SourceCluster, cur.Manifest)
 	}
-	src := SourceManifest(&cur.Plan, sb.Namespace, db)
-	if err := PrepareTempSource(src, cur.SourceCluster, cur.Manifest); err != nil {
-		failf("임시 원본 설정: %v", err)
-		return a, nil, nil
+	if a.Namespace != "" {
+		defer cleanupAttempt(ctx, c, ses, &a)
+	}
+	defer pp.close()
+	if fatal != nil || pp == nil {
+		return a, nil, fatal
+	}
+	sb, token, aiCS, aiDyn, srcDSN, dstDSN := pp.sb, pp.token, pp.aiCS, pp.aiDyn, pp.srcDSN, pp.dstDSN
+	if usedPrewarm {
+		// 미리 만든 샌드박스는 기본 Quota다. 대상 매니페스트만큼 올린다.
+		want, err := SandboxConfig(SandboxApp(cur.Plan.Source.Namespace), cur.Manifest)
+		if err != nil {
+			return a, nil, err
+		}
+		if err := raiseQuota(ctx, c.Admin, sb.Namespace, want); err != nil {
+			failf("샌드박스 Quota를 대상 매니페스트에 맞추지 못함: %v", err)
+			return a, nil, nil
+		}
 	}
 	scs, err := c.Admin.StorageV1().StorageClasses().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		failf("샌드박스 클러스터의 StorageClass를 읽을 수 없음: %v", err)
 		return a, nil, nil
 	}
-	// 대상 매니페스트의 Retain StorageClass를 샌드박스용 Delete 클래스로 바꾼 사본. 임시 원본과 대상이 같은 클래스를 보게
-	// 이 사본으로 임시 원본 클래스도 고르고, 바꿀 수 없으면 임시 원본을 만들기 전에 멈춘다.
+	// 대상 매니페스트의 Retain StorageClass를 샌드박스용 Delete 클래스로 바꾼 사본
 	sbManifest, scNotes, err := SandboxStorageClasses(cur.Manifest, scs.Items)
 	if err != nil {
 		failf("샌드박스 대상 디스크: %v", err)
 		return a, nil, nil
 	}
+	if usedPrewarm {
+		// 미리 준비할 때는 매니페스트 없이 임시 원본 클래스를 골랐다. 새로 만들었다면 고를 클래스와 다르면 남긴다
+		// (기본 클래스가 Retain이거나 없는 클러스터). 임시 원본은 이미 떠 있으므로 리허설은 그대로 진행한다.
+		if want, err := TempStorageClass(scs.Items, sbManifest); err == nil && want != pp.tempSC {
+			scNotes = append(scNotes, fmt.Sprintf("임시 원본 storageClass %q: 미리 준비할 때 매니페스트 없이 고름 (매니페스트 기준이면 %q)", pp.tempSC, want))
+		}
+	}
 	a.SandboxNotes = scNotes
-	for _, n := range scNotes {
-		ses.Log(ctx, agentlog.Event{Type: agentlog.Message, Tool: "sandbox_target", Output: n})
+	for _, note := range scNotes {
+		ses.Log(ctx, agentlog.Event{Type: agentlog.Message, Tool: "sandbox_target", Output: note})
 	}
-	tempSC, err := TempStorageClass(scs.Items, sbManifest)
-	if err != nil {
-		failf("임시 원본 디스크: %v", err)
-		return a, nil, nil
-	}
-	if tempSC != "" {
-		if err := unstructured.SetNestedField(src.Object, tempSC, "spec", "storage", "storageClass"); err != nil {
-			failf("임시 원본 설정: %v", err)
-			return a, nil, nil
-		}
-	}
-	ses.Log(ctx, agentlog.Event{Type: agentlog.ToolCall, Tool: "sandbox_source", Input: map[string]any{"cluster": cur.Plan.Source.Cluster, "rows": c.Rows, "schemas": cur.Plan.Verify.Schemas, "storageClass": tempSC}})
-	t0 = time.Now()
-	if _, err := aiDyn.Resource(llm.CNPGClusterGVR).Namespace(sb.Namespace).Create(ctx, src, metav1.CreateOptions{}); err != nil {
-		failf("임시 원본 생성 실패: %v", err)
-		return a, nil, nil
-	}
-	if err := waitHealthy(ctx, aiDyn, sb.Namespace, cur.Plan.Source.Cluster, c.SourceTimeout); err != nil {
-		// 샌드박스를 곧 지우므로 원인 단서(Pod·PVC 상태, 경고 이벤트)를 지우기 전에 세션 로그와 리포트에 남긴다.
-		var brief string
-		a.Evidence, brief = sourceNotReadyEvidence(ctx, aiCS, sb.Namespace)
-		logSourceStatus(ctx, ses, a.Evidence)
-		if brief != "" {
-			failf("임시 원본이 준비되지 않음: %v (%s)", err, brief)
-		} else {
-			failf("임시 원본이 준비되지 않음: %v", err)
-		}
-		return a, nil, nil
-	}
-	sec, err := aiCS.CoreV1().Secrets(sb.Namespace).Get(ctx, cur.Plan.Source.Cluster+"-app", metav1.GetOptions{})
-	if err != nil {
-		failf("임시 원본 앱 계정을 읽을 수 없음: %v", err)
-		return a, nil, nil
-	}
-	password := string(sec.Data["password"])
-	srcProxy, err := NewProxy(c.Admin, c.AdminREST, sb.Namespace, cur.Plan.Source.Cluster)
-	if err != nil {
-		return a, nil, err
-	}
-	defer srcProxy.Close()
-	dstProxy, err := NewProxy(c.Admin, c.AdminREST, sb.Namespace, cur.Plan.Target.Cluster)
-	if err != nil {
-		return a, nil, err
-	}
-	defer dstProxy.Close()
-	srcDSN, dstDSN := DSN(db, password, srcProxy.Port()), DSN(db, password, dstProxy.Port())
-	if err := Seed(ctx, srcDSN, cur.Plan.Verify.Schemas, c.Rows); err != nil {
-		failf("%v", err)
-		return a, nil, nil
-	}
-	ses.Log(ctx, agentlog.Event{Type: agentlog.ToolResult, Tool: "sandbox_source", Status: "ok", Duration: time.Since(t0), Output: map[string]any{"cluster": cur.Plan.Source.Cluster, "rows": c.Rows}})
 
 	// 4. 엔진 (샌드박스 토큰, 게이트웨이 없음)
 	dir, err := os.MkdirTemp("", "hop-rehearsal-")

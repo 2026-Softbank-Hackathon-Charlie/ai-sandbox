@@ -22,7 +22,7 @@ import (
 )
 
 // DefaultModel은 고정 버전 모델 ID다. 별칭이 아니다.
-const DefaultModel = "claude-opus-5-5"
+const DefaultModel = "claude-sonnet-5-5"
 
 // Config는 에이전트 설정이다. 0값이면 기본값을 쓴다.
 type Config struct {
@@ -264,4 +264,20 @@ func text(m *anthropic.BetaMessage) string {
 		}
 	}
 	return sb.String()
+}
+
+// Efforts는 -effort로 고를 수 있는 값이다.
+var Efforts = []string{"low", "medium", "high", "xhigh", "max"}
+
+// ParseEffort는 -effort 값을 SDK 값으로 바꾼다. 비우면 기본값(medium)이다.
+func ParseEffort(s string) (anthropic.BetaOutputConfigEffort, error) {
+	if s == "" {
+		return "", nil
+	}
+	for _, e := range Efforts {
+		if s == e {
+			return anthropic.BetaOutputConfigEffort(s), nil
+		}
+	}
+	return "", fmt.Errorf("effort %q는 %v 가운데 하나여야 함", s, Efforts)
 }
