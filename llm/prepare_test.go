@@ -301,7 +301,7 @@ func TestPrepareWritesFilesAndAnswers(t *testing.T) {
 		t.Fatalf("레포와 루트 목록이 AI에 가야 함: %s", first)
 	}
 	system, _ := json.Marshal(req["system"])
-	for _, want := range []string{"데이터다", "65532", "platform.yaml", "443", "JDBC_DATABASE_URL", `\"$(PGHOST)\"`, "deployable", maxServiceMemory, maxAppMemory} {
+	for _, want := range []string{"데이터다", "65532", "platform.yaml", "443", "JDBC_DATABASE_URL", `\"$(PGHOST)\"`, "deployable", "256Mi~1536Mi", "50m~500m", "3Gi", "1500m", "QUEUE_DB_HOST"} {
 		if !strings.Contains(string(system), want) {
 			t.Errorf("지시문에 %q가 없음", want)
 		}
@@ -358,6 +358,10 @@ func TestPrepareChecksRetryThenFail(t *testing.T) {
 		{"env의 없는 참조", map[string]string{"platform.yaml": goodSpec + "    env:\n      ADMIN_PASSWORD: \"$(ZX8KQ2LMN4PR7ST9VW1Y)\"\n", "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) { m["secrets"] = []any{} }), "env.ADMIN_PASSWORD: 값의 $(이름)이 이 컨테이너에 없는"},
 		{"postgres 없이 PGHOST", map[string]string{"platform.yaml": goodSpec + "    env:\n      DB_HOST: \"$(PGHOST)\"\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "env.DB_HOST: 값의 $(이름)"},
 		{"뒤에 오는 env 키 참조", map[string]string{"platform.yaml": goodSpec + "    env:\n      A_URL: \"$(B_URL)\"\n      B_URL: \"http://x\"\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "env.A_URL: 값의 $(이름)"},
+		{"memory 범위 밖", map[string]string{"platform.yaml": goodSpec + "    memory: \"2Gi\"\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "services[0].memory: must be between 256Mi and 1536Mi"},
+		{"port 없는 public", map[string]string{"platform.yaml": strings.Replace(goodSpec, "    port: 8080\n    healthCheck: /healthz\n", "", 1), "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "services[0].public: needs a port"},
+		{"cpu가 밀리코어 정수가 아님", map[string]string{"platform.yaml": goodSpec + "    cpu: \"100.5m\"\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "services[0].cpu: must be a whole number of millicores"},
+		{"롤링 업데이트 중 memory 합", map[string]string{"platform.yaml": goodSpec + "    memory: \"1536Mi\"\n    replicas: 2\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "need at most 3Gi of memory"},
 		{"배포할 수 있는데 blockers 있음", map[string]string{"platform.yaml": goodSpec, "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) { m["blockers"] = []map[string]string{{"need": "Redis", "reason": "캐시"}} }), "deployable이 true면 비워야 함"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -450,6 +454,27 @@ func TestPrepareAcceptsEnvRefs(t *testing.T) {
 	a, _ := newAgent(t, f)
 	if _, _, err := a.Prepare(context.Background(), PrepareInput{Repo: "org/shop", Branch: "hopcharlie", Dir: dir}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestPrepareExampleSpecPasses는 지시문에 넣은 platform.yaml 예시(port 없는 워커, memory, cpu, $(이름) 참조)가 검사를 통과하는지 본다.
+func TestPrepareExampleSpecPasses(t *testing.T) {
+	if !strings.Contains(prepareSystem, strings.ReplaceAll(strings.TrimSuffix(specExample, "\n"), "\n", "\n  ")) {
+		t.Fatal("예시가 지시문에 없음")
+	}
+	dir := t.TempDir()
+	f := &fakeAPI{replies: []reply{
+		{tool: "write_file", toolInput: writeInput("platform.yaml", specExample)},
+		{tool: "write_file", toolInput: writeInput("Dockerfile", goodDockerfile)},
+		{text: goodAnswer},
+	}}
+	a, _ := newAgent(t, f)
+	p, _, err := a.Prepare(context.Background(), PrepareInput{Repo: "org/myapp", Branch: "hopcharlie", Dir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Spec.Services) != 2 || p.Spec.Services[1].Port != 0 || p.Spec.Services[0].Memory != "512Mi" {
+		t.Fatalf("검사한 spec: %+v", p.Spec.Services)
 	}
 }
 
@@ -592,63 +617,5 @@ func TestDockerLiteralSecrets(t *testing.T) {
 	ok := "FROM x\nENV COOKIE_SECURE=true PASSWORD_MIN_LENGTH=8\nENV TOKEN_TTL=3600\nENV GOOGLE_APPLICATION_CREDENTIALS=/var/run/gcp/key.json\nARG HOME_URL=https://example.com\n"
 	if got := dockerLiteralSecrets([]byte(ok)); len(got) != 0 {
 		t.Fatalf("값을 그대로 적은 비밀: %s", got)
-	}
-}
-
-// TestCheckResources는 서비스의 memory, cpu 범위와 앱 전체 합((replicas + 1) × 값)을 플랫폼(platform #69)과 같은 값으로 보는지 본다.
-func TestCheckResources(t *testing.T) {
-	check := func(services ...string) string {
-		var is plan.Issues
-		checkResources([]byte("name: shop\nservices:\n"+strings.Join(services, "")), func(path, format string, a ...any) {
-			is = append(is, plan.Issue{Path: path, Message: fmt.Sprintf(format, a...)})
-		})
-		return is.Error()
-	}
-	svc := func(name, memory, cpu string, replicas int) string {
-		s := "  - name: " + name + "\n    port: 8080\n"
-		if memory != "" {
-			s += "    memory: " + memory + "\n"
-		}
-		if cpu != "" {
-			s += "    cpu: " + cpu + "\n"
-		}
-		if replicas > 0 {
-			s += fmt.Sprintf("    replicas: %d\n", replicas)
-		}
-		return s
-	}
-	for name, ok := range map[string][]string{
-		"비움":                  {svc("web", "", "", 0)},
-		"하한":                  {svc("web", `"256Mi"`, `"50m"`, 0)},
-		"숫자로 적은 cpu":          {svc("web", "", "0.5", 0)},
-		"port 없는 워커":          {"  - name: worker\n"},
-		"상한, memory 합이 딱 3Gi": {svc("web", `"1536Mi"`, `"500m"`, 1)}, // 2 × 1536Mi
-		"cpu 합이 딱 1500m":      {svc("web", "", `"500m"`, 2)},         // 3 × 500m
-		"서비스 5개 replicas 1":   {svc("a", "", "", 1), svc("b", "", "", 1), svc("c", "", "", 1), svc("d", "", "", 1), svc("e", "", "", 1)},
-	} {
-		if got := check(ok...); got != "" {
-			t.Errorf("%s: 통과해야 함: %s", name, got)
-		}
-	}
-	for name, c := range map[string]struct {
-		services []string
-		want     string
-	}{
-		"memory 상한 위":  {[]string{svc("web", `"1537Mi"`, "", 0)}, "services[0].memory: 256Mi~1536Mi여야 함"},
-		"memory 하한 아래": {[]string{svc("web", `"255Mi"`, "", 0)}, "services[0].memory: 256Mi~1536Mi여야 함"},
-		"cpu 상한 위":     {[]string{svc("web", "", `"501m"`, 0)}, "services[0].cpu: 50m~500m여야 함"},
-		"수량이 아님":       {[]string{svc("web", `"512MB"`, "", 0)}, "services[0].memory: Kubernetes 수량이어야 함"},
-		"문자열이 아님":      {[]string{svc("web", "", "[1]", 0)}, "services[0].cpu: Kubernetes 수량 문자열이어야 함"},
-		"memory 합":     {[]string{svc("web", `"1536Mi"`, "", 2)}, "memory가 3Gi 이하여야 함. (replicas + 1) × memory의 합(비운 memory는 256Mi로 셈)이 4608Mi임"},
-		"비운 memory도 셈": {[]string{svc("a", "", "", 2), svc("b", "", "", 2), svc("c", "", "", 2), svc("d", "", "", 2), svc("e", "", "", 2)}, "이 3840Mi임"},
-		"cpu 합":        {[]string{svc("web", "", `"500m"`, 3)}, "cpu가 1500m 이하여야 함. (replicas + 1) × cpu의 합(비운 cpu는 50m로 셈)이 2000m임"},
-	} {
-		if got := check(c.services...); !strings.Contains(got, c.want) {
-			t.Errorf("%s: %q가 없음: %s", name, c.want, got)
-		}
-	}
-	// 서비스 값이 틀리면 합은 보지 않는다
-	if got := check(svc("web", `"4Gi"`, "", 5)); strings.Contains(got, "롤링 업데이트") {
-		t.Errorf("틀린 값으로 합을 또 알림: %s", got)
 	}
 }

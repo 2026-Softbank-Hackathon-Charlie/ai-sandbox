@@ -3,8 +3,8 @@ module github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox
 go 1.27.3
 
 require (
-	github.com/2026-Softbank-Hackathon-Charlie/migration-engine v0.0.0-20261102063656-f3b9fd864d1d
-	github.com/2026-Softbank-Hackathon-Charlie/platform v0.0.0-20261103152148-d138f9388ec3
+	github.com/2026-Softbank-Hackathon-Charlie/migration-engine v0.0.0-20261104075818-c3366582a955
+	github.com/2026-Softbank-Hackathon-Charlie/platform v0.0.0-20261105154156-84e257be47f8
 	github.com/anthropics/anthropic-sdk-go v1.84.0
 	github.com/jackc/pgx/v5 v5.12.0
 	k8s.io/api v0.37.2

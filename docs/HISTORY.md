@@ -560,7 +560,7 @@ MySQL, Redis, 볼륨 같은 리소스 종류를 늘리려면 eks, gke, 온프레
 2. 우회할 수 없으면 AI가 `deployable: false`로 답합니다. 예: MySQL이나 MongoDB만 지원함, 남아야 하는 볼륨이 꼭 필요함, HTTP가 아닌 TCP나 UDP 포트를 밖에 열어야 함, SMTP 서버에 붙지 못하면 시작하지 않음. 그러면 파일 검사, 커밋, push를 하지 않고, 플랫폼이 주지 못하는 것과 근거를 출력하고, 에이전트 세션(콘솔)에 `decision` 이벤트와 요약 `배포할 수 없음: MySQL`로 남기고, 종료 코드 3으로 끝납니다.
 3. 우회할 수 있으면 우회하고 메모에 적습니다. 캐시로만 쓰는 Redis는 앱의 서비스 하나로(따로 Dockerfile, 1024 이상 port, root 아님, 볼륨 없음), 따로 뜨는 프런트엔드와 백엔드는 공개 프록시 서비스 하나로, 로컬 디스크의 업로드 파일은 `s3` 리소스로 바꿉니다.
 4. AI가 정하는 것은 "배포할 수 없음"뿐입니다. `deployable: true`여도 배포할 수 있는지는 지금과 같은 검사가 정하고, 걸리면 지금처럼 다시 묻습니다. `true`인데 `blockers`가 있거나 `false`인데 `blockers`가 없으면 걸립니다.
-5. 지시문을 새 `platform.yaml` 계약에 맞췄습니다. `postgres` 리소스가 넣는 `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `JDBC_DATABASE_URL`을 앱이 읽는 이름에 `$(이름)`으로 잇습니다(예: `SPRING_DATASOURCE_URL: "$(JDBC_DATABASE_URL)"`). 시작 스크립트로 `DATABASE_URL`을 나누라는 문장은 뺐습니다. S3도 앱이 `AWS_*` 이름만 읽을 때 `$(S3_ACCESS_KEY)`처럼 잇습니다. 요청을 받지 않는 워커는 port를 비웁니다. 고정 256Mi 대신 서비스마다 `memory`(256Mi~1536Mi)와 `cpu`(50m~500m)를 정하고, 서비스마다 (replicas + 1) × 값을 더한 합은 memory 3Gi, cpu 1500m 이하입니다(+1은 롤링 업데이트 중에 하나 더 뜨는 Pod). 값은 platform #69와 같고 `llm/prepare.go`의 상수 블록 한 곳에 두어 지시문과 검사가 같이 씁니다.
+5. 지시문을 새 `platform.yaml` 계약에 맞췄습니다. `postgres` 리소스가 넣는 `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `JDBC_DATABASE_URL`을 앱이 읽는 이름에 `$(이름)`으로 잇습니다(예: `SPRING_DATASOURCE_URL: "$(JDBC_DATABASE_URL)"`). 시작 스크립트로 `DATABASE_URL`을 나누라는 문장은 뺐습니다. S3도 앱이 `AWS_*` 이름만 읽을 때 `$(S3_ACCESS_KEY)`처럼 잇습니다. 요청을 받지 않는 워커는 port를 비웁니다. 고정 256Mi 대신 서비스마다 `memory`(256Mi~1536Mi, 바이트 정수)와 `cpu`(50m~500m, 밀리코어 정수)를 정하고, 서비스마다 (replicas + 1) × 값을 더한 합은 memory 3Gi, cpu 1500m 이하입니다(+1은 롤링 업데이트 중에 하나 더 뜨는 Pod). 지시문의 값은 platform `pkg/appspec`의 상수에서 넣고, 범위와 합은 `appspec.Check`가 봅니다. 이를 위해 platform 모듈을 `d138f93`에서 #69가 들어간 platform main(`84e257b`)으로 올렸고, platform이 요구하는 migration-engine도 `f3b9fd8`에서 `c336658`로 올랐습니다.
 6. env와 시크릿 이름에 새 플랫폼 이름 6개를 쓰면 걸립니다. env 값의 `$(PGPASSWORD)` 같은 참조는 비밀값으로 보지 않고, `mask`도 `${VAR}`처럼 그대로 둡니다. 대신 참조는 컨테이너에 실제로 있는 이름(리소스가 있을 때 플랫폼 변수, port가 있을 때 `PORT`, 답의 시크릿, 같은 서비스 env에서 이름순으로 앞선 키)만 가리킬 수 있습니다. 없는 이름은 Kubernetes가 글자 그대로 넣기 때문에, 이렇게 막지 않으면 `$(hunter2)`처럼 비밀값을 감싸 커밋할 수 있었습니다(독립 리뷰에서 찾음).
 7. 서비스 둘이 같은 Dockerfile을 쓰면(웹과 워커) 검사를 다 통과하고도 "검사한 파일을 다시 읽을 수 없음"으로 걸리던 문제를 고쳤습니다. 겹친 Dockerfile 경로를 줄이는 `slices.Compact`가 남는 칸을 빈 문자열로 지워서, 그 빈 경로를 다시 읽으려 했습니다. v26부터 있던 문제로, 지시문의 예시 `platform.yaml`을 검사에 통과시키다 찾았습니다.
 
@@ -576,13 +576,10 @@ MySQL, Redis, 볼륨 같은 리소스 종류를 늘리려면 eks, gke, 온프레
 | env의 없는 참조(`$(ZX8KQ2LMN4PR7ST9VW1Y)`), postgres 없는 `$(PGHOST)`, 이름순으로 뒤에 오는 키 참조 | 세 번 묻고 실패 |
 | postgres 변수, `$(PORT)`, 답의 시크릿, 앞선 키를 가리키는 참조, `postgresql://$(PGUSER):$(PGPASSWORD)@...` | 통과 |
 | env `KC_DB_PASSWORD: "$(PGPASSWORD)"`, `jdbc:postgresql://$(PGHOST):$(PGPORT)/$(PGDATABASE)` | 비밀값으로 보지 않음 (`$(PGPASSWORD)hunter2`, `$(hunter2)`는 걸림) |
-| `memory`, `cpu` 범위 밖, 수량이 아닌 값(`512MB`), 앱 전체 합 초과(1536Mi replicas 2, 비운 memory 서비스 5개 replicas 2) | 걸림. 1536Mi replicas 1(딱 3Gi), 500m replicas 2(딱 1500m)는 통과 |
+| `memory` 범위 밖, 밀리코어 정수가 아닌 `cpu`(`100.5m`), port 없는 public, 롤링 업데이트 중 memory 합 초과 | `appspec` 검사로 세 번 묻고 실패 |
+| 지시문의 예시 `platform.yaml`(port 없는 워커, `memory`, `cpu`, `$(이름)` 참조), 서비스 둘이 같은 Dockerfile | 통과 |
 
 `go vet`, gofmt, `go test ./...`가 통과했습니다. 실제 Claude와 플랫폼으로는 돌려 보지 못했습니다.
-
-**남은 일**
-
-- 고정한 platform 모듈(`d138f93`)의 `appspec`은 아직 port를 필수로 보고 `memory`, `cpu`를 모르는 키로 거절합니다. platform #69가 머지되면 이 PR에 모듈을 올리는 커밋을 더합니다. 그 전에는 port 없는 워커와 자원 값이 hopai 검사를 통과하지 못합니다.
 
 ---
 
