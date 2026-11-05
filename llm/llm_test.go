@@ -563,3 +563,15 @@ func TestNodeCapacityFree(t *testing.T) {
 		t.Fatalf("n2 = %v, want unschedulable and only the NoSchedule taint", n2)
 	}
 }
+
+func TestParseEffort(t *testing.T) {
+	if e, err := ParseEffort(""); err != nil || e != "" {
+		t.Fatalf("empty = %q, %v", e, err)
+	}
+	if e, err := ParseEffort("high"); err != nil || string(e) != "high" {
+		t.Fatalf("high = %q, %v", e, err)
+	}
+	if _, err := ParseEffort("ultra"); err == nil {
+		t.Fatal("want error for unknown effort")
+	}
+}

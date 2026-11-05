@@ -81,7 +81,12 @@ func main() {
 	out := fs.String("out", "", "리포트 JSON을 쓸 파일 (비우면 표준 출력)")
 	demoCopy := fs.Bool("demo-copy-source-storage", false, "데모: AI 계획의 storageClass를 원본 DB가 쓰는 값으로 바꿔 제출한다(원본 설정을 그대로 옮긴 경우). "+
 		"대상에 그 StorageClass가 없으면 첫 리허설이 실패하고 AI가 진단해 고친다. 바꾼 사실은 에이전트 기록에 운영자 설정으로 남는다")
+	model := fs.String("model", llm.DefaultModel, "계획·진단에 쓸 Claude 모델 ID")
+	effort := fs.String("effort", "medium", "AI 생각 깊이: low, medium, high, xhigh, max")
+	noPrewarm := fs.Bool("no-prewarm", false, "AI 계획과 동시에 첫 리허설 샌드박스·임시 원본을 미리 준비하지 않음")
 	must(fs.Parse(os.Args[2:]))
+	eff, err := llm.ParseEffort(*effort)
+	must(err)
 	for name, v := range map[string]string{"-app": *app, "-from": *from, "-to": *to, "-sandbox-kubeconfig": *sbKube} {
 		if v == "" {
 			must(fmt.Errorf("%s가 필요함", name))
@@ -127,7 +132,7 @@ func main() {
 		clusters[e.name] = llm.Cluster{Typed: cs, Dynamic: dyn}
 	}
 	sink := agentlog.Tee{agentlog.Platform{C: pc}, agentlog.Writer{W: os.Stderr}}
-	agent := llm.New(llm.Config{Sink: sink, OnLogError: func(err error) {
+	agent := llm.New(llm.Config{Model: *model, Effort: eff, Sink: sink, OnLogError: func(err error) {
 		fmt.Fprintln(os.Stderr, "경고: 에이전트 기록 일부를 플랫폼에 남기지 못함:", err)
 	}})
 	// 원본 CNPG 클러스터의 이미지와 hot standby 설정. 대상은 원본의 물리 복제본이라 이 값들이 원본과 맞아야 하고,
@@ -142,14 +147,29 @@ func main() {
 		src = sc
 		fmt.Fprintf(os.Stderr, "원본 클러스터: %s (%s), hot standby 설정 %v\n", sc.Image, plan.MajorLabel(sc.Image), sc.Parameters)
 	}
-	scope := llm.PlanScope{App: *app, Namespace: draft.Source.Namespace, Envs: []string{*from, *to}}
-	prop, planSession, err := agent.Plan(ctx, llm.PlanInput{App: *app, Draft: &draft, Tools: llm.PlanTools(scope, pc, clusters), Source: stats, SourceCluster: src})
-	must(err)
-
 	// 리허설이 도는 대상 클러스터의 관리용 접속. 데모 준비도 이것으로 대상 StorageClass를 확인한다.
 	adminCfg, err := restConfig(*sbKube, *sbCtx)
 	must(err)
 	admin, err := kubernetes.NewForConfig(adminCfg)
+	must(err)
+	if *prodNS == "" {
+		*prodNS = draft.Target.Namespace
+	}
+	isolation := sandbox.IsolationConfig{ProdNamespace: *prodNS, Targets: targets}
+	// AI가 계획하는 동안 첫 리허설의 샌드박스, 격리 검사, 임시 원본을 미리 준비한다(원본 클러스터 값을 읽었을 때만).
+	var prewarm *rehearsal.Prewarm
+	if !*noPrewarm {
+		prewarm = rehearsal.StartPrewarm(ctx, rehearsal.Config{Admin: admin, AdminREST: adminCfg, Isolation: isolation, Rows: *rows}, &draft, src)
+		if prewarm != nil {
+			fmt.Fprintln(os.Stderr, "AI 계획과 동시에 첫 리허설 샌드박스와 임시 원본을 준비합니다")
+		}
+	}
+
+	scope := llm.PlanScope{App: *app, Namespace: draft.Source.Namespace, Envs: []string{*from, *to}}
+	prop, planSession, err := agent.Plan(ctx, llm.PlanInput{App: *app, Draft: &draft, Tools: llm.PlanTools(scope, pc, clusters), Source: stats, SourceCluster: src})
+	if err != nil {
+		prewarm.Discard(ctx)
+	}
 	must(err)
 
 	// 데모 실패 시나리오(README 9장): AI 계획의 storageClass를 원본 값으로 바꿔 제출한다.
@@ -167,6 +187,9 @@ func main() {
 
 	// 4. 제출과 첨부
 	rec, submitted, err := submit(ctx, pc, prop)
+	if err != nil {
+		prewarm.Discard(ctx)
+	}
 	must(err)
 	fmt.Fprintf(os.Stderr, "Plan %s 제출 (revision %d, 계획 세션 %s)\n", rec.Ref, rec.Revision, planSession)
 	// AI가 쓴 Plan·대상 매니페스트·근거를 리포트 옆에 바로 남긴다. 플랫폼에는 첨부를 내려받는 API가 없고,
@@ -185,9 +208,6 @@ func main() {
 	}
 
 	// 5. 리허설
-	if *prodNS == "" {
-		*prodNS = draft.Target.Namespace
-	}
 	diagScope := llm.PlanScope{App: *app, Namespace: draft.Target.Namespace, Envs: []string{*to}}
 	var diagTools []llm.Tool
 	for _, t := range llm.PlanTools(diagScope, nil, clusters) {
@@ -199,7 +219,8 @@ func main() {
 		Admin: admin, AdminREST: adminCfg,
 		Proposal: prop, Draft: &draft, PlanRef: rec.Ref, PlanSession: planSession,
 		Diagnoser: agent, Sink: sink,
-		Isolation:     sandbox.IsolationConfig{ProdNamespace: *prodNS, Targets: targets},
+		Isolation:     isolation,
+		Prewarm:       prewarm,
 		DiagnoseTools: diagTools,
 		Rows:          *rows, MaxRuns: *maxRuns,
 		OnAttempt: func(a rehearsal.Attempt) {
