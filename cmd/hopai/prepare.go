@@ -419,7 +419,8 @@ type pushTokenIssuer interface {
 // errNotImported는 레포가 플랫폼에 들여온 레포(토픽 hopcharlie-imported)가 아닐 때다.
 var errNotImported = errors.New("들여온 레포가 아님")
 
-// platformPushTokens는 POST /v1/github/push-tokens를 부른다. 고정한 platform 모듈(pkg/client)에 아직 없어 직접 부른다.
+// platformPushTokens는 POST /v1/github/push-tokens를 직접 부른다. pkg/client의 CreatePushToken도 있지만, 들여오지 않은 레포(403
+// repo_not_imported)와 이 API가 없는 플랫폼(404)을 운영자 안내로 바꾸려고 응답을 직접 읽는다.
 type platformPushTokens struct {
 	base, token string
 	hc          *http.Client

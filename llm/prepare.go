@@ -38,7 +38,7 @@ const prepareSystemTemplate = `너는 HopCharlie의 배포 준비 도우미다. 
 platform.yaml (플랫폼 서버와 같은 검사로 본다):
 - 레포 루트에 둔다. 64 KiB 이하. 모르는 키, 중복 키, 타입이 틀린 값은 거절된다. 최상위 키는 name, services, resources뿐이다.
 - name: 앱 이름. 3~32자 소문자·숫자·하이픈, 소문자나 숫자로 시작하고 끝남, "--" 금지. 공개 주소는 https://<name>.hopcharlie.dev
-- services: 1~5개. 서비스마다 Deployment <name>-<서비스 이름>이 생기고, port가 있으면 같은 이름의 Service도 생긴다. 같은 앱의 다른 서비스는 <name>-<서비스 이름>:<port>로 부른다. 키:
+- services: 1~5개. 서비스마다 Deployment <name>-<서비스 이름>이 생기고, port가 있으면 같은 이름의 Service도 생긴다. 같은 앱의 다른 서비스는 public이 아니면 <name>-<서비스 이름>:<port>로 부른다. public 서비스의 Service는 80번으로 들으므로 <name>-<서비스 이름>:80으로 부르고, 되도록 다른 서비스가 public 서비스를 부르지 않게 짠다. 키:
   - name (필수): 1~24자 소문자·숫자·하이픈, 소문자로 시작하고 소문자나 숫자로 끝남. 서비스끼리 겹치지 않음
   - path: docker build 컨텍스트. 레포 루트 기준 상대 경로, / 구분, .. 금지. 기본 "."
   - dockerfile: path 기준 상대 경로(레포 루트 기준이 아님). 기본 "Dockerfile". 실제 위치는 <path>/<dockerfile>
@@ -61,7 +61,7 @@ platform.yaml (플랫폼 서버와 같은 검사로 본다):
 - 컨테이너는 UID/GID 65532로 돈다(runAsNonRoot, fsGroup 65532). 모든 capability를 빼고 권한 상승을 막는다. 그래서 1024 미만 포트는 열 수 없다. 플랫폼이 PORT에 서비스 포트를 넣는다. 앱이 PORT를 읽게 하거나 port를 앱이 듣는 포트(1024 이상)에 맞춘다.
 - 실행 중에 쓰는 곳은 65532가 쓸 수 있어야 한다. Dockerfile에서 만들고 chown·chmod 한다. HOME은 없을 수 있으니 필요하면 ENV HOME=/tmp처럼 정한다. root가 필요한 init 시스템(root로 도는 supervisord, s6-overlay 등)은 쓰지 않는다. 진입 스크립트는 sh <파일>로 부르거나 Dockerfile에서 chmod +x 한다.
 - 볼륨은 없다. 파일 시스템은 Pod가 다시 뜨면 사라진다. 남아야 하는 데이터는 postgres 리소스 하나(DATABASE_URL)와 s3 리소스 하나(S3_*)로만 둔다. SQLite 같은 파일 DB는 재시작하면 비워진다.
-- 비밀값(관리자 비밀번호, 세션 키 등)은 운영자가 charlie app secret으로 넣고, 모든 서비스에 같은 이름의 환경 변수로 들어간다. 필요한 이름을 답의 secrets에 적는다. 앱이 다른 이름으로 읽으면 env에 $(시크릿 이름)으로 잇는다. 값은 어디에도(platform.yaml env, Dockerfile의 ENV·ARG 포함) 쓰지 않는다.
+- 비밀값(관리자 비밀번호, 세션 키 등)은 운영자가 charlie app secret으로 넣고, 모든 서비스에 같은 이름의 환경 변수로 들어간다. 필요한 이름을 답의 secrets에 적는다. 앱이 다른 이름으로 읽으면 env에 $(시크릿 이름)으로 잇는다. 값은 어디에도(platform.yaml env, Dockerfile의 ENV와 ARG 포함) 쓰지 않는다.
 - 자원은 서비스의 memory와 cpu로 정한다. 서비스마다 (replicas + 1) × memory를 더한 값은 {maxTotalMemory} 이하, (replicas + 1) × cpu를 더한 값은 {maxTotalCPU} 이하여야 한다. memory를 비운 서비스는 {unsetMemory}, cpu를 비운 서비스는 {unsetCPU}로 센다. +1은 롤링 업데이트 중에 서비스마다 하나 더 뜨는 Pod다. 앱이 실제로 쓰는 만큼 잡고, JVM 힙과 워커 수 등은 memory 안에 들어가게 맞춘다.
 - 밖으로 나가는 네트워크는 DNS, TCP 443, 앱 자기 네임스페이스만 된다. 시작할 때 다른 포트의 외부 서비스(SMTP 25·587, 외부 DB 등)를 기다리지 않게 한다.
 - public 서비스는 HTTP 게이트웨이 뒤에서 https://<name>.hopcharlie.dev로 서비스된다. TLS는 게이트웨이가 끝내므로 앱은 평문 HTTP로 듣는다. WebSocket 업그레이드는 지나간다.
@@ -306,6 +306,9 @@ func (r *repoDir) checkPreparation(raw []byte) (*Preparation, plan.Issues) {
 			add(path+".name", "환경 변수 이름(^[A-Z_][A-Z0-9_]*$, %d자 이하)이어야 함", maxSecretName)
 		case appspec.Reserved(s.Name):
 			add(path+".name", "%s는 플랫폼이 넣는 이름임 (%s)", s.Name, appspec.ReservedNames)
+		case randomName(s.Name):
+			// env의 $(이름)이 가리킬 수 있는 이름이라, 비밀값을 이름으로 적고 $( )로 감싸 커밋하는 것을 막는다
+			add(path+".name", "이름이 무작위 문자열(키, 토큰)처럼 보임. 비밀값이 아니라 앱이 읽는 환경 변수 이름을 적는다")
 		case seen[s.Name]:
 			add(path+".name", "%s가 두 번 나옴", s.Name)
 		}
@@ -480,17 +483,24 @@ var envRef = regexp.MustCompile(`\$\(([A-Z_][A-Z0-9_]*)\)`)
 // secretLooking은 환경 변수 값이 비밀값으로 보이는지 본다. 값 자체가 비밀처럼 보이거나(mask 규칙, 16자 이상의 무작위 문자열),
 // 이름이 비밀처럼 보이는데(mask.SecretKey) 값이 숫자, 참거짓, 기간, 경로, URL 같은 설정값이 아니면 비밀값이다.
 // COOKIE_SECURE=true, PASSWORD_MIN_LENGTH=8, TOKEN_TTL=3600, GOOGLE_APPLICATION_CREDENTIALS=/path는 설정값이다.
-// $(PGPASSWORD)처럼 다른 환경 변수를 가리키는 부분은 값이 아니므로 빼고 본다. mask는 원래 값으로 본다
-// (mask는 postgresql://$(PGUSER):$(PGPASSWORD)@... 의 참조를 그대로 두고, 빼면 빈 비밀번호의 URL처럼 보인다).
+// $(PGPASSWORD)처럼 다른 환경 변수를 가리키기만 하는 값은 비밀값이 아니다. 참조와 글자가 섞여 있으면 참조 자리를 글자 하나(x)로 두고
+// 나머지를 본다. 빼 버리면 "$(PORT)/s3cr3t"가 경로 "/s3cr3t"처럼 보인다. mask는 원래 값으로 본다
+// (mask는 postgresql://$(PGUSER):$(PGPASSWORD)@... 의 참조를 그대로 둔다). 휴리스틱이다.
 func secretLooking(name, value string) bool {
 	if mask.String(value) != value {
 		return true
 	}
-	value = envRef.ReplaceAllString(value, "")
-	if value == "" {
+	if envRef.ReplaceAllString(value, "") == "" {
 		return false
 	}
+	value = envRef.ReplaceAllString(value, "x")
 	return randomLooking(value) || mask.SecretKey(name) && !plainSetting(value)
+}
+
+// randomName은 환경 변수 이름의 _로 나눈 조각 중 무작위 문자열처럼 보이는 것이 있는지 본다. 이름 전체로 보면
+// OAUTH2_CLIENT_SECRET 같은 보통 이름도 걸린다. 휴리스틱이라 짧은 조각으로 나눈 값은 잡지 못한다.
+func randomName(name string) bool {
+	return slices.ContainsFunc(strings.Split(name, "_"), randomLooking)
 }
 
 var (

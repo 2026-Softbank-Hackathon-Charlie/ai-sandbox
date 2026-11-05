@@ -259,6 +259,34 @@ func TestCheckAgainstDraftPreservesRequiredTables(t *testing.T) {
 	}
 }
 
+func TestCheckAgainstDraftKeepsDecommission(t *testing.T) {
+	spec := func(selector, smoke string) *eplan.DecommissionSpec {
+		return &eplan.DecommissionSpec{Selector: selector, SmokeURL: smoke}
+	}
+	for _, c := range []struct {
+		name         string
+		draft, given *eplan.DecommissionSpec
+		ok           bool
+	}{
+		{"둘 다 없음", nil, nil, true},
+		{"같음", spec("app.kubernetes.io/part-of=shop", "https://shop.hopcharlie.dev"), spec("app.kubernetes.io/part-of=shop", "https://shop.hopcharlie.dev"), true},
+		{"초안에 없는 정리를 넣음", nil, spec("app.kubernetes.io/part-of=shop", "https://shop.hopcharlie.dev"), false},
+		{"초안의 정리를 뺌", spec("app.kubernetes.io/part-of=shop", "https://shop.hopcharlie.dev"), nil, false},
+		{"지울 대상을 바꿈", spec("app.kubernetes.io/part-of=shop", "https://shop.hopcharlie.dev"), spec("app.kubernetes.io/part-of=bank", "https://shop.hopcharlie.dev"), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := draft(t)
+			d.Decommission = c.draft
+			p := *d
+			p.Decommission = c.given
+			is := CheckAgainstDraft(&p, d)
+			if (len(is) == 0) != c.ok || !c.ok && !strings.Contains(is.Error(), "plan.decommission") {
+				t.Fatalf("decommission 비교: %v", is)
+			}
+		})
+	}
+}
+
 func TestCheckAgainstDraftDoesNotDiscloseOriginalSecrets(t *testing.T) {
 	d := draft(t)
 	d.Source.DSN = "postgres://app:unlabelled-original-secret@db:5432/app"

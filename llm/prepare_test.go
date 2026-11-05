@@ -356,6 +356,9 @@ func TestPrepareChecksRetryThenFail(t *testing.T) {
 		}), "한 줄이어야 함"},
 		// $(이름)이 컨테이너에 없는 이름이면 Kubernetes가 글자 그대로 넣는다. 비밀값을 감추는 데 쓰지 못한다
 		{"env의 없는 참조", map[string]string{"platform.yaml": goodSpec + "    env:\n      ADMIN_PASSWORD: \"$(ZX8KQ2LMN4PR7ST9VW1Y)\"\n", "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) { m["secrets"] = []any{} }), "env.ADMIN_PASSWORD: 값의 $(이름)이 이 컨테이너에 없는"},
+		{"시크릿 이름으로 감싼 비밀값", map[string]string{"platform.yaml": goodSpec + "    env:\n      ADMIN_PASSWORD: \"$(ZX8KQ2LMN4PR7ST9VW1Y)\"\n", "hopcharlie.Dockerfile": goodDockerfile}, answer(func(m map[string]any) {
+			m["secrets"] = []map[string]string{{"name": "ZX8KQ2LMN4PR7ST9VW1Y", "purpose": "관리자 비밀번호"}}
+		}), "secrets[0].name: 이름이 무작위 문자열"},
 		{"postgres 없이 PGHOST", map[string]string{"platform.yaml": goodSpec + "    env:\n      DB_HOST: \"$(PGHOST)\"\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "env.DB_HOST: 값의 $(이름)"},
 		{"뒤에 오는 env 키 참조", map[string]string{"platform.yaml": goodSpec + "    env:\n      A_URL: \"$(B_URL)\"\n      B_URL: \"http://x\"\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "env.A_URL: 값의 $(이름)"},
 		{"memory 범위 밖", map[string]string{"platform.yaml": goodSpec + "    memory: \"2Gi\"\n", "hopcharlie.Dockerfile": goodDockerfile}, goodAnswer, "services[0].memory: must be between 256Mi and 1536Mi"},
@@ -600,10 +603,32 @@ func TestSecretLooking(t *testing.T) {
 		{"SQLALCHEMY_DATABASE_URI", "postgresql+psycopg://$(PGUSER):$(PGPASSWORD)@$(PGHOST)/$(PGDATABASE)", false},
 		// env 이름이 아닌 $( )는 참조가 아니다 (Kubernetes는 글자 그대로 넣는다)
 		{"ADMIN_PASSWORD", "$(hunter2)", true},
+		// 참조를 빼서 나머지가 경로처럼 보이면 안 된다
+		{"ADMIN_PASSWORD", "$(PORT)/s3cr3t", true},
+		{"ADMIN_PASSWORD", "x/s3cr3t", true},
 	} {
 		if got := secretLooking(c.name, c.value); got != c.secret {
 			t.Errorf("%s=%q: 비밀값=%v, want %v", c.name, c.value, got, c.secret)
 		}
+	}
+}
+
+func TestRandomName(t *testing.T) {
+	for name, random := range map[string]bool{
+		"OAUTH2_CLIENT_SECRET":     false, // 이름 전체로 보면 무작위처럼 보인다
+		"AUTH0_CLIENT_SECRET":      false,
+		"ADMIN_PASSWORD":           false,
+		"SECRET_KEY_BASE":          false,
+		"ZX8KQ2LMN4PR7ST9VW1Y":     true,
+		"APP_ZX8KQ2LMN4PR7ST9VW1Y": true,
+	} {
+		if got := randomName(name); got != random {
+			t.Errorf("%s: 무작위=%v, want %v", name, got, random)
+		}
+	}
+	// 조각으로 나누는 이유: 이름 전체로 보면 이 둘도 무작위 문자열로 걸린다
+	if !randomLooking("OAUTH2_CLIENT_SECRET") || !randomLooking("AUTH0_CLIENT_SECRET") {
+		t.Fatal("이름 전체 판정이 바뀌었음. randomName이 조각으로 나눌 필요를 다시 본다")
 	}
 }
 
