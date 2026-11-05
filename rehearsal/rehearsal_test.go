@@ -3,18 +3,19 @@ package rehearsal
 import (
 	"context"
 	"encoding/json"
-	corev1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"net/url"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/migration-engine/pkg/engine"
@@ -451,6 +452,10 @@ func TestTempStorageClass(t *testing.T) {
 		{"대상 값이 Retain이면 고르지 않음", "spec: {storage: {storageClass: cnpg-gp3-retain}}", "gp3", eks},
 		{"대상 값이 이 클러스터에 없으면(데모 실패) CSI Delete", "spec: {storage: {storageClass: standard-rwo}}", "gp3", eks},
 		{"대상 값이 없어도", "spec: {}", "gp3", eks},
+		// 기본값이 Retain이면 샌드박스를 지워도 디스크가 남는다: Delete인 CSI 클래스를 고른다
+		{"기본값이 Retain이면 Delete인 것", "spec: {}", "gp3", append(slices.Clone(eks), sc("retain-default", "ebs.csi.aws.com", &retain, true))},
+		{"기본값이 Retain이어도 대상 값이 Delete로 있으면 그것", "spec: {storage: {storageClass: gp2}}", "gp2", append(slices.Clone(eks), sc("retain-default", "ebs.csi.aws.com", &retain, true))},
+		{"Delete인 것이 없으면 Retain 기본값이라도", "spec: {}", "", []storagev1.StorageClass{sc("retain-default", "ebs.csi.aws.com", &retain, true)}},
 	} {
 		got, err := TempStorageClass(c.scs, c.manifest)
 		if err != nil || got != c.want {

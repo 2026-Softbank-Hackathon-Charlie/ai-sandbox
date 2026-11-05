@@ -53,7 +53,7 @@ type IsolationConfig struct {
 	ProbeImage string
 	// Timeout은 검사 Pod가 끝날 때까지 기다리는 시간이다. 기본 90초.
 	Timeout time.Duration
-	// Settle은 검사 Pod가 연결을 시도하기 전에 기다리는 시간이다. 기본 15초 (DefaultSettle).
+	// Settle은 검사 Pod가 연결을 시도하기 전에 기다리는 시간이다. 0이면 기본 15초 (DefaultSettle), 음수면 기다리지 않는다.
 	Settle time.Duration
 	// APIServerAllowed면 샌드박스가 CNPG 때문에 API 서버로 나갈 수 있다(ForCNPG).
 	// 그때는 API 서버 대신 다른 네임스페이스의 서비스(CNPG 웹훅)를 정책 동작의 증거로 쓴다.
@@ -66,6 +66,19 @@ type IsolationConfig struct {
 // 같은 네임스페이스에서 몇 초 지난 Pod는 세 곳 모두 막혔다. 검사는 정책이 붙은 뒤의 상태를 보도록 기다린다.
 // 이 틈은 리허설 Pod에도 있다. 없애려면 클러스터를 strict 모드(NETWORK_POLICY_ENFORCING_MODE=strict)로 둔다.
 const DefaultSettle = 15 * time.Second
+
+// effectiveSettle는 IsolationConfig.Settle을 실제 대기 시간으로 바꾼다.
+// 0이면 기본값(DefaultSettle), 음수면 기다리지 않는다. 클러스터를 strict 모드로 바꾼 뒤(infra)
+// 대기 없이 검사해서 시작 직후의 차단을 직접 확인할 때 쓴다.
+func effectiveSettle(s time.Duration) time.Duration {
+	switch {
+	case s == 0:
+		return DefaultSettle
+	case s < 0:
+		return 0
+	}
+	return s
+}
 
 // CNPGWitness는 정책이 없으면 열리고, 샌드박스 정책으로는 막혀야 하는 다른 네임스페이스의 서비스다.
 var CNPGWitness = Target{Name: "other-namespace", Host: "cnpg-webhook-service.cnpg-system.svc.cluster.local", Port: 443, Expect: ExpectBlocked, MustResolve: true}
@@ -332,10 +345,7 @@ func checkNetwork(ctx context.Context, admin kubernetes.Interface, ns string, c 
 	if timeout == 0 {
 		timeout = 90 * time.Second
 	}
-	settle := c.Settle
-	if settle == 0 {
-		settle = DefaultSettle
-	}
+	settle := effectiveSettle(c.Settle)
 	timeout += settle
 	targets := targetsFor(c)
 	pod, err := ProbePod(ns, image, settle, targets)

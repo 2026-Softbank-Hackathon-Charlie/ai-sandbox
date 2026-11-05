@@ -25,6 +25,11 @@ ai-sandbox에 main으로 합쳐진 순서대로 무엇이 생겼는지 정리했
 | [v18](#v18--ai-출력-검사와-샌드박스-권한-좁힘) | [#21](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/21) | 11/3 21:05 | 이상한 AI 출력 막기, 샌드박스 권한 좁힘 | 85 |
 | [v19](#v19--원본-실측으로-용량-검사) | [#23](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/23) | 11/4 10:22 | 원본 실측값으로 접속 수·초기 복사 시간 검사 | 99 |
 | [v20](#v20--원본과-같은-postgresql-메이저-버전) | [#24](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/24) | 11/4 13:39 | 원본과 같은 PostgreSQL 메이저 버전, CNPG 1.30.1 확인 | 109 |
+| [v21](#v21--버전-히스토리-보충) | [#25](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/25) | 11/4 16:40 | 버전 히스토리에 v15~v20 추가 (코드 변화 없음) | 109 |
+| [v22](#v22--데모-실패-시나리오) | [#26](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/26) | 11/4 17:14 | 데모 실패 시나리오 (`hopai -demo-copy-source-storage`) | 114 |
+| [v23](#v23--격리-검사-대기) | [#27](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/27) | 11/5 14:20 | 격리 검사 Pod가 정책이 붙은 뒤에 연결, 실패 항목을 메시지에 남김 | 114 |
+| [v24](#v24--실제-eks-리허설-수정) | [#28](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/28) | 11/5 14:21 | 실제 EKS에서 리허설 임시 원본이 뜨지 않던 문제 4가지 수정 | 116 |
+| [v25](#v25--ai-계획-파일-저장) | [#29](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/29) | 11/5 14:21 | AI 계획을 리포트 옆 파일로 저장 | 117 |
 
 - 머지 시각은 한국 시간이고, "테스트"는 그 버전에 들어 있던 테스트 함수 개수입니다.
 - 닫힌 PR #1, #2는 플랫폼의 계획 형식이 정해진 뒤 #4~#8로 나눠 다시 올렸습니다.
@@ -393,6 +398,107 @@ CNPG 1.30.1, 기본 이미지 18.6인 kind에서 리허설 5건을 돌렸습니�
 
 - 쓰기 보류가 측정마다 9~41초로 달랐습니다(단일 노드 kind). 11/6에 실제 클러스터에서 다시 재야 합니다.
 - 플랫폼 시작 검사의 메이저 버전 비교는 [platform #50](https://github.com/2026-Softbank-Hackathon-Charlie/platform/issues/50)으로 제안했고 platform #51로 들어갔습니다.
+
+---
+
+## v21 · 버전 히스토리 보충
+
+[PR #25](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/25) · 11/4 16:40 · 2파일 +127 −2
+
+**무엇이 달라졌나**
+
+이 문서와 README의 버전 표가 v14에서 멈춰 있어서 v15~v20을 추가했습니다. README 10장의 날짜별 상태도 11/4 기준으로 고쳤습니다. 코드는 그대로입니다.
+
+**어떻게 확인했나**
+
+- 목차 링크 22개가 모두 제목과 맞는지 GitHub 제목 링크 규칙으로 비교했습니다.
+- 테스트 수는 각 머지 커밋의 테스트 함수 개수입니다.
+
+---
+
+## v22 · 데모 실패 시나리오
+
+[PR #26](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/26) · 11/4 17:14 · 5파일 +531 −6
+
+**무엇이 달라졌나**
+
+AI는 조사 도구로 대상 StorageClass를 보고 처음부터 맞게 고르기 때문에, 그대로 두면 리허설이 처음부터 통과해서 데모에서 "실패 → AI 진단 → 수정 → 재통과"를 보여 줄 수 없었습니다. `hopai run -demo-copy-source-storage` 옵션을 넣었습니다.
+
+- AI 계획의 `storageClass`(있으면 `walStorage`도)를 **원본 DB가 실제로 쓰는 값**으로 바꿔 제출합니다. 원본 설정을 그대로 옮긴 계획과 같습니다.
+- 대상에 그 StorageClass가 없으면 1차 리허설에서 DB 볼륨이 실제로 Pending이 되고, 멈춤 감지(25초)와 AI 진단이 돕니다. 진단 수정안이 통과하면 고친 `target.yaml`을 첨부해 revision이 올라갑니다.
+- 실패가 나지 않을 조건(AI가 이미 원본 값을 골랐거나, 대상에도 그 값이 있거나, 목록을 읽지 못함)이면 시작하지 않고 이유를 알립니다.
+- 바꾼 사실은 감추지 않습니다. 표준 오류와 결과 JSON의 `demo`, 그리고 플랫폼 에이전트 기록의 **"운영자 데모 설정"** 세션으로 남아 콘솔에서 리허설 실패보다 먼저 보입니다.
+
+**어떻게 확인했나**
+
+- kind에서 원본 StorageClass `standard-rwo`를 그대로 옮겼을 때 1회차가 prepare에서 55초 만에 멈추고, 수정안(`/spec/storage/storageClass` → `standard`) 뒤 2회차가 통과했습니다(쓰기 보류 19.7초, 96초). 진단은 AI 대신 정해진 수정안을 내는 가짜 진단기로 했습니다.
+
+**남은 일**
+
+- 실제 AI 진단으로 같은 장면이 나오는지는 API 키가 있는 환경에서 확인해야 합니다.
+
+---
+
+## v23 · 격리 검사 대기
+
+[PR #27](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/27) · 11/5 14:20 · 4파일 +45 −8
+
+**무엇이 달라졌나**
+
+실제 Claude, 플랫폼, EKS로 `hopai run`을 처음 돌렸을 때(GKE→EKS) AI 계획과 제출은 46초에 끝났지만, 리허설 1회차에서 격리 검사 12개 중 네트워크 3개(운영 DB, 다른 네임스페이스의 CNPG 웹훅, 메타데이터 주소)가 열린 것으로 나와 멈췄습니다. 실패 메시지도 `<nil>`이라 무엇이 걸렸는지 알 수 없었습니다.
+
+- 원인은 워크로드 EKS의 VPC CNI(v1.22.4) standard 모드입니다. **새 Pod에 정책을 붙이기 전 몇 초 동안 모든 통신이 열립니다.** 검사 Pod가 뜨자마자 연결해서 그 틈에 걸렸습니다. 같은 샌드박스에서 새로 띄워 바로 연결하면 세 곳 다 열렸고, 띄워 두고 0·20·40초 뒤 연결하면 모두 막혔습니다.
+- 검사 Pod가 연결 전에 15초 기다립니다(`IsolationConfig.Settle`, 기본 `sandbox.DefaultSettle`, 0~5분).
+- 격리 검사가 실패하면 기대와 다른 항목을 메시지에 적습니다(예: `db: blocked 기대, open`).
+
+**어떻게 확인했나**
+
+- 단위 테스트 통과.
+- 실제 워크로드 EKS에서 `sandboxctl create -cnpg` 뒤 `check`(운영 DB 대상 포함)가 12/12 통과했습니다. 검사 28초(대기 15초 포함). PR 본문의 기록입니다.
+
+**남은 일**
+
+- 이 틈은 리허설 CNPG Pod에도 있습니다. 없애려면 클러스터를 `NETWORK_POLICY_ENFORCING_MODE=strict`로 바꿔야 합니다(infra #60, #61). GKE와 k3s는 아직 확인하지 않았습니다.
+
+---
+
+## v24 · 실제 EKS 리허설 수정
+
+[PR #28](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/28) · 11/5 14:21 · 5파일 +181 −6
+
+**무엇이 달라졌나**
+
+실제 EKS(GKE→EKS)에서 리허설이 임시 원본 단계에서 실패하던 원인 4가지를 고쳤습니다.
+
+| 증상 | 원인 → 수정 |
+| --- | --- |
+| 임시 원본 PVC가 Pending, 6분 뒤 실패 | 워크로드 EKS에 기본 StorageClass가 없음 → `TempStorageClass`가 쓸 수 있는 클래스를 고름(Retain은 디스크가 남아 고르지 않음) |
+| healthy 직후 첫 접속 실패(간헐) | 첫 접속을 3초 간격으로 60초까지 다시 시도 |
+| 엔진 precheck에서 `tls: failed to verify certificate` | 터널(127.0.0.1)로 붙을 때 필요한 `tls-server-name`이 샌드박스 토큰 kubeconfig에서 빠졌음 → 유지 |
+| `password authentication failed` / `User app has no password assigned`(간헐) | EKS VPC CNI는 서비스 주소(ClusterIP) 기준으로 판정해서 `kubernetes.default`가 막힘 → `ForCNPG`가 그 ClusterIP도 연다 |
+
+**어떻게 확인했나**
+
+- 단위 테스트 통과(`TestTempStorageClass`, `TestTokenKubeconfigKeepsTLSServerName`, `TestForCNPG`에 ClusterIP 검사 추가).
+- 실제 EKS에서 `TestClusterRehearsalPasses` 통과: 격리 검사 25초, 임시 원본과 5,000행 34초, 엔진 9단계 69초(쓰기 중단 16.9초), 전체 128초. PR 본문의 기록입니다.
+
+**남은 일**
+
+- standard 모드에서 새 Pod의 첫 몇 초가 열려 있는 문제의 근본 해결은 인프라의 strict 모드입니다(v23과 같음).
+
+---
+
+## v25 · AI 계획 파일 저장
+
+[PR #29](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/29) · 11/5 14:21 · 2파일 +51 −0
+
+**무엇이 달라졌나**
+
+`hopai run -out <리포트>`일 때 플랫폼에 제출한 AI 계획(Plan, 대상 매니페스트, 근거)을 `<리포트>-proposal.json`으로 함께 저장합니다. 플랫폼에 첨부를 내려받는 API가 없어서, 리허설이 실패하거나 멈추면 AI가 무엇을 만들었는지 볼 방법이 없었습니다. 비밀값은 가리고 0600 권한으로 씁니다.
+
+**어떻게 확인했나**
+
+- `TestSaveProposal`: 파일 이름, DSN 비밀번호 마스킹, 매니페스트 보존을 확인했습니다. 전체 테스트 통과.
 
 ---
 

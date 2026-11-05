@@ -29,6 +29,11 @@ HopCharlie의 AI(Plan 작성, 리허설 실패 진단, 수정안)와 샌드박�
 | v18 | [#21](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/21) | 11/3 21:05 | 이상한 AI 출력 막기, 샌드박스 권한 좁힘 |
 | v19 | [#23](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/23) | 11/4 10:22 | 원본 실측값으로 접속 수·초기 복사 시간 검사 |
 | v20 | [#24](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/24) | 11/4 13:39 | 원본과 같은 PostgreSQL 메이저 버전, CNPG 1.30.1 확인 |
+| v21 | [#25](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/25) | 11/4 16:40 | 버전 히스토리에 v15~v20 추가 (코드 변화 없음) |
+| v22 | [#26](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/26) | 11/4 17:14 | 데모 실패 시나리오 (`hopai -demo-copy-source-storage`) |
+| v23 | [#27](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/27) | 11/5 14:20 | 격리 검사 Pod가 정책이 붙은 뒤에 연결, 실패 항목을 메시지에 남김 |
+| v24 | [#28](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/28) | 11/5 14:21 | 실제 EKS에서 리허설 임시 원본이 뜨지 않던 문제 4가지 수정 |
+| v25 | [#29](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/29) | 11/5 14:21 | AI 계획을 리포트 옆 파일로 저장 |
 
 # HopCharlie AI·샌드박스 사용 설계 (D 영역 초안)
 
@@ -245,7 +250,7 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 | 데이터 | 임시 PostgreSQL(CNPG)에 테스트 데이터만. 운영 데이터는 넣지 않는다 (파일 리허설은 아직 없음) |
 | 삭제 | 리허설이 끝나면 바로 지운다. 남은 것은 `expires-at`이 지난 네임스페이스를 `Sweep`이 지운다 (CronJob 매니페스트는 아직 없음) |
 
-**CNPG 모드 (`ForCNPG`, `sandboxctl -cnpg`):** 리허설은 샌드박스에 CNPG 클러스터를 띄우므로, 오퍼레이터(`cnpg-system`)가 들어오고 인스턴스가 API 서버로 나가는 길만 더 연다. API 서버 주소는 `default/kubernetes`의 EndpointSlice에서 읽는다. 이때 격리 검사는 API 서버 대신 다른 네임스페이스의 서비스(`cnpg-webhook-service.cnpg-system`)가 막히는지로 정책 동작을 증명한다. 로컬 kind(kindnet, CNPG 1.25.1)에서 정책 없는 네임스페이스에서는 열리고 샌드박스에서는 막히는 것을 확인했다.
+**CNPG 모드 (`ForCNPG`, `sandboxctl -cnpg`):** 리허설은 샌드박스에 CNPG 클러스터를 띄우므로, 오퍼레이터(`cnpg-system`)가 들어오고 인스턴스가 API 서버로 나가는 길만 더 연다. API 서버 주소는 `default/kubernetes`의 EndpointSlice에서 읽는다. EKS VPC CNI는 엔드포인트가 아니라 서비스 주소(ClusterIP) 기준으로 판정하므로 `default/kubernetes` 서비스의 ClusterIP도 함께 연다(v24). 이때 격리 검사는 API 서버 대신 다른 네임스페이스의 서비스(`cnpg-webhook-service.cnpg-system`)가 막히는지로 정책 동작을 증명한다. 로컬 kind(kindnet, CNPG 1.25.1)에서 정책 없는 네임스페이스에서는 열리고 샌드박스에서는 막히는 것을 확인했다.
 
 엔진은 대상 네임스페이스의 `clusters.postgresql.cnpg.io`만 조회·적용·패치하므로, 리허설 때 엔진도 샌드박스 토큰(최소 권한)으로 돌린다.
 
@@ -266,12 +271,14 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 
 결과는 리허설 세션의 `blocked` 이벤트로도 남는다.
 
+새 Pod는 정책이 붙기 전 몇 초 동안 통신이 열릴 수 있어(EKS standard 모드) 검사 Pod는 연결 전에 15초 기다린다(`sandbox.DefaultSettle`, v23). 실패하면 `<nil>` 대신 기대와 다른 항목을 메시지에 적는다(예: `db: blocked 기대, open`).
+
 ## 7. 리허설 (`rehearsal`)
 
 대상 클러스터의 샌드박스에서 **실제 migration-engine**으로 Plan을 끝까지 돌린다. 고정값을 돌려주는 단계는 없다.
 
 1. 샌드박스를 CNPG 모드로 만들고(6장) 격리 검사를 돌린다. 막혀야 하는 명령은 `blocked` 이벤트로 남는다. 격리가 깨지면 그 샌드박스에서 아무것도 하지 않고 리허설 전체를 멈춘다.
-2. 임시 원본 CNPG 클러스터를 만든다. 이름은 Plan의 원본 클러스터와 같고, 엔진의 분산 토폴로지(`replica.source`가 대상)를 따른다. 검증할 스키마마다 테스트 데이터를 넣는다. 운영 데이터는 넣지 않는다. 임시 원본은 기본값이 아니라 **실제 원본처럼** 띄운다(`PrepareTempSource`). 원본 클러스터를 읽었으면 그 이미지와 hot standby 설정을 쓰고(원본에 없는 설정은 원본도 기본값), 원본 이미지가 CNPG 공식 이미지가 아니면(사설 레지스트리·미러) 샌드박스가 받지 못할 수 있어 같은 메이저인 대상 이미지를 쓴다. 원본을 모르면 대상 매니페스트의 이미지와 hot standby 설정을 쓴다. 임시 원본이 대상 클러스터의 기본값(CNPG 설정 100·32, 운영자 이미지 18.6)으로 뜨면, 실제 원본(예: moimroom 17.11)과 달라 운영에서는 되는 대상이 리허설에서만 실패하거나 그 반대가 된다. 메모리 같은 다른 설정은 샌드박스가 작아서 옮기지 않는다.
+2. 임시 원본 CNPG 클러스터를 만든다. 이름은 Plan의 원본 클러스터와 같고, 엔진의 분산 토폴로지(`replica.source`가 대상)를 따른다. 검증할 스키마마다 테스트 데이터를 넣는다. 운영 데이터는 넣지 않는다. 임시 원본은 기본값이 아니라 **실제 원본처럼** 띄운다(`PrepareTempSource`). 원본 클러스터를 읽었으면 그 이미지와 hot standby 설정을 쓰고(원본에 없는 설정은 원본도 기본값), 원본 이미지가 CNPG 공식 이미지가 아니면(사설 레지스트리·미러) 샌드박스가 받지 못할 수 있어 같은 메이저인 대상 이미지를 쓴다. 원본을 모르면 대상 매니페스트의 이미지와 hot standby 설정을 쓴다. 임시 원본이 대상 클러스터의 기본값(CNPG 설정 100·32, 운영자 이미지 18.6)으로 뜨면, 실제 원본(예: moimroom 17.11)과 달라 운영에서는 되는 대상이 리허설에서만 실패하거나 그 반대가 된다. 메모리 같은 다른 설정은 샌드박스가 작아서 옮기지 않는다. 임시 원본 디스크의 StorageClass는 샌드박스 클러스터에서 실제로 뜨는 것을 고른다(`TempStorageClass`, v24): 기본값이 있고 지우면 디스크도 지우는 것(Delete)이면 비우고, 아니면 대상 매니페스트의 값이 이 클러스터에 있고 Delete이면 그것, 그다음 Delete인 CSI 클래스를 이름순으로 고른다. Retain은 샌드박스를 지워도 디스크가 남아 고르지 않는다(Delete가 없을 때만 Retain 기본값을 쓴다). 임시 원본이 healthy가 된 직후 첫 접속은 일시 오류(비밀번호 인증 실패 `28P01` 등)에 한해 60초까지 다시 시도하고, 잘못된 DSN 같은 영구 오류는 바로 실패한다.
 3. AI가 쓴 대상 매니페스트를 샌드박스로 옮긴다. 네임스페이스와 접속 주소만 바꾸고 StorageClass, 크기, 자원, 인스턴스 수, 이미지는 그대로 둔다. 그 값이 대상 클러스터에서 되는지가 리허설이 보려는 것이다.
 4. 엔진을 라이브러리로 부른다. 쿠버네티스는 **샌드박스 토큰**(최소 권한)으로, DB는 로컬 프록시(연결마다 현재 primary Pod로 port-forward)로 붙는다. 게이트웨이, 파일, k6 기록은 샌드박스에 없으므로 뺀다. 상한값과 스키마는 AI의 Plan을 따르며, 테이블 필터는 샌드박스에 만든 합성 fixture 이름으로 바꾼 사본을 사용한다.
 5. 같은 경고(PVC ProvisioningFailed, FailedScheduling, 이미지 풀 실패 등)가 25초 넘게 **계속 되풀이되면** 기다려도 풀리지 않는 환경 문제로 보고 엔진을 멈춘다. 이 실행 전부터 있던 경고와, 한 번 나고 다시 일어나지 않은 경고는 보지 않는다. 엔진이 끝나면 감시를 먼저 멈추므로 성공한 실행이 늦은 판정으로 실패가 되지 않는다. 엔진의 catchupTimeout(분 단위)까지 기다리지 않는다. 경고 이벤트 없이 CNPG 작업 Job(pg_basebackup, join)의 Pod만 거듭 실패하는 경우(예: 원본과 대상의 PostgreSQL 메이저 버전이 다름)도 같은 Job의 Pod가 3번 실패하면 멈추고, 마지막 Pod 로그의 오류 줄(예: `incompatible server version`)을 근거로 남긴다. 이런 실패는 Job 재시도가 다 끝날 때(10분 넘게)까지 이벤트로 드러나지 않기 때문이다.
@@ -310,22 +317,23 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 
 ## 10. 날짜별 (D 영역)
 
-목표일보다 먼저 끝난 항목도 상태에 완료로 적는다 (11/4 기준).
+목표일보다 먼저 끝난 항목도 상태에 완료로 적는다 (11/5 기준).
 
 | 목표일 | 목표 | 상태 |
 |---|---|---|
 | 11/2 (월) | 조사 도구, 계획 프롬프트 | 완료 (`get_app`, `list_storage_classes`, `node_capacity`, `get_cnpg_cluster`) |
 | 11/3 (화) | Plan 검사, 재요청, 고정 검사 | 완료 (엔진 Plan 기준) |
 | 11/4 (수) | 샌드박스, RBAC·NetworkPolicy·Quota, 리허설 1회 | 완료 (kind, CNPG 1.25.1과 1.30.1). 원본 실측 검사(v19)와 원본 메이저 버전 맞춤(v20) 추가 |
-| 11/5 (목) | 실패 → 진단 → 수정 → 재통과, 격리 검증 | 코드 완료. AI 진단은 API 키로 실제 확인 필요 |
-| 11/6 (금) | 데모 실패 시나리오, 타임아웃·상한 값 확정 | 실패 시나리오 완료(`-demo-copy-source-storage`, kind에서 1차 실패 → 수정안 → 2차 통과 확인). 상한 값은 남음 |
+| 11/5 (목) | 실패 → 진단 → 수정 → 재통과, 격리 검증 | 코드 완료. 실제 EKS(GKE→EKS)에서 `hopai run`을 처음 돌려 계획·제출 46초, 격리 검사에서 멈춤(v23으로 수정). 임시 원본 문제 4가지도 고쳐(v24) 실제 EKS 리허설 통과(쓰기 중단 16.9초, 전체 128초, PR 본문 기록). 수정 뒤의 전체 `hopai run`과 실제 AI 진단은 API 키가 있는 환경에서 확인 필요 |
+| 11/6 (금) | 데모 실패 시나리오, 타임아웃·상한 값 확정 | 실패 시나리오 완료(v22, `-demo-copy-source-storage`, kind에서 1차 실패 → 수정안 → 2차 통과를 11/5에 다시 확인). 상한 값은 남음. 실제 EKS에서 쓰기 보류를 다시 재야 함 |
 
 ## 11. 팀 결정이 필요한 것
 
 - **DB 지원 범위:** 현재 엔진은 CNPG replica·demote·promote를 사용한다. 다른 DB 이전 방식을 지원하려면 엔진 변경과 별도 합의가 필요하다. AI가 Plan에 이전 방식 enum을 새로 만들지 않는다.
 - **트래픽 게이트웨이 연결:** 현재 플랫폼의 Go 게이트웨이 계약을 사용한다. 각 환경 backend 주소와 샌드박스용 게이트웨이를 인계받아야 한다.
 - **AI 범위 (3장 7번):** 온보딩(Dockerfile·PR 생성)을 넣을지. 콘솔에서는 일단 뺐다.
-- **승인 게이트 (platform #24):** 리포트가 리허설한 후보를 `candidate`(Plan 본문과 `target.yaml`의 SHA-256)로 남기는 쪽은 끝났다([#16](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/16), 7장 10번). 플랫폼이 승인할 때 이 값과 `passed`를 확인하는 쪽이 남았다.
+- **승인 게이트 (platform #24):** 리포트가 리허설한 후보를 `candidate`(Plan 본문과 `target.yaml`의 SHA-256)로 남기는 쪽은 끝났다([#16](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/16), 7장 10번). 플랫폼이 승인할 때 이 값과 `passed`를 확인하는 쪽이 남았다. 11/5 기준 platform #24는 열려 있고 연결된 PR은 아직 없다.
+- **EKS strict 모드 (infra #60, #61):** 워크로드 EKS를 strict로 바꾸는 준비 PR(infra #61)이 11/5 머지됐다. 실제 클러스터 적용 여부는 확인하지 못했다. 적용되면 `IsolationConfig.Settle`을 음수로 줘서 대기 없이 격리 검사를 다시 돌려, 새 Pod의 시작 직후 차단을 직접 확인해야 한다. 검사 Pod는 소유자 참조가 없는 단독 Pod라서 strict에서도 정책이 안정적으로 적용되는지는 따로 봐야 한다(infra ADR 0046). A 영역과 적용 시점을 정한다.
 - **계획 세션의 planRef:** 지금은 리허설 세션에 계획 세션 ID를 남겨 연결한다. 세션에 planRef를 나중에 붙이는 API가 플랫폼에 생기면 계획 세션을 Plan에 직접 연결할 수 있다 (platform 담당과 상의).
 - **리허설 범위:** 지금은 대상 클러스터 하나에 원본과 대상을 모두 만든다. 클러스터 사이 복제까지 시험하려면 양쪽에 샌드박스가 필요하다.
 - **샌드박스 관리 자격 증명:** 리허설은 대상 클러스터에서 네임스페이스 생성·삭제, 검사 Pod, port-forward 권한이 필요하다. 어느 계정으로 할지 A 영역과 정한다.
@@ -359,6 +367,7 @@ go run ./cmd/hopai run -app moimroom -from gke -to eks \
 - `-env`는 AI 조사 도구가 쓰는 환경별 읽기 전용 kubeconfig다. `hopai`는 원본 환경의 것으로 원본 CNPG 클러스터의 이미지와 hot standby 설정을 읽어 계획 검사와 리허설 임시 원본에 쓴다. 없거나 읽지 못하면 경고만 내고 이 검사 없이 계획한다.
 - `-sandbox-kubeconfig`는 대상 클러스터에서 샌드박스를 만들고 지우는 관리용이다. 엔진은 이것이 아니라 샌드박스 토큰으로 돈다.
 - `-demo-copy-source-storage`는 데모 실패 시나리오(9장)다. AI 계획의 StorageClass를 원본 값으로 바꿔 제출해 1차 리허설을 실제로 실패시킨다. 원본 환경의 `-env`(CNPG `clusters` get, `persistentvolumeclaims` list)가 필요하고, 실패가 나지 않을 조건이면 시작하지 않는다.
+- `-out`을 주면 제출한 AI 계획(Plan, 대상 매니페스트, 근거)도 `<리포트>-proposal.json`으로 함께 저장한다(비밀값은 가림, 권한 0600, v25). 플랫폼에 첨부를 내려받는 API가 없어서, 리허설이 실패하거나 멈춰도 AI가 무엇을 만들었는지 볼 수 있게 한다.
 - 끝나면 Plan ref와 revision, 세션 ID, 리허설 리포트를 출력한다. 리허설을 통과하지 못하면 종료 코드 1이고 승인하지 말라고 알린다.
 - 비공개 모듈(platform, migration-engine)을 받으려면 `go env -w GOPRIVATE=github.com/2026-Softbank-Hackathon-Charlie`가 필요하다.
 
@@ -395,9 +404,22 @@ REHEARSAL_KUBECONFIG=<kubeconfig> REHEARSAL_SC=standard go test -tags cluster -r
 - 운영 DB 접속 검사는 이 테스트에 대상을 넣지 않아 빠졌다. `hopai`는 `-target`으로 넣는다.
 - 이전 결과: CNPG 1.25.1(대상·임시 원본 모두 PostgreSQL 17)에서는 11/3에 쓰기 보류 20.6초, 전체 96초 / `gp3` 52초.
 
+2026-11-05에 main(#27~#29 포함)으로 같은 클러스터 테스트 6개를 로컬 kind(CNPG 1.30.1)에서 다시 돌렸다. 모두 통과했고 전체 672초 걸렸다. AI 진단은 정해진 수정안을 내는 가짜 진단기다.
+
+| 테스트 | 기대 | 결과 |
+|---|---|---|
+| `TestClusterRehearsalPasses` | 통과 | 통과. 엔진 9단계 성공, 쓰기 보류 16.4초, 109초 |
+| `TestClusterRehearsalCatchesWrongStorageClass` | 실패를 잡음 | 잡음. prepare에서 멈춤, 66초 |
+| `TestClusterRehearsalWithSmallStandbyParams` | 통과 | 통과. 쓰기 보류 20.3초, 110초 |
+| `TestClusterRehearsalCatchesMajorVersionMismatch` | 실패를 잡음 | 잡음. prepare에서 멈춤, 91초 |
+| `TestClusterRehearsalWithRealSourceImage` | 통과 | 통과. 쓰기 보류 17.1초, 108초 |
+| `TestClusterDemoCopiedSourceStorageFailsThenFixed` | 1회차 실패 후 수정, 2회차 통과 | 통과. 2회차 쓰기 보류 20.5초, 184초 |
+
+실제 워크로드 EKS의 기록은 PR 본문 기준이다. #28: `TestClusterRehearsalPasses` 통과(격리 검사 25초, 임시 원본과 테스트 데이터 5,000행 34초, 엔진 9단계 69초, 쓰기 중단 16.9초, 전체 128초). #27: `sandboxctl create -cnpg` 뒤 `check`가 운영 DB 대상 포함 12/12 통과(검사 28초, 대기 15초 포함).
+
 알려진 한계:
 
-- 실제 EKS(VPC CNI v1.22.4, 정책 모드 `standard`)에서는 NetworkPolicy가 동작하지만, **새 Pod는 정책이 붙기 전 몇 초 동안 모든 통신이 열린다.** 2026-11-05 첫 실제 리허설에서 뜨자마자 연결한 검사 Pod는 운영 DB·CNPG 웹훅·메타데이터 주소가 모두 열려 격리 검사가 리허설을 멈췄다. 검사 Pod는 이제 15초 기다린 뒤 연결한다(`sandbox.DefaultSettle`). 이 대기 후 같은 EKS에서 격리 검사 12/12 통과. 리허설 CNPG Pod의 첫 몇 초는 여전히 열리므로, 없애려면 클러스터를 `NETWORK_POLICY_ENFORCING_MODE=strict`로 바꿔야 한다(infra). GKE·k3s는 아직 확인하지 않았다.
+- 실제 EKS(VPC CNI v1.22.4, 정책 모드 `standard`)에서는 NetworkPolicy가 동작하지만, **새 Pod는 정책이 붙기 전 몇 초 동안 모든 통신이 열린다.** 2026-11-05 첫 실제 리허설에서 뜨자마자 연결한 검사 Pod는 운영 DB·CNPG 웹훅·메타데이터 주소가 모두 열려 격리 검사가 리허설을 멈췄다. 검사 Pod는 이제 15초 기다린 뒤 연결한다(`sandbox.DefaultSettle`). 이 대기 후 같은 EKS에서 격리 검사 12/12 통과. 리허설 CNPG Pod의 첫 몇 초는 여전히 열리므로, 없애려면 클러스터를 `NETWORK_POLICY_ENFORCING_MODE=strict`로 바꿔야 한다(infra #60, #61: 준비 PR은 11/5 머지됐지만 실제 클러스터 적용 여부는 확인하지 못했다). strict를 적용한 뒤에는 `IsolationConfig.Settle`을 음수로 줘서 대기 없이 검사한다(지금 `hopai` 옵션은 없다). GKE·k3s는 아직 확인하지 않았다.
 - 쿠버네티스 경고 이벤트로도, 작업 Job 실패로도 드러나지 않는 실패(예: 복제가 붙었다가 끊기는 인증서 오류)는 Plan의 `catchupTimeout`까지 기다린다. 메이저 버전 불일치는 원본 이미지를 읽었을 때 계획 단계에서 막고, 못 읽었을 때는 리허설이 Job 실패로 빨리 잡는다.
-- AI가 실제로 계획과 진단을 하는 흐름(`hopai run`)과 플랫폼 세션 기록은 가짜 API로만 확인했다. 실제 API 키와 플랫폼으로 돌려 봐야 한다.
+- `hopai run`은 2026-11-05에 실제 Claude, 플랫폼, EKS(GKE→EKS)로 처음 돌려 AI 계획과 제출이 46초에 끝나는 것을 확인했다. 그 뒤 리허설이 격리 검사에서 멈춘 것을 v23, v24로 고쳤고, 수정 뒤의 전체 `hopai run`(리허설 통과, 실제 AI 진단, 수정안 첨부)은 아직 돌려 보지 못했다. 진단 단계는 가짜 API와 가짜 진단기로만 확인했다.
 - 파일(rclone), 게이트웨이와 카나리, 부하(k6)는 리허설하지 않는다.
