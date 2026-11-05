@@ -34,6 +34,7 @@ HopCharlie의 AI(Plan 작성, 리허설 실패 진단, 수정안)와 샌드박�
 | v23 | [#27](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/27) | 11/5 14:20 | 격리 검사 Pod가 정책이 붙은 뒤에 연결, 실패 항목을 메시지에 남김 |
 | v24 | [#28](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/28) | 11/5 14:21 | 실제 EKS에서 리허설 임시 원본이 뜨지 않던 문제 4가지 수정 |
 | v25 | [#29](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/29) | 11/5 14:21 | AI 계획을 리포트 옆 파일로 저장 |
+| v? | 미정 (`feat/hopai-prepare`) | 머지 전 | 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie`로 push (`hopai prepare`) |
 
 # HopCharlie AI·샌드박스 사용 설계 (D 영역 초안)
 
@@ -43,8 +44,9 @@ Plan 계약 갱신: 2026-11-02 · [platform OpenAPI](https://github.com/2026-Sof
 
 ## 1. 원칙
 
-- AI가 하는 일은 네 가지다. 리소스 분석, Plan 작성, 리허설 실패 진단, 수정 제안.
+- AI가 하는 일은 다섯 가지다. 리소스 분석, Plan 작성, 리허설 실패 진단, 수정 제안, 들여온 오픈소스 레포의 배포 준비(`hopai prepare`, 12장).
 - AI에게는 운영 클러스터를 바꾸는 권한이 없다. 운영 변경은 사람이 승인한 Plan을 엔진(결정적 코드)이 실행할 때만 일어난다.
+- 배포 준비에서 AI는 임시 클론의 파일만 고친다. 커밋과 push는 검사를 통과한 뒤 실행기가 `hopcharlie` 브랜치에만 하고, 앱 등록은 운영자만 한다. 등록된 앱이면 그 push가 자동 재배포된다.
 - AI 출력은 항상 JSON이다. 플랫폼이 스키마와 고정 규칙으로 검사하고, 통과한 것만 다음 단계로 넘긴다.
 - AI가 쓰는 도구는 허용 목록으로 묶는다. 운영 쪽은 읽기 전용, 샌드박스 쪽은 자기 네임스페이스 하나만 쓸 수 있다.
 
@@ -197,10 +199,11 @@ AI의 출력은 엔진 Plan, 대상 CNPG 매니페스트, 근거를 묶은 JSON�
 |---|---|---|---|---|
 | 계획 | `plan` | 읽기 전용 조사 도구 (5장) | Plan + 대상 매니페스트 + 근거 (3장) | 검사 실패 2회 |
 | 진단 | `diagnose` | 샌드박스 조회 도구 (리허설이 만듦) | `{cause, evidence[], fix}` | 2회 |
+| 배포 준비 | `other` | 레포 도구 (5장) | 클론에 쓴 `platform.yaml`과 Dockerfile, `{summary, commitMessage, secrets[], notes[]}` | 2회 |
 
 - 모델은 `claude-opus-5-5`(고정 ID), 생각 깊이(effort)는 `medium`이다. 데모 시간 안에 끝나도록 정했다.
 - 응답은 두 겹으로 막는다. API에 JSON 스키마(`llm/schema/*.json`)를 넘겨 형식을 강제하고, 받은 뒤 `plan` 검사를 다시 돌린다.
-- 검사에 걸리면 대화를 이어서 걸린 항목을 붙여 다시 묻는다. 거절, 출력 잘림, API 오류, 타임아웃(호출당 90초)은 다시 묻지 않는다. 답 한 번에 AI 호출은 10번까지다.
+- 검사에 걸리면 대화를 이어서 걸린 항목을 붙여 다시 묻는다. 거절, 출력 잘림, API 오류, 타임아웃(호출당 90초)은 다시 묻지 않는다. 답 한 번에 AI 호출은 10번까지다 (배포 준비는 조사와 파일 쓰기를 함께 해서 30번).
 - 안전 분류기가 거절하면 서버가 권장 대체 모델로 다시 돌리도록 `fallbacks: "default"`를 켰다.
 - AI에 보내는 Plan, 매니페스트, 로그는 비밀값을 가린 뒤 보낸다. Plan은 JSON 구조와 `${VAR}` 참조를 보존한다. 평문 비밀값은 가린 초안과 응답의 고정 필드를 비교한 뒤에만 원래 값으로 복원하며, 재요청 오류에도 원문 비밀값을 넣지 않는다.
 
@@ -233,6 +236,11 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 | `node_capacity` | 이번 이전의 두 환경만. 노드 할당 가능 CPU, 메모리 | 같음 |
 | `get_cnpg_cluster` | 이번 이전의 두 환경, 앱 네임스페이스만. spec 중 instances, image, storage, resources, bootstrap, replica만 돌려줌 | 같음 |
 | 진단 도구 | 리허설 샌드박스 네임스페이스만 (7장) | 샌드박스 토큰 |
+| `list_files` | `hopai prepare`가 만든 임시 클론 하나. `.git`을 빼고 얕은 것부터 400개까지 (넘으면 잘렸다고 알림). 심볼릭 링크는 따라가지 않음 | 없음 (로컬 파일) |
+| `read_file` | 같은 클론의 UTF-8 텍스트 파일. 48 KiB까지 돌려주고 넘으면 잘렸다고 알림. 바이너리는 거절 | 없음 |
+| `write_file` | 같은 클론에 텍스트 파일을 새로 쓰거나 덮어씀. 내용 64 KiB까지, 작업 한 번에 40번까지. 48 KiB보다 큰 기존 파일(AI가 전체를 본 적 없음)과 심볼릭 링크는 덮어쓰지 않음 | 없음 |
+
+레포 도구는 `/`로 나눈 레포 루트 기준 상대 경로만 받는다. 절대 경로, `..`, `\`, `:`, 제어 문자와 서식 문자(양방향 글자 등), Windows 장치 이름(NUL, CON 등), `~숫자`가 든 이름(Windows 8.3 짧은 이름, 예: `GITATT~1`은 `.gitattributes`를 가리킬 수 있음), `.git`(대소문자와 끝의 점, 공백을 가리지 않음)은 막는다. 레포는 믿을 수 없으므로 경로마다 심볼릭 링크를 풀어 실제 위치가 클론 안이고 `.git` 밖인지 다시 본다. `write_file`은 git과 GitHub이 설정이나 실행할 것으로 읽는 파일도 쓰지 않는다: 어느 디렉터리든 `.gitattributes`, `.lfsconfig`, `.gitmodules`, 그리고 `.github/workflows` 아래(링크로 가리키거나 이미 있는 파일의 실제 이름이 그렇더라도). 읽기는 된다. git이 그대로 커밋하지 않는 곳에도 쓰지 않는다: 클론한 커밋에서 심볼릭 링크인 파일(`core.symlinks=false`라 작업 트리에서는 일반 파일로 보이지만 내용이 링크 대상으로 커밋됨), 서브모듈 안(커밋되지 않음), 대소문자만 다른 이름이 이미 있는 경로(Windows와 macOS에서는 그 파일에 쓰게 됨), 대문자가 섞인 루트 `platform.yaml`. 실행기가 클론한 뒤 `git ls-files -s`로 이 항목을 읽어 넘긴다. 클론 밖이나 `.git`을 가리키는 링크, 이런 파일 쓰기, 상한을 넘는 쓰기는 `blocked`로 남는다. 파일을 지우는 도구는 없다(덮어쓰기로 충분했다). 커밋과 push는 도구가 아니라 검사를 통과한 뒤 실행기가 한다(12장).
 
 원본 실측은 AI 도구가 아니다. `hopai`가 Plan 초안을 받을 때 플랫폼에 같이 재 달라고 하고(`POST /v1/plans/draft`에 `"sourceStats": true`, platform #47·ADR 0017), 숫자만 AI에 보여 준다. 플랫폼은 시작 전 용량 검사와 같은 쿼리로 클라이언트 세션 수, max_connections, max_worker_processes, DB 크기, 5초 동안의 WAL 생성 속도를 잰다. 그래서 이 실행기는 운영 DB에 붙지 않고 비밀번호도 갖지 않으며, 계획 검사와 시작 검사가 같은 숫자를 본다. 플랫폼이 재지 못하면(`sourceStatsReason: not_measured`: 비밀번호 변수 없음, 닿지 못함, 쿼리 실패) 경고만 내고 용량 검사 없이 계획한다(`-no-measure`로 요청하지 않을 수 있음). 크기나 WAL 속도만 빠지면 접속 수는 검사하고 초기 복사 검사는 하지 않는다.
 
@@ -331,7 +339,7 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 
 - **DB 지원 범위:** 현재 엔진은 CNPG replica·demote·promote를 사용한다. 다른 DB 이전 방식을 지원하려면 엔진 변경과 별도 합의가 필요하다. AI가 Plan에 이전 방식 enum을 새로 만들지 않는다.
 - **트래픽 게이트웨이 연결:** 현재 플랫폼의 Go 게이트웨이 계약을 사용한다. 각 환경 backend 주소와 샌드박스용 게이트웨이를 인계받아야 한다.
-- **AI 범위 (3장 7번):** 온보딩(Dockerfile·PR 생성)을 넣을지. 콘솔에서는 일단 뺐다.
+- **AI 범위 (3장 7번):** 온보딩(Dockerfile·PR 생성)을 넣을지. 콘솔에서는 일단 뺐다. 들여온 오픈소스 레포에 한해 `hopai prepare`(CLI)가 `platform.yaml`과 Dockerfile을 써서 `hopcharlie` 브랜치에 push한다(12장). PR은 만들지 않는다.
 - **승인 게이트 (platform #24):** 리포트가 리허설한 후보를 `candidate`(Plan 본문과 `target.yaml`의 SHA-256)로 남기는 쪽은 끝났다([#16](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/16), 7장 10번). 플랫폼이 승인할 때 이 값과 `passed`를 확인하는 쪽이 남았다. 11/5 기준 platform #24는 열려 있고 연결된 PR은 아직 없다.
 - **EKS strict 모드 (infra #60, #61):** 워크로드 EKS를 strict로 바꾸는 준비 PR(infra #61)이 11/5 머지됐다. 실제 클러스터 적용 여부는 확인하지 못했다. 적용되면 `IsolationConfig.Settle`을 음수로 줘서 대기 없이 격리 검사를 다시 돌려, 새 Pod의 시작 직후 차단을 직접 확인해야 한다. 검사 Pod는 소유자 참조가 없는 단독 Pod라서 strict에서도 정책이 안정적으로 적용되는지는 따로 봐야 한다(infra ADR 0046). A 영역과 적용 시점을 정한다.
 - **계획 세션의 planRef:** 지금은 리허설 세션에 계획 세션 ID를 남겨 연결한다. 세션에 planRef를 나중에 붙이는 API가 플랫폼에 생기면 계획 세션을 Plan에 직접 연결할 수 있다 (platform 담당과 상의).
@@ -346,10 +354,10 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 | `plan` | AI 출력(엔진 Plan + 매니페스트 + 근거) 검사, 진단 수정안 검사와 사본 적용, 제출 본문과 후보 digest | 3, 7 |
 | `mask` | AI와 플랫폼에 보내기 전 비밀값 가리기 | 4 |
 | `agentlog` | 플랫폼 에이전트 세션 기록 (`/v1/agent/sessions`) | 4 |
-| `llm` | 도구를 쓰는 에이전트 (계획, 진단, 검사에 걸리면 대화를 이어 재요청), 읽기 전용 조사 도구 | 4, 5 |
+| `llm` | 도구를 쓰는 에이전트 (계획, 진단, 배포 준비, 검사에 걸리면 대화를 이어 재요청), 읽기 전용 조사 도구, 클론 하나만 보는 레포 도구와 배포 준비 검사 | 4, 5 |
 | `sandbox` | 샌드박스 생성·삭제, 1시간 토큰, 만료 정리, CNPG 모드, 격리 검사 | 6 |
 | `rehearsal` | 샌드박스에서 실제 엔진으로 리허설, 실패 시 진단과 재실행, 리포트(`candidate`, `coverage`, `cleanup`, `warnings`) | 7 |
-| `cmd/hopai` | 전체 흐름 (초안 → 계획 → 제출 → 리허설 → 후보 일치 확인 → 첨부) | 2 |
+| `cmd/hopai` | 전체 흐름 (초안 → 계획 → 제출 → 리허설 → 후보 일치 확인 → 첨부). `hopai prepare`: 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie` 브랜치로 push (푸시 토큰, git 클론과 커밋, 지난 배포 기록) | 2, 12 |
 | `cmd/sandboxctl` | 샌드박스를 손으로 만들고 검사하고 지우는 도구 | 6 |
 
 ### 실행
@@ -371,6 +379,41 @@ go run ./cmd/hopai run -app moimroom -from gke -to eks \
 - 끝나면 Plan ref와 revision, 세션 ID, 리허설 리포트를 출력한다. 리허설을 통과하지 못하면 종료 코드 1이고 승인하지 말라고 알린다.
 - 비공개 모듈(platform, migration-engine)을 받으려면 `go env -w GOPRIVATE=github.com/2026-Softbank-Hackathon-Charlie`가 필요하다.
 
+### 배포 준비 (`hopai prepare`)
+
+운영자가 platform 레포의 `scripts/import-repo.sh`로 들여온 오픈소스 레포(조직의 비공개 사본, 토픽 `hopcharlie-imported`)를 AI가 플랫폼에 배포할 수 있게 고치고 `hopcharlie` 브랜치로 push한다.
+
+```bash
+export ANTHROPIC_API_KEY=...   PLATFORM_URL=...   PLATFORM_TOKEN=...   # agent 토큰
+go run ./cmd/hopai prepare -repo 2026-Softbank-Hackathon-Charlie/<레포> [-deployment <배포 ID>]
+```
+
+하는 일:
+
+1. 플랫폼에서 그 레포에만 쓰는 GitHub 푸시 토큰을 받는다 (`POST /v1/github/push-tokens`, platform ADR 0023). 고정한 platform 모듈의 `pkg/client`에 아직 없어 직접 부른다. 들여온 레포가 아니면 플랫폼이 403 `repo_not_imported`로 거절하고, `scripts/import-repo.sh`로 먼저 들여오라고 알린다. 토큰은 레포 ID에 묶여 있어, GitHub에서 이름이 바뀐 레포면 응답의 지금 이름으로 클론하고 그렇다고 알린다.
+2. git으로 임시 디렉터리에 얕게(`--depth 1`) 클론한다. `hopcharlie` 브랜치가 있으면 그 위에서 이어서 고치고, 없으면 기본 브랜치에서 새로 만든다. 클론하기 전에 GitHub API(`GET https://api.github.com/repos/{owner}/{name}`의 `size`, 푸시 토큰으로 읽음)로 레포가 300 MB를 넘으면 받지 않고 멈춘다. 크기를 읽지 못하면 그렇다고 알리고 클론한다. 클론한 뒤에도 300 MB를 넘으면 멈춘다. 끝나면(실패, Ctrl-C, 종료 신호 포함) 임시 디렉터리를 지운다.
+3. `-deployment`를 주면 그 배포(`GET /v1/deployments/{id}`)와 이벤트(SSE `GET /v1/deployments/{id}/events`, 끝나지 않은 배포는 10초까지 받은 것)를 agent 토큰으로 읽는다. 오류처럼 보이는 줄 40개와 마지막 30줄을 골라 비밀값을 가리고 8 KiB로 줄여 AI에 넣는다. 기록 안의 `<`, `>`는 바꿔서 기록이 프롬프트의 블록을 닫지 못하게 한다. 그 배포의 앱(`GET /v1/apps/{name}`)이 이 레포를 배포하는지 확인하고, 다른 레포이거나 앱을 읽지 못하거나 GitHub 배포 정보가 없으면 멈춘다.
+4. AI가 레포 도구(5장)로 `platform.yaml`과 Dockerfile을 쓴다. 세션 종류는 `other`이고 제목에 레포 이름이 들어간다. 지시문에는 `platform.yaml` 규칙(platform `pkg/appspec`)과 실행 환경을 넣었다. UID/GID 65532, capability 없음, 1024 이상 포트(`PORT`를 플랫폼이 넣음), 실행 중에 쓰는 곳은 65532가 쓸 수 있게, 볼륨 없음(남길 데이터는 `postgres` 하나와 `s3` 하나), 컨테이너당 메모리 256Mi, 나가는 네트워크는 DNS와 TCP 443과 자기 네임스페이스만, 공개 서비스 하나(`https://<앱>.hopcharlie.dev`, WebSocket 통과), healthCheck 시작 프로브 180초, 배포 300초, CodeBuild(x86_64, 2 vCPU, 3 GB, 15분)이므로 버전을 고정한 상위 이미지를 `FROM`으로 쓰는 편을 고르라는 것이다.
+5. 답을 검사한다. 루트 `platform.yaml`을 플랫폼과 같은 `appspec.Check`로 보고, 서비스마다 Dockerfile과 빌드 디렉터리가 클론에 있는지, 포트가 1024 이상인지, 실제로 바뀐 파일이 있는지, 커밋 메시지가 한 줄 72자 이하인지, 시크릿 이름이 환경 변수 이름이고 플랫폼이 넣는 이름(`PORT`, `DATABASE_URL`, `S3_*`)이 아닌지, 답에 비밀처럼 보이는 값이 없는지 본다. 비밀값은 `platform.yaml`의 env에도, 서비스 Dockerfile의 `ENV`, `ARG`(`${VAR}`처럼 다른 값을 가리키면 괜찮음)에도 두지 못한다. 비밀값으로 보는 것은 값 자체가 비밀처럼 보이는 것(접속 문자열의 비밀번호 같은 `mask` 규칙, 글자 종류가 섞인 16자 이상의 무작위 문자열)과, 이름이 비밀처럼 보이는데(예: `*_PASSWORD`, `*_TOKEN`, `API_KEY`) 값이 숫자, 참거짓, 기간, 경로, URL이 아닌 것이다. 그래서 `COOKIE_SECURE=true`, `PASSWORD_MIN_LENGTH=8`, `TOKEN_TTL=3600`, `GOOGLE_APPLICATION_CREDENTIALS=/path`는 괜찮다. `platform.yaml`과 Dockerfile 경로는 대소문자까지 실제 파일 이름과 같아야 하고, git에서 심볼릭 링크이거나 서브모듈 안이면 안 된다. 걸리면 걸린 항목을 넣어 다시 묻는다(2회). 답의 글(요약, 메모, 커밋 메시지, 시크릿 쓰임)에서는 줄바꿈 말고 제어 문자와 서식 문자를 뺀다.
+6. 통과하면 작업 트리 전체를 `HopCharlie AI <ai@hopcharlie.dev>`로 커밋하고(본문에 AI 세션 ID), 커밋이 검사한 것과 같은지 본다. 바뀐 항목은 모두 검사한 파일이고 일반 파일이어야 한다(심볼릭 링크 120000, 서브모듈 160000, 종류 바뀜 `T`는 안 됨). AI가 바꾼 파일은 모두 커밋에 들어가 있어야 하고(서브모듈 안이나 대소문자가 다른 이름이면 빠짐), `platform.yaml`과 서비스 Dockerfile은 커밋에 그 이름 그대로(`git ls-tree`) 일반 파일 모드(100644, 100755)로 있어야 한다. 내용(`git cat-file`)은 모두 검사한 바이트와 같아야 한다. 하나라도 다르면 push하지 않는다. 같으면 `refs/heads/hopcharlie`에만 fast-forward로 push한다. 강제 push는 하지 않는다. 그사이 누가 push했으면 거절되고 다시 실행하라고 알린다.
+7. 레포, 브랜치, 커밋, AI 세션 ID, 바꾼 파일, 요약, 메모, 다음 단계를 표준 출력에 쓴다. 이 레포의 `hopcharlie` 브랜치(기본 브랜치나 추가한 인스턴스)를 자동 배포하는 앱이 있으면(`GET /v1/apps`, 이 레포의 앱이 여럿이면 그 앱을 먼저 찾음) push가 자동 재배포를 시작한 것이다. 앱 이름은 등록된 이름을 쓰고, `platform.yaml`의 `name`과 다르면 경고한다. 없으면 운영자에게 `charlie app add --repo <레포> --branch hopcharlie --env eks --watch`를 안내한다. 시크릿이 필요하면 `charlie app secret set <앱> <이름>`을 이름마다 쓴다(값은 charlie가 화면에 보이지 않게 묻는다. 등록된 앱에만 넣을 수 있다).
+
+하지 않는 것: 앱 등록(`charlie app add`는 operator 전용), 시크릿 값 넣기, 빌드와 실행, `hopcharlie` 말고 다른 브랜치에 push, 강제 push, PR 만들기. push 전에 사람이 diff를 보는 단계는 없다. 이미 등록된 앱이면 push가 바로 재배포되므로, 먼저 보고 싶으면 등록 전에 돌리거나 자동 배포를 끄고(`--no-auto-deploy`) 등록한다.
+
+git은 운영자 설정 없이 돌린다. 레포가 git에 명령을 실행시키거나 토큰을 다른 곳에 보내게 하지 못하게 하려는 것이다. 예를 들어 Git for Windows는 시스템 설정에 git-lfs 필터를 켜 두는데, 레포가 `.gitattributes`로 그 필터를 쓰고 `.lfsconfig`에 다른 서버를 적으면 git-lfs가 훅을 심고 push 때 그 서버로 자격 증명을 보낼 수 있었다(리뷰에서 재현).
+
+- 시스템, 전역 설정을 읽지 않는다 (`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL`은 임시 디렉터리의 빈 파일). 그래서 운영자 설정의 git-lfs 필터, 주소 바꾸기(`insteadOf`, `pushInsteadOf`), 자격 증명 도우미(`store` 등), 훅, 서명이 끼어들지 않는다.
+- 환경 변수는 허용 목록만 넘긴다: `PATH`, `SystemRoot`, `WINDIR`, `COMSPEC`, `TEMP`, `TMP`, `TMPDIR`, `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`(대소문자 무시), `LANG`, `LC_*`. 그 밖의 `GIT_*`, 클라우드 키, `ANTHROPIC_API_KEY`, `PLATFORM_TOKEN`, 운영자 홈(`HOMEDRIVE`, `HOMEPATH`) 등은 넘기지 않는다.
+- `HOME`과 `USERPROFILE`은 임시 디렉터리의 빈 디렉터리로 준다. 그래서 git이 쓰는 curl이 운영자 홈의 `.netrc`, `_netrc`로 운영자 자격 증명을 보내지 않고, `~/.config/git/attributes` 같은 홈의 git 파일도 읽히지 않는다.
+- `GIT_CEILING_DIRECTORIES`를 임시 디렉터리의 부모로 둔다. 임시 디렉터리가 다른 git 레포 안에 있어도 그 레포의 설정(주소 바꾸기 등)을 읽지 않는다.
+- 명령마다 `core.hooksPath`(빈 디렉터리), `core.fsmonitor=false`, `core.symlinks=false`, git-lfs 필터 끄기(`filter.lfs.*` 비움, `required=false`), `protocol.allow=never`와 `protocol.https.allow=always`, `commit.gpgsign=false`, `core.autocrlf=false`를 준다. `GIT_LFS_SKIP_SMUDGE=1`, `GIT_TERMINAL_PROMPT=0`도 준다. 명령이 끝날 때마다 훅 디렉터리가 비어 있는지 보고, 무언가 생겼으면 멈춘다.
+- 푸시 토큰은 이 프로세스 메모리와 git 자식 프로세스의 환경 변수(`HOPAI_GIT_TOKEN`)에만 둔다. 자격 증명 도우미는 `credential.helper`를 비운 뒤 `credential.https://github.com.helper` 하나로만 두고, 도우미도 git이 묻는 protocol과 host가 `https`, `github.com`일 때만 `x-access-token`과 토큰으로 답한다. `store`, `erase`에는 아무것도 하지 않아 토큰이 어디에도 저장되지 않는다. 그래서 토큰은 명령줄, 원격 URL, `.git/config`, 다른 호스트, 에이전트 기록, AI 대화, 출력에 들어가지 않는다.
+
+클론한 레포의 코드는 git 필터, 훅을 포함해 어디서도 실행하지 않는다. 표준 오류에 찍는 에이전트 기록 줄(`agentlog.Writer`, 파일 이름이나 파일 내용 일부가 들어감)에서는 제어 문자(C0, C1)와 서식 문자(양방향 글자 등)를 빼서 레포 내용이 운영자 터미널을 조작하지 못하게 한다. 플랫폼에 보내는 기록은 그대로다. Ctrl-C나 종료 신호를 받으면 git과 AI 호출을 멈추고 임시 클론을 지운 뒤 종료 코드 1로 끝난다.
+
+- 종료 코드는 `hopai run`과 같다 (성공 0, 실패 1, 사용법 2). 전체 제한 시간은 30분이다.
+- `git` 2.23 이상(`git switch`)이 PATH에 있어야 한다.
+
 ### 테스트
 
 ```bash
@@ -380,6 +423,7 @@ go test ./...
 - 가짜 Anthropic API와 가짜 플랫폼으로 요청 형태, 도구 사용과 기록, 재요청, 거절·잘림 처리, 비밀값 가리기를 확인한다.
 - 형식이 깨진 AI 응답과 규칙을 어긴 응답(대상 DSN 바꾸기, fence 비교 끄기, 슈퍼유저 키 등) 사례가 들어 있다.
 - `.github/workflows/ci.yml`이 PR과 main에서 `go vet`, gofmt, `go test ./...`를 조직 self-hosted runner로 돌린다. 비공개 모듈(platform, migration-engine)을 받으려면 저장소 시크릿 `MODULE_READ_TOKEN`이 필요하다. 실제 클러스터가 필요한 `cluster` 태그 테스트는 CI에서 돌리지 않는다.
+- `hopai prepare`: 레포 도구가 막아야 하는 경로(`..`, 절대 경로, `.git`, 클론 밖을 가리키는 심볼릭 링크, `.gitattributes` 같은 git 설정 파일, 크기와 횟수 상한), 검사에 걸리면 세 번 묻고 실패, 로컬 맨 레포를 원격으로 한 클론부터 push까지(새 브랜치, 다시 실행하면 fast-forward, 그사이 다른 push가 있으면 거절, 이름이 바뀐 레포), git http-backend로 토큰이 자격 증명 도우미로만 가는지와 운영자 설정의 `store`가 저장하지 않는지, 다른 호스트에는 토큰을 주지 않는지, 토큰이 출력과 에이전트 기록과 git 명령줄과 AI 요청에 없는지 본다. git-lfs를 쓰게 만든 레포(`.gitattributes`, 공격자 주소의 `.lfsconfig`)와 git-lfs를 켠 운영자 설정을 함께 넣어도 공격자 주소로 요청이 0번이고 push한 내용이 검사한 바이트와 같은지, 운영자 설정의 `pushInsteadOf`, `insteadOf`(SSH), 훅, 서명, 홈의 `.netrc`, 임시 디렉터리를 둘러싼 레포의 설정이 끼어들지 못하는지도 본다. 커밋 검사(심볼릭 링크로 커밋된 `platform.yaml`, 서브모듈 안이라 빠진 파일, 대문자 `PLATFORM.YAML`), 서브모듈 안 쓰기 차단, 클론 전 크기 검사, 비밀값 판정(설정값은 통과), 터미널 출력의 제어 문자 빼기도 테스트가 있다. 테스트는 개발자 컴퓨터의 git 설정을 읽지 않게 `TestMain`에서 `GIT_CONFIG_NOSYSTEM`과 빈 `GIT_CONFIG_GLOBAL`을 둔다. `git`이 없으면 git을 쓰는 테스트를, git-lfs가 없으면 LFS 테스트를, 심볼릭 링크를 만들 수 없으면 링크 테스트만 건너뛴다. 실제 GitHub에 닿는지는 `HOPAI_GITHUB_TEST=1 go test -run TestGitReachesGitHub ./cmd/hopai/`로 본다.
 
 실제 클러스터(CNPG 설치)에서 리허설을 돌리는 테스트는 따로 있다. AI 없이 예시 계획으로 엔진만 실제로 돌린다.
 
@@ -423,4 +467,5 @@ REHEARSAL_KUBECONFIG=<kubeconfig> REHEARSAL_SC=standard go test -tags cluster -r
 - 실제 EKS(VPC CNI v1.22.4, 정책 모드 `standard`)에서는 NetworkPolicy가 동작하지만, **새 Pod는 정책이 붙기 전 몇 초 동안 모든 통신이 열린다.** 2026-11-05 첫 실제 리허설에서 뜨자마자 연결한 검사 Pod는 운영 DB·CNPG 웹훅·메타데이터 주소가 모두 열려 격리 검사가 리허설을 멈췄다. 검사 Pod는 이제 15초 기다린 뒤 연결한다(`sandbox.DefaultSettle`). 이 대기 후 같은 EKS에서 격리 검사 12/12 통과. 리허설 CNPG Pod의 첫 몇 초는 여전히 열리므로, 없애려면 클러스터를 `NETWORK_POLICY_ENFORCING_MODE=strict`로 바꿔야 한다(infra #60, #61: 준비 PR은 11/5 머지됐지만 실제 클러스터 적용 여부는 확인하지 못했다). strict를 적용한 뒤에는 `IsolationConfig.Settle`을 음수로 줘서 대기 없이 검사한다(지금 `hopai` 옵션은 없다). GKE·k3s는 아직 확인하지 않았다.
 - 쿠버네티스 경고 이벤트로도, 작업 Job 실패로도 드러나지 않는 실패(예: 복제가 붙었다가 끊기는 인증서 오류)는 Plan의 `catchupTimeout`까지 기다린다. 메이저 버전 불일치는 원본 이미지를 읽었을 때 계획 단계에서 막고, 못 읽었을 때는 리허설이 Job 실패로 빨리 잡는다.
 - `hopai run`은 2026-11-05에 실제 Claude, 플랫폼, EKS(GKE→EKS)로 처음 돌려 AI 계획과 제출이 46초에 끝나는 것을 확인했다. 그 뒤 리허설이 격리 검사에서 멈춘 것을 v23, v24로 고쳤고, 수정 뒤의 전체 `hopai run`(리허설 통과, 실제 AI 진단, 수정안 첨부)은 아직 돌려 보지 못했다. 진단 단계는 가짜 API와 가짜 진단기로만 확인했다.
+- `hopai prepare`도 가짜 AI, 가짜 플랫폼, 로컬 git 원격으로만 확인했다. 실제 Claude, 플랫폼 푸시 토큰 API(ADR 0023), GitHub으로는 돌려 보지 못했다.
 - 파일(rclone), 게이트웨이와 카나리, 부하(k6)는 리허설하지 않는다.

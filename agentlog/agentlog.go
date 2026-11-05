@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/mask"
@@ -23,6 +25,8 @@ const (
 	KindRehearsal = "rehearsal"
 	KindDiagnose  = "diagnose"
 	KindExplain   = "explain"
+	// KindOther는 위 넷이 아닌 작업이다 (배포 준비, 운영자 데모 설정).
+	KindOther = "other"
 )
 
 // 이벤트 종류 (AgentEventType)
@@ -156,6 +160,8 @@ func (s *MemorySession) Finish(_ context.Context, ok bool, summary string) error
 /* ---------- 터미널 출력 ---------- */
 
 // Writer는 세션과 이벤트를 한 줄씩 출력한다. 다른 Sink와 함께 쓴다 (Tee).
+// 이벤트에는 레포에서 온 글(파일 이름, 파일 내용 일부)이 들어갈 수 있어, 터미널에 찍기 전에 제어 문자와 서식 문자를 뺀다(printable).
+// 플랫폼에 보내는 기록(JSON)은 그대로다.
 type Writer struct {
 	W io.Writer
 }
@@ -167,7 +173,7 @@ type writerSession struct {
 }
 
 func (w Writer) Start(_ context.Context, s Start) (Session, error) {
-	fmt.Fprintf(w.W, "== [%s] %s\n", s.Kind, s.Title)
+	fmt.Fprintf(w.W, "== [%s] %s\n", printable(s.Kind), printable(s.Title))
 	return &writerSession{w: w.W, id: "stdout"}, nil
 }
 
@@ -192,7 +198,7 @@ func (s *writerSession) Log(_ context.Context, e Event) {
 	if e.InputTokens+e.OutputTokens > 0 {
 		line += fmt.Sprintf(" [토큰 %d/%d]", e.InputTokens, e.OutputTokens)
 	}
-	fmt.Fprintln(s.w, "   "+line)
+	fmt.Fprintln(s.w, "   "+printable(line))
 }
 
 func (s *writerSession) Finish(_ context.Context, ok bool, summary string) error {
@@ -200,8 +206,19 @@ func (s *writerSession) Finish(_ context.Context, ok bool, summary string) error
 	if !ok {
 		st = "실패"
 	}
-	fmt.Fprintf(s.w, "== %s: %s\n", st, summary)
+	fmt.Fprintf(s.w, "== %s: %s\n", st, printable(summary))
 	return nil
+}
+
+// printable은 터미널에 찍을 한 줄에서 제어 문자(C0, C1, DEL, 줄바꿈 포함)와 서식 문자(양방향 글자, 폭 없는 글자 등)를 뺀다.
+// JSON 인코딩은 C1 제어 문자와 양방향 글자를 그대로 두므로 따로 뺀다.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func short(v any) string {

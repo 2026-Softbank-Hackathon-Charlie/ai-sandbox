@@ -30,11 +30,13 @@ ai-sandbox에 main으로 합쳐진 순서대로 무엇이 생겼는지 정리했
 | [v23](#v23--격리-검사-대기) | [#27](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/27) | 11/5 14:20 | 격리 검사 Pod가 정책이 붙은 뒤에 연결, 실패 항목을 메시지에 남김 | 114 |
 | [v24](#v24--실제-eks-리허설-수정) | [#28](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/28) | 11/5 14:21 | 실제 EKS에서 리허설 임시 원본이 뜨지 않던 문제 4가지 수정 | 116 |
 | [v25](#v25--ai-계획-파일-저장) | [#29](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/29) | 11/5 14:21 | AI 계획을 리포트 옆 파일로 저장 | 117 |
+| [v?](#v--들여온-오픈소스-앱-배포-준비) | 미정 (`feat/hopai-prepare`) | 머지 전 | 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie`로 push | 149 |
 
 - 머지 시각은 한국 시간이고, "테스트"는 그 버전에 들어 있던 테스트 함수 개수입니다.
 - 닫힌 PR #1, #2는 플랫폼의 계획 형식이 정해진 뒤 #4~#8로 나눠 다시 올렸습니다.
 - 이슈 #12는 #14로, #13은 #15로 닫혔습니다.
 - 11/3에 v12 코드로 실제 클러스터 리허설을 다시 돌렸습니다: [11/3 kind 재확인](#113-kind-재확인)
+- v?는 아직 머지 전인 `feat/hopai-prepare` 브랜치입니다. 머지할 때 버전 번호, PR 번호, 머지 시각을 채웁니다.
 
 ## 먼저 알아 두면 좋은 말
 
@@ -499,6 +501,50 @@ AI는 조사 도구로 대상 StorageClass를 보고 처음부터 맞게 고르�
 **어떻게 확인했나**
 
 - `TestSaveProposal`: 파일 이름, DSN 비밀번호 마스킹, 매니페스트 보존을 확인했습니다. 전체 테스트 통과.
+
+---
+
+## v? · 들여온 오픈소스 앱 배포 준비
+
+PR 미정 (브랜치 `feat/hopai-prepare`) · 머지 전 · 12파일 +3,645 −8 · 패키지 `llm`, `cmd/hopai` · platform ADR 0023(푸시 토큰)과 짝
+
+**무엇이 달라졌나**
+
+운영자가 들여온 오픈소스 레포(조직의 비공개 사본)를 AI가 플랫폼에 배포할 수 있게 고칩니다. `hopai prepare -repo OWNER/NAME` 한 번으로 다음을 합니다.
+
+1. 플랫폼에서 그 레포에만 쓰는 푸시 토큰을 받습니다. 들여온 레포가 아니면 `scripts/import-repo.sh`로 먼저 들여오라고 알립니다. GitHub에서 이름이 바뀐 레포면 지금 이름으로 클론합니다.
+2. 레포를 임시 디렉터리에 클론합니다. `hopcharlie` 브랜치가 있으면 그 위에서 이어서 고칩니다. 300 MB가 넘는 레포는 다루지 않습니다. 크기는 받기 전에 GitHub API로 보고, 받은 뒤에도 다시 봅니다.
+3. `-deployment`를 주면 지난 배포의 오류 줄을 비밀값을 가리고 줄여서 AI에 보여 줍니다. 그 배포가 이 레포의 앱 것인지 확인하지 못하면 멈춥니다.
+4. AI가 클론 안의 파일만 읽고 써서 `platform.yaml`과 Dockerfile을 만듭니다. 명령은 실행하지 않습니다. 지시문에 플랫폼의 `platform.yaml` 규칙과 실행 환경(root 아님, 1024 이상 포트, 볼륨 없음, 메모리 256Mi 등)을 넣었습니다.
+5. 플랫폼 서버와 같은 코드로 `platform.yaml`을 검사하고, Dockerfile이 있는지, 포트가 1024 이상인지, 실제로 바꾼 파일이 있는지, env나 Dockerfile의 `ENV`, `ARG`에 비밀값을 적지 않았는지 등을 봅니다. 걸리면 걸린 이유를 알려 주고 다시 묻습니다(최대 2회).
+6. 통과하면 고정 작성자(HopCharlie AI)로 커밋하고, 커밋이 검사한 것과 같은지(내용이 바이트까지 같고, 심볼릭 링크나 서브모듈이 아니고, AI가 바꾼 파일이 빠지지 않았고, `platform.yaml`과 Dockerfile이 그 이름 그대로 있는지) 본 뒤 `hopcharlie` 브랜치에만 push합니다. 강제 push는 하지 않아서, 그사이 누가 push했으면 거절되고 다시 실행하라고 알립니다.
+7. 넣어야 할 시크릿(`charlie app secret set`)과 다음 단계를 알려 줍니다. 앱이 없으면 등록 명령(`charlie app add`, 운영자만)을, 이미 이 브랜치를 배포하는 앱이 있으면 push가 자동 재배포를 시작했다고 알립니다.
+
+- 레포는 믿을 수 없는 데이터로 다룹니다. 파일 도구는 경로마다 심볼릭 링크를 풀어서 클론 밖이나 `.git` 아래를 가리키면 막고 '막힘'으로 기록합니다. git과 GitHub이 설정이나 실행할 것으로 읽는 파일(`.gitattributes`, `.lfsconfig`, `.gitmodules`, `.github/workflows`, Windows 짧은 이름 `GITATT~1` 같은 것 포함)도, git이 그대로 커밋하지 않는 곳(심볼릭 링크인 파일, 서브모듈 안, 대소문자만 다른 이름)도 AI가 쓰지 못합니다.
+- git은 운영자 설정 없이 돌립니다. 시스템, 전역 설정과 운영자 홈(`.netrc` 등)을 읽지 않고, 임시 디렉터리를 둘러싼 레포의 설정도 읽지 않고, 환경 변수는 허용 목록만 넘기고, 명령마다 훅, git-lfs 필터, fsmonitor, 심볼릭 링크를 끄고 https만 허용합니다. 리뷰에서 Git for Windows의 기본 git-lfs 설정과 레포의 `.gitattributes`, `.lfsconfig`로 토큰이 공격자 주소에 가는 것을 재현해서 막았습니다.
+- 푸시 토큰은 git 자식 프로세스의 환경 변수로만 넘기고, `https://github.com`에만 답하는 자격 증명 도우미로만 git에 줍니다. 명령줄, 원격 주소, 다른 호스트, 기록, AI 대화, 출력에는 들어가지 않고 어디에도 저장되지 않습니다.
+
+**어떻게 확인했나**
+
+가짜 AI, 가짜 플랫폼, 로컬 git 원격으로 테스트 32개를 넣었고 모두 통과했습니다. 테스트는 개발자 컴퓨터의 git 설정을 읽지 않게 돌립니다.
+
+| 경우 | 결과 |
+| --- | --- |
+| 레포 밖, 절대 경로, `.git`, 양방향 글자, `.gitattributes` 같은 git 설정 파일, 크기 상한 등 23가지, 링크로 빠져나가기 8가지, 41번째 쓰기 | 모두 막힘, 레포 밖 파일은 그대로 |
+| 규칙 위반, Dockerfile 없음, 1024 미만 포트, 바꾼 파일 없음, env와 Dockerfile `ENV`의 비밀값 등 11가지 | 세 번 묻고 실패, 커밋 없음 |
+| 처음 실행 / 다시 실행 | `hopcharlie`를 새로 만들어 커밋 1개 / 그 위에 fast-forward, main은 그대로 |
+| AI가 일하는 사이 다른 push | push 거절, 남의 커밋 그대로 |
+| git-lfs를 쓰게 만든 레포 + git-lfs를 켠 운영자 설정 | 공격자 주소로 요청 0번, push한 내용이 검사한 바이트와 같음 |
+| 운영자 설정의 `pushInsteadOf`, `insteadOf`(SSH), 훅, 서명, `store` 도우미 | 모두 무시, 원래 레포에 push |
+| 커밋된 내용이 검사한 바이트와 다르거나 검사하지 않은 파일이 들어감 | push하지 않음 |
+| `platform.yaml`이 심볼릭 링크로 커밋됨, 서브모듈 안에 써서 커밋에 빠짐, 대문자 `PLATFORM.YAML`로 커밋됨 | push하지 않음. 서브모듈 안과 링크인 파일에는 처음부터 쓰지 못함 |
+| 운영자 홈의 `.netrc`, 임시 디렉터리를 둘러싼 레포의 `insteadOf` | 쓰이지 않음 |
+| GitHub API가 레포를 300 MB보다 크다고 함 / API를 읽지 못함 | 클론하지 않고 멈춤 / 알리고 클론한 뒤 크기를 봄 |
+| `COOKIE_SECURE=true`, `PASSWORD_MIN_LENGTH=8`, `TOKEN_TTL=3600`, `GOOGLE_APPLICATION_CREDENTIALS=/path` | 비밀값으로 보지 않음 (값을 적은 비밀번호, 토큰은 그대로 걸림) |
+| 실제 HTTP git 서버(git http-backend) | 토큰이 자격 증명 도우미로만 가고 `.git/config`, 명령줄, `~/.git-credentials`에 없음. 다른 호스트에는 답하지 않음 |
+| 토큰 찾기 | 출력, 에이전트 기록, git 명령줄, AI 요청, 플랫폼 요청 어디에도 없음 |
+
+운영자 설정 없이도 실제 GitHub(`git ls-remote https://github.com/octocat/Hello-World.git`)에 닿는 것을 Git for Windows에서 확인했습니다. 실제 Claude와 플랫폼 푸시 토큰 API로는 돌려 보지 못했습니다.
 
 ---
 
