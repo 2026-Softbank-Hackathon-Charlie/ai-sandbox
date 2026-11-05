@@ -356,6 +356,14 @@ func runOnce(ctx context.Context, c *Config, ses agentlog.Session, n int, cur *p
 		failf("%v", err)
 		return a, nil, nil
 	}
+	manifest, scNotes, err := SandboxStorageClasses(manifest, scs.Items)
+	if err != nil {
+		failf("샌드박스 대상 디스크: %v", err)
+		return a, nil, nil
+	}
+	for _, n := range scNotes {
+		ses.Log(ctx, agentlog.Event{Type: agentlog.Message, Tool: "sandbox_target", Output: n})
+	}
 	mpath := dir + string(os.PathSeparator) + plan.ManifestName
 	if err := os.WriteFile(mpath, []byte(manifest), 0o600); err != nil {
 		return a, nil, err

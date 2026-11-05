@@ -481,3 +481,62 @@ func TestTokenKubeconfigKeepsTLSServerName(t *testing.T) {
 		t.Fatalf("터널로 붙을 때 인증서 이름이 남아야 함: %q", got)
 	}
 }
+
+func TestSandboxStorageClasses(t *testing.T) {
+	retain, del := corev1.PersistentVolumeReclaimRetain, corev1.PersistentVolumeReclaimDelete
+	sc := func(name, prov, typ string, policy *corev1.PersistentVolumeReclaimPolicy) storagev1.StorageClass {
+		s := storagev1.StorageClass{Provisioner: prov, ReclaimPolicy: policy, Parameters: map[string]string{"type": typ}}
+		s.Name = name
+		return s
+	}
+	// 워크로드 EKS와 같은 모양
+	eks := []storagev1.StorageClass{
+		sc("cnpg-gp3-retain", "ebs.csi.aws.com", "gp3", &retain),
+		sc("gp2", "kubernetes.io/aws-ebs", "gp2", &del),
+		sc("aaa-io2", "ebs.csi.aws.com", "io2", &del),
+		sc("gp3", "ebs.csi.aws.com", "gp3", &del),
+	}
+	get := func(t *testing.T, manifest, key string) string {
+		t.Helper()
+		var doc map[string]any
+		if err := yaml.Unmarshal([]byte(manifest), &doc); err != nil {
+			t.Fatal(err)
+		}
+		st, _ := doc["spec"].(map[string]any)[key].(map[string]any)
+		v, _ := st["storageClass"].(string)
+		return v
+	}
+	for _, c := range []struct {
+		name, manifest, wantStorage, wantWAL string
+		notes                                int
+	}{
+		{"Retain은 같은 프로비저너·같은 종류의 Delete로", "spec: {instances: 2, storage: {size: 10Gi, storageClass: cnpg-gp3-retain}}", "gp3", "", 1},
+		{"walStorage도", "spec: {storage: {storageClass: cnpg-gp3-retain}, walStorage: {storageClass: cnpg-gp3-retain}}", "gp3", "gp3", 2},
+		{"Delete면 그대로", "spec: {storage: {storageClass: gp2}}", "gp2", "", 0},
+		{"이 클러스터에 없는 클래스는 그대로 (리허설이 잡을 것)", "spec: {storage: {storageClass: standard-rwo}}", "standard-rwo", "", 0},
+		{"비어 있으면 그대로", "spec: {storage: {size: 1Gi}}", "", "", 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			out, notes, err := SandboxStorageClasses(c.manifest, eks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(notes) != c.notes {
+				t.Fatalf("notes = %v, want %d", notes, c.notes)
+			}
+			if got := get(t, out, "storage"); got != c.wantStorage {
+				t.Fatalf("storage = %q, want %q", got, c.wantStorage)
+			}
+			if c.wantWAL != "" {
+				if got := get(t, out, "walStorage"); got != c.wantWAL {
+					t.Fatalf("walStorage = %q, want %q", got, c.wantWAL)
+				}
+			}
+		})
+	}
+	// 같은 프로비저너의 Delete가 없으면 디스크가 남으니 리허설 전에 멈춘다
+	only := []storagev1.StorageClass{sc("cnpg-gp3-retain", "ebs.csi.aws.com", "gp3", &retain), sc("gp2", "kubernetes.io/aws-ebs", "gp2", &del)}
+	if _, _, err := SandboxStorageClasses("spec: {storage: {storageClass: cnpg-gp3-retain}}", only); err == nil || !strings.Contains(err.Error(), "Delete") {
+		t.Fatalf("err = %v, want no Delete class error", err)
+	}
+}
