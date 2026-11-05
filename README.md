@@ -34,7 +34,7 @@ HopCharlie의 AI(Plan 작성, 리허설 실패 진단, 수정안)와 샌드박�
 | v23 | [#27](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/27) | 11/5 14:20 | 격리 검사 Pod가 정책이 붙은 뒤에 연결, 실패 항목을 메시지에 남김 |
 | v24 | [#28](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/28) | 11/5 14:21 | 실제 EKS에서 리허설 임시 원본이 뜨지 않던 문제 4가지 수정 |
 | v25 | [#29](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/29) | 11/5 14:21 | AI 계획을 리포트 옆 파일로 저장 |
-| v? | 미정 (`feat/hopai-prepare`) | 머지 전 | 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie`로 push (`hopai prepare`) |
+| v26 | [#33](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/33) | 머지 전 | 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie`로 push (`hopai prepare`) |
 
 # HopCharlie AI·샌드박스 사용 설계 (D 영역 초안)
 

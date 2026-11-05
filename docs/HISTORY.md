@@ -30,13 +30,12 @@ ai-sandbox에 main으로 합쳐진 순서대로 무엇이 생겼는지 정리했
 | [v23](#v23--격리-검사-대기) | [#27](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/27) | 11/5 14:20 | 격리 검사 Pod가 정책이 붙은 뒤에 연결, 실패 항목을 메시지에 남김 | 114 |
 | [v24](#v24--실제-eks-리허설-수정) | [#28](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/28) | 11/5 14:21 | 실제 EKS에서 리허설 임시 원본이 뜨지 않던 문제 4가지 수정 | 116 |
 | [v25](#v25--ai-계획-파일-저장) | [#29](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/29) | 11/5 14:21 | AI 계획을 리포트 옆 파일로 저장 | 117 |
-| [v?](#v--들여온-오픈소스-앱-배포-준비) | 미정 (`feat/hopai-prepare`) | 머지 전 | 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie`로 push | 149 |
+| [v26](#v26--들여온-오픈소스-앱-배포-준비) | [#33](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/33) | 머지 전 | 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie`로 push | 158 |
 
 - 머지 시각은 한국 시간이고, "테스트"는 그 버전에 들어 있던 테스트 함수 개수입니다.
 - 닫힌 PR #1, #2는 플랫폼의 계획 형식이 정해진 뒤 #4~#8로 나눠 다시 올렸습니다.
 - 이슈 #12는 #14로, #13은 #15로 닫혔습니다.
 - 11/3에 v12 코드로 실제 클러스터 리허설을 다시 돌렸습니다: [11/3 kind 재확인](#113-kind-재확인)
-- v?는 아직 머지 전인 `feat/hopai-prepare` 브랜치입니다. 머지할 때 버전 번호, PR 번호, 머지 시각을 채웁니다.
 
 ## 먼저 알아 두면 좋은 말
 
@@ -504,9 +503,9 @@ AI는 조사 도구로 대상 StorageClass를 보고 처음부터 맞게 고르�
 
 ---
 
-## v? · 들여온 오픈소스 앱 배포 준비
+## v26 · 들여온 오픈소스 앱 배포 준비
 
-PR 미정 (브랜치 `feat/hopai-prepare`) · 머지 전 · 12파일 +3,645 −8 · 패키지 `llm`, `cmd/hopai` · platform ADR 0023(푸시 토큰)과 짝
+[PR #33](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/33) · 머지 전 · 12파일 +3,645 −8 · 패키지 `llm`, `cmd/hopai` · platform ADR 0023(푸시 토큰)과 짝
 
 **무엇이 달라졌나**
 
