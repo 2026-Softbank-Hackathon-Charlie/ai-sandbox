@@ -35,7 +35,8 @@ var rules = []rule{
 
 var (
 	// ${VAR}와 Kubernetes env 참조 $(VAR)는 값이 아니라 다른 환경 변수를 가리키므로 지우지 않는다.
-	variable = regexp.MustCompile(`^\$(\{[A-Za-z_][A-Za-z0-9_]*\}|\([A-Za-z_][A-Za-z0-9_]*\))$`)
+	// $(VAR)는 env 이름 규칙(대문자)만 둔다. $(hunter2)처럼 값을 감싼 것은 지운다.
+	variable = regexp.MustCompile(`^\$(\{[A-Za-z_][A-Za-z0-9_]*\}|\([A-Z_][A-Z0-9_]*\))$`)
 	// 사용자가 비어 있거나(:pass@) 비밀번호에 @가 있어도 호스트 앞의 마지막 @까지 지운다 (경로 /, ?, #은 넘지 않음).
 	dsnPassword = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://[^:/@\s]*:)([^\s/?#]*)@`)
 	assignment  = regexp.MustCompile(`(?i)("?[A-Za-z0-9_.-]*(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential)[A-Za-z0-9_.-]*"?\s*[:=]\s*)("[^"]*"|'[^']*'|\$\{[A-Za-z_][A-Za-z0-9_]*\}|[^\s,}]+)`)

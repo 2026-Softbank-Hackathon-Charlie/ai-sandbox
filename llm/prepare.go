@@ -42,13 +42,14 @@ platform.yaml (플랫폼 서버와 같은 검사로 본다):
   - name (필수): 1~24자 소문자·숫자·하이픈, 소문자로 시작하고 소문자나 숫자로 끝남. 서비스끼리 겹치지 않음
   - path: docker build 컨텍스트. 레포 루트 기준 상대 경로, / 구분, .. 금지. 기본 "."
   - dockerfile: path 기준 상대 경로(레포 루트 기준이 아님). 기본 "Dockerfile". 실제 위치는 <path>/<dockerfile>
-  - port: 컨테이너가 듣는 포트. 1024 이상. 요청을 받지 않는 워커(큐 소비자, 스케줄러 등)는 비운다. port가 없는 서비스는 Service, 프로브, PORT 환경 변수가 없고 public과 healthCheck를 쓸 수 없다
+  - port: 컨테이너가 듣는 포트. 1024 이상. 요청을 받지 않는 워커(큐 소비자, 스케줄러 등)는 비운다. port가 없는 서비스는 Service, 프로브, PORT 환경 변수가 없고 public과 healthCheck를 쓸 수 없다. 워커만 있는 앱도 된다(공개 주소가 없다)
   - healthCheck: 준비되면 2xx를 주는 HTTP 경로, /로 시작
   - public: true면 공개된다. 많아야 하나
   - replicas: 1~5, 기본 1
-  - memory: 컨테이너 메모리. Kubernetes 수량 문자열(예: "512Mi"). 요청과 상한이 같아서 넘게 쓰면 OOMKilled로 다시 시작한다. ` + minServiceMemory + `~` + maxServiceMemory + `, 비우면 ` + defaultServiceMemory + `
-  - cpu: CPU 요청. Kubernetes 수량 문자열(예: "250m"). 상한은 두지 않는다. ` + minServiceCPU + `~` + maxServiceCPU + `, 비우면 ` + defaultServiceCPU + `
-  - env: 값은 모두 문자열이다(숫자, 불리언도 따옴표로 감싼다). 키는 ^[A-Z_][A-Z0-9_]*$. 플랫폼이 넣는 이름(PORT, DATABASE_URL, PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, JDBC_DATABASE_URL, S3_로 시작하는 이름)은 쓸 수 없다. 값 안의 $(이름)은 Kubernetes가 컨테이너를 띄울 때 그 환경 변수의 값으로 바꾼다. 비밀번호, 키 같은 비밀값은 넣지 않는다
+  - memory: 컨테이너 메모리. Kubernetes 수량 문자열(예: "512Mi"). ` + minServiceMemory + `~` + maxServiceMemory + `. 요청과 상한이 같아서 넘게 쓰면 OOMKilled로 다시 시작한다
+  - cpu: CPU 요청. Kubernetes 수량 문자열(예: "250m"). ` + minServiceCPU + `~` + maxServiceCPU + `. 상한은 두지 않는다
+  - memory와 cpu를 비우면 기본값(요청 cpu 50m, 메모리 64Mi, 메모리 상한 256Mi)이다
+  - env: 값은 모두 문자열이다(숫자, 불리언도 따옴표로 감싼다). 키는 ^[A-Z_][A-Z0-9_]*$. 플랫폼이 넣는 이름(PORT, DATABASE_URL, PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, JDBC_DATABASE_URL, S3_로 시작하는 이름)은 쓸 수 없다. 값 안의 $(이름)은 Kubernetes가 컨테이너를 띄울 때 그 환경 변수의 값으로 바꾼다. 가리킬 수 있는 것은 리소스가 있을 때 플랫폼이 넣는 이름, port가 있을 때 PORT, 답의 secrets에 적은 이름, 같은 서비스 env에서 이름순으로 앞선 키뿐이다. 없는 이름은 글자 그대로 남아 검사에서 걸린다. 비밀번호, 키 같은 비밀값은 넣지 않는다
 - resources: 선택. 종류별로 하나까지. 각각 name(서비스 이름과 같은 규칙)과 type(postgres 또는 s3)
   - postgres: 모든 서비스에 DATABASE_URL(postgresql://사용자:비밀번호@호스트:5432/DB 형식 URI), PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD, JDBC_DATABASE_URL(jdbc:postgresql:// 형식, 사용자와 비밀번호가 들어 있음)이 들어간다
   - s3: 모든 서비스에 S3_ENDPOINT, S3_BUCKET, S3_REGION, S3_PATH_STYLE, S3_ACCESS_KEY, S3_SECRET_KEY가 들어간다. AWS_ACCESS_KEY_ID 같은 AWS_ 이름은 넣지 않는다
@@ -77,10 +78,10 @@ platform.yaml (플랫폼 서버와 같은 검사로 본다):
 - 실행 중에 쓰는 곳은 65532가 쓸 수 있어야 한다. Dockerfile에서 만들고 chown·chmod 한다. HOME은 없을 수 있으니 필요하면 ENV HOME=/tmp처럼 정한다. root가 필요한 init 시스템(root로 도는 supervisord, s6-overlay 등)은 쓰지 않는다. 진입 스크립트는 sh <파일>로 부르거나 Dockerfile에서 chmod +x 한다.
 - 볼륨은 없다. 파일 시스템은 Pod가 다시 뜨면 사라진다. 남아야 하는 데이터는 postgres 리소스 하나(DATABASE_URL)와 s3 리소스 하나(S3_*)로만 둔다. SQLite 같은 파일 DB는 재시작하면 비워진다.
 - 비밀값(관리자 비밀번호, 세션 키 등)은 운영자가 charlie app secret으로 넣고, 모든 서비스에 같은 이름의 환경 변수로 들어간다. 필요한 이름을 답의 secrets에 적는다. 앱이 다른 이름으로 읽으면 env에 $(시크릿 이름)으로 잇는다. 값은 어디에도(platform.yaml env, Dockerfile의 ENV·ARG 포함) 쓰지 않는다.
-- 자원은 서비스의 memory와 cpu로 정한다. 서비스마다 값(비우면 기본값)에 replicas를 곱해 더한 앱 전체 합은 memory ` + maxAppMemory + `, cpu ` + maxAppCPU + ` 이하여야 한다. 앱이 실제로 쓰는 만큼 잡고, JVM 힙과 워커 수 등은 memory 안에 들어가게 맞춘다.
+- 자원은 서비스의 memory와 cpu로 정한다. 서비스마다 (replicas + 1) × memory를 더한 값은 ` + maxAppMemory + ` 이하, (replicas + 1) × cpu를 더한 값은 ` + maxAppCPU + ` 이하여야 한다. memory를 비운 서비스는 ` + unsetServiceMemory + `, cpu를 비운 서비스는 ` + unsetServiceCPU + `로 센다. +1은 롤링 업데이트 중에 서비스마다 하나 더 뜨는 Pod다. 앱이 실제로 쓰는 만큼 잡고, JVM 힙과 워커 수 등은 memory 안에 들어가게 맞춘다.
 - 밖으로 나가는 네트워크는 DNS, TCP 443, 앱 자기 네임스페이스만 된다. 시작할 때 다른 포트의 외부 서비스(SMTP 25·587, 외부 DB 등)를 기다리지 않게 한다.
 - public 서비스는 HTTP 게이트웨이 뒤에서 https://<name>.hopcharlie.dev로 서비스된다. TLS는 게이트웨이가 끝내므로 앱은 평문 HTTP로 듣는다. WebSocket 업그레이드는 지나간다.
-- healthCheck가 있으면 시작 프로브가 그 경로를 최대 180초까지 기다린다. 없으면 TCP 준비 프로브만 본다. port가 없는 서비스는 프로브가 없어 컨테이너가 떠 있으면 준비된 것으로 본다. 배포는 300초 안에 준비돼야 한다.
+- healthCheck가 있으면 시작 프로브가 그 경로를 최대 180초까지 기다린다. 없으면 TCP 준비 프로브만 본다. port가 없는 서비스는 프로브가 없고, 10초 동안 다시 시작하지 않고 돌면 준비된 것으로 본다. 배포는 300초 안에 준비돼야 한다.
 - 빌드는 서비스마다 AWS CodeBuild에서 docker build로 한다(x86_64, 2 vCPU, 3 GB, 15분 제한). 소스에서 오래 빌드하기보다 상위 프로젝트가 낸 버전 고정 이미지를 FROM으로 쓰는 편을 고른다. latest 태그는 쓰지 않는다.
 
 플랫폼이 주지 못하는 것:
@@ -106,18 +107,18 @@ platform.yaml (플랫폼 서버와 같은 검사로 본다):
    - notes: 운영자가 알아야 할 것 (첫 로그인 방법, 우회한 것, 제약, 확인하지 못한 것). 10개까지, 각 500자 이하
 검사에서 걸린 항목을 받으면 파일을 고치고 JSON 전체를 다시 낸다.`
 
-// 서비스 자원 규칙 (platform.yaml services[].memory, cpu). 지시문과 checkResources가 이 블록만 쓴다.
-// 자리표시: 플랫폼(pkg/appspec)에서 서비스별 범위와 앱 전체 합 규칙을 정하는 중이다. 값이 정해지면 이 블록만 바꾼다.
+// 서비스 자원 규칙 (platform.yaml services[].memory, cpu). 플랫폼 pkg/appspec(platform #69)과 같은 값이다.
+// 지시문과 checkResources가 이 블록만 쓴다. platform 모듈을 올리면 appspec의 MinMemory 등으로 바꾼다.
 const (
-	minServiceMemory     = "64Mi"  // 자리표시
-	maxServiceMemory     = "2Gi"   // 자리표시
-	defaultServiceMemory = "256Mi" // 자리표시. memory를 비웠을 때
-	minServiceCPU        = "10m"   // 자리표시
-	maxServiceCPU        = "1"     // 자리표시
-	defaultServiceCPU    = "50m"   // 자리표시. cpu를 비웠을 때
-	// 앱 전체 합: 서비스마다 (memory 또는 기본값) × replicas를 더한 값의 상한. postgres 리소스는 세지 않는다. 자리표시
+	minServiceMemory   = "256Mi"
+	maxServiceMemory   = "1536Mi"
+	unsetServiceMemory = "256Mi" // 합에서 memory를 비운 서비스를 세는 값 (기본 메모리 상한)
+	minServiceCPU      = "50m"
+	maxServiceCPU      = "500m"
+	unsetServiceCPU    = "50m" // 합에서 cpu를 비운 서비스를 세는 값 (기본 CPU 요청)
+	// 앱 전체 합: 서비스마다 (replicas + 1) × 값을 더한 것의 상한. +1은 롤링 업데이트(maxSurge 1)로 더 뜨는 Pod다
 	maxAppMemory = "3Gi"
-	maxAppCPU    = "2"
+	maxAppCPU    = "1500m"
 )
 
 // PrepareInput은 배포 준비 작업의 입력이다.
@@ -321,8 +322,13 @@ func (r *repoDir) checkPreparation(raw []byte) (*Preparation, plan.Issues) {
 		add("blockers", "%d개까지", maxBlockers)
 	}
 	for i, b := range p.Blockers {
-		text(fmt.Sprintf("blockers[%d].need", i), b.Need, maxNeed)
-		text(fmt.Sprintf("blockers[%d].reason", i), b.Reason, maxReason)
+		path := fmt.Sprintf("blockers[%d]", i)
+		text(path+".need", b.Need, maxNeed)
+		text(path+".reason", b.Reason, maxReason)
+		// 터미널에 한 줄씩 찍고 세션 요약에 이어 붙인다
+		if strings.ContainsAny(b.Need+b.Reason, "\r\n") {
+			add(path, "need와 reason은 한 줄이어야 함")
+		}
 	}
 
 	// AI는 "배포할 수 없음"만 정한다. 그러면 파일 검사 없이 끝내고 실행기는 push하지 않는다
@@ -340,7 +346,7 @@ func (r *repoDir) checkPreparation(raw []byte) (*Preparation, plan.Issues) {
 	}
 
 	var dockerfiles []string
-	p.Spec, dockerfiles = r.checkSpec(add)
+	p.Spec, dockerfiles = r.checkSpec(add, p.Secrets)
 	slices.Sort(dockerfiles)
 	p.Dockerfiles = slices.Compact(dockerfiles)
 	if p.Files = r.changed(); len(p.Files) == 0 {
@@ -361,7 +367,7 @@ func (r *repoDir) checkPreparation(raw []byte) (*Preparation, plan.Issues) {
 
 // checkSpec은 클론 루트의 platform.yaml을 플랫폼과 같은 규칙(pkg/appspec)으로 보고, 서비스의 Dockerfile과 포트를 본다.
 // 통과하면 platform.yaml과 서비스 Dockerfile 경로를 돌려준다.
-func (r *repoDir) checkSpec(add func(path, format string, a ...any)) (*appspec.Spec, []string) {
+func (r *repoDir) checkSpec(add func(path, format string, a ...any), secrets []Secret) (*appspec.Spec, []string) {
 	const file = appspec.FileName
 	real, _, err := r.existing(file)
 	if err != nil {
@@ -385,6 +391,23 @@ func (r *repoDir) checkSpec(add func(path, format string, a ...any)) (*appspec.S
 	}
 	if spec == nil {
 		return nil, nil
+	}
+	// env 값의 $(이름)이 가리킬 수 있는, 모든 서비스에 들어가는 이름: 앱 시크릿과 리소스의 플랫폼 변수
+	defined := map[string]bool{}
+	for _, s := range secrets {
+		defined[s.Name] = true
+	}
+	for _, res := range spec.Resources {
+		switch res.Type {
+		case appspec.TypePostgres:
+			for _, n := range append([]string{appspec.EnvDatabaseURL}, pgEnv...) {
+				defined[n] = true
+			}
+		case appspec.TypeS3:
+			for _, n := range []string{appspec.EnvS3Endpoint, appspec.EnvS3Bucket, appspec.EnvS3Region, appspec.EnvS3PathStyle, appspec.EnvS3AccessKey, appspec.EnvS3SecretKey} {
+				defined[n] = true
+			}
+		}
 	}
 	var dockerfiles []string
 	for i, sv := range spec.Services {
@@ -418,11 +441,19 @@ func (r *repoDir) checkSpec(add func(path, format string, a ...any)) (*appspec.S
 		for k := range sv.Env {
 			keys = append(keys, k)
 		}
+		// 플랫폼은 서비스 env를 이름순으로 플랫폼 변수 뒤에 넣는다. Kubernetes는 앞에 있는 변수만 $(이름)으로 바꾼다
 		slices.Sort(keys)
-		for _, k := range keys {
+		for j, k := range keys {
+			known := func(n string) bool {
+				return defined[n] || n == appspec.EnvPort && sv.Port != 0 || slices.Contains(keys[:j], n)
+			}
 			switch {
 			case slices.Contains(pgEnv, k):
 				add(at+".env."+k, "플랫폼이 넣는 이름임 (%s). 앱이 다른 이름으로 읽으면 그 이름의 값에 \"$(%s)\"를 적는다", reservedNames, k)
+			case !refsDefined(sv.Env[k], known):
+				// 참조한 이름은 적지 않는다. 비밀값을 $( )로 감싼 것일 수 있다
+				add(at+".env."+k, "값의 $(이름)이 이 컨테이너에 없는 환경 변수를 가리킴. Kubernetes는 바꾸지 않고 글자 그대로 넣는다. "+
+					"쓸 수 있는 것: 리소스가 있을 때 플랫폼이 넣는 이름, port가 있을 때 PORT, 답의 secrets에 적은 이름, 이 서비스 env에서 이름순으로 앞선 키")
 			case secretLooking(k, sv.Env[k]):
 				add(at+".env."+k, "비밀값은 env에 두지 않는다. 답의 secrets에 이름을 적으면 운영자가 charlie app secret으로 넣는다")
 			}
@@ -435,7 +466,18 @@ func (r *repoDir) checkSpec(add func(path, format string, a ...any)) (*appspec.S
 	return spec, dockerfiles
 }
 
-// checkResources는 서비스의 memory, cpu가 범위 안인지와 앱 전체 합(값 × replicas)이 상한 안인지 본다 (값은 위 자원 규칙 블록).
+// refsDefined는 env 값 안의 $(이름) 참조가 모두 defined인지 본다.
+func refsDefined(value string, defined func(string) bool) bool {
+	for _, m := range envRef.FindAllStringSubmatch(value, -1) {
+		if !defined(m[1]) {
+			return false
+		}
+	}
+	return true
+}
+
+// checkResources는 서비스의 memory, cpu가 범위 안인지와 앱 전체 합((replicas + 1) × 값)이 상한 안인지 본다 (값은 위 자원 규칙 블록).
+// 어느 서비스의 값이 틀리면 합은 보지 않는다 (같은 원인을 두 번 알리지 않는다).
 // 고정한 platform 모듈의 appspec.Spec에는 아직 memory, cpu가 없어 platform.yaml을 따로 읽는다.
 func checkResources(data []byte, add func(path, format string, a ...any)) {
 	j, err := yaml.YAMLToJSON(data)
@@ -453,63 +495,73 @@ func checkResources(data []byte, add func(path, format string, a ...any)) {
 		return
 	}
 	var memory, cpu int64 // 앱 전체 합 (바이트, 밀리코어)
+	valid := true
 	for i, sv := range raw.Services {
 		at := fmt.Sprintf("%s services[%d]", appspec.FileName, i)
-		n := int64(max(sv.Replicas, 1))
-		m := quantity(add, at+".memory", sv.Memory, minServiceMemory, maxServiceMemory, defaultServiceMemory)
-		c := quantity(add, at+".cpu", sv.CPU, minServiceCPU, maxServiceCPU, defaultServiceCPU)
+		n := int64(max(sv.Replicas, 1)) + 1 // 롤링 업데이트 중 하나 더
+		m, mok := quantity(add, at+".memory", sv.Memory, minServiceMemory, maxServiceMemory, unsetServiceMemory)
+		c, cok := quantity(add, at+".cpu", sv.CPU, minServiceCPU, maxServiceCPU, unsetServiceCPU)
+		valid = valid && mok && cok
 		memory += n * m.Value()
 		cpu += n * c.MilliValue()
 	}
+	if !valid {
+		return
+	}
 	if lim := resource.MustParse(maxAppMemory); memory > lim.Value() {
-		add(appspec.FileName+" services", "memory × replicas 합이 %s로 앱 상한 %s를 넘음", resource.NewQuantity(memory, resource.BinarySI), maxAppMemory)
+		add(appspec.FileName+" services", "롤링 업데이트 중 memory가 %s 이하여야 함. (replicas + 1) × memory의 합(비운 memory는 %s로 셈)이 %s임",
+			maxAppMemory, unsetServiceMemory, resource.NewQuantity(memory, resource.BinarySI))
 	}
 	if lim := resource.MustParse(maxAppCPU); cpu > lim.MilliValue() {
-		add(appspec.FileName+" services", "cpu × replicas 합이 %s로 앱 상한 %s를 넘음", resource.NewMilliQuantity(cpu, resource.DecimalSI), maxAppCPU)
+		add(appspec.FileName+" services", "롤링 업데이트 중 cpu가 %s 이하여야 함. (replicas + 1) × cpu의 합(비운 cpu는 %s로 셈)이 %dm임",
+			maxAppCPU, unsetServiceCPU, cpu)
 	}
 }
 
-// quantity는 서비스의 memory나 cpu 값을 읽고 lo~hi인지 본다. 비었거나 읽지 못하면 기본값 def를 돌려준다.
-func quantity(add func(path, format string, a ...any), path string, v any, lo, hi, def string) resource.Quantity {
+// quantity는 서비스의 memory나 cpu 값을 읽고 lo~hi인지 본다. 비었으면 unset을 돌려준다. 틀린 값이면 ok가 false다.
+func quantity(add func(path, format string, a ...any), path string, v any, lo, hi, unset string) (q resource.Quantity, ok bool) {
 	var s string
 	switch x := v.(type) {
 	case nil:
-		return resource.MustParse(def)
+		return resource.MustParse(unset), true
 	case string:
 		s = x
-	case float64:
+	case float64: // cpu: 0.5처럼 따옴표 없이 쓴 숫자
 		s = strconv.FormatFloat(x, 'f', -1, 64)
 	default:
-		add(path, "Kubernetes 수량 문자열이어야 함 (예: %q)", def)
-		return resource.MustParse(def)
+		add(path, "Kubernetes 수량 문자열이어야 함 (예: %q)", lo)
+		return q, false
 	}
 	q, err := resource.ParseQuantity(s)
 	switch {
 	case err != nil:
-		add(path, "%q는 Kubernetes 수량이 아님 (예: %q)", s, def)
-		return resource.MustParse(def)
+		add(path, "Kubernetes 수량이어야 함 (예: %q)", lo)
+		return q, false
 	case q.Cmp(resource.MustParse(lo)) < 0 || q.Cmp(resource.MustParse(hi)) > 0:
 		add(path, "%s~%s여야 함", lo, hi)
+		return q, false
 	}
-	return q
+	return q, true
 }
 
 // envRef는 env 값 안의 Kubernetes 참조 $(이름)이다. 컨테이너를 띄울 때 그 환경 변수의 값으로 바뀐다.
-var envRef = regexp.MustCompile(`\$\([A-Za-z_][A-Za-z0-9_]*\)`)
+// 이름은 env 키 규칙(대문자)만 본다. 그 이름이 컨테이너에 실제로 있는지는 checkSpec이 본다.
+var envRef = regexp.MustCompile(`\$\(([A-Z_][A-Z0-9_]*)\)`)
 
 // secretLooking은 환경 변수 값이 비밀값으로 보이는지 본다. 값 자체가 비밀처럼 보이거나(mask 규칙, 16자 이상의 무작위 문자열),
 // 이름이 비밀처럼 보이는데(mask.SecretKey) 값이 숫자, 참거짓, 기간, 경로, URL 같은 설정값이 아니면 비밀값이다.
 // COOKIE_SECURE=true, PASSWORD_MIN_LENGTH=8, TOKEN_TTL=3600, GOOGLE_APPLICATION_CREDENTIALS=/path는 설정값이다.
-// $(PGPASSWORD)처럼 다른 환경 변수를 가리키는 부분은 값이 아니므로 빼고 본다.
+// $(PGPASSWORD)처럼 다른 환경 변수를 가리키는 부분은 값이 아니므로 빼고 본다. mask는 원래 값으로 본다
+// (mask는 postgresql://$(PGUSER):$(PGPASSWORD)@... 의 참조를 그대로 두고, 빼면 빈 비밀번호의 URL처럼 보인다).
 func secretLooking(name, value string) bool {
+	if mask.String(value) != value {
+		return true
+	}
 	value = envRef.ReplaceAllString(value, "")
 	if value == "" {
 		return false
 	}
-	if mask.String(value) != value || randomLooking(value) {
-		return true
-	}
-	return mask.SecretKey(name) && !plainSetting(value)
+	return randomLooking(value) || mask.SecretKey(name) && !plainSetting(value)
 }
 
 var (

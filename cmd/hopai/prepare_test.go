@@ -424,6 +424,11 @@ func TestPrepareDeployableDecision(t *testing.T) {
 
 	t.Run("배포할 수 없음", func(t *testing.T) {
 		github, bare := localRemote(t)
+		// 전에 만든 hopcharlie 브랜치가 있어도 그대로 둔다
+		work := filepath.Join(t.TempDir(), "w")
+		gitT(t, "", "clone", "--quiet", bare, work)
+		gitT(t, work, "push", "--quiet", "origin", "main:hopcharlie")
+		before := gitT(t, bare, "rev-parse", "hopcharlie")
 		plat := &fakePlatformServer{}
 		r := newPrepareRun(t, github, plat,
 			aiReply{tool: "read_file", input: `{"path":"README.md"}`},
@@ -444,8 +449,8 @@ func TestPrepareDeployableDecision(t *testing.T) {
 				t.Fatalf("커밋이나 push를 함: %v", a)
 			}
 		}
-		if got := gitT(t, bare, "branch", "--list", "hopcharlie"); got != "" {
-			t.Fatal("hopcharlie 브랜치가 생김")
+		if got := gitT(t, bare, "rev-parse", "hopcharlie"); got != before {
+			t.Fatalf("hopcharlie가 바뀜: %s, 전 %s", got, before)
 		}
 		out := r.stdout.String()
 		for _, want := range []string{"레포: " + testRepo, "AI 세션: ags_1", "push하지 않았습니다", "  - MySQL: config/database.yml이 mysql2 어댑터만 지원함", "  - TCP 25 수신: 메일을", "요약: MySQL 전용", "  - PostgreSQL을 지원하면"} {
