@@ -28,10 +28,21 @@ type Cluster struct {
 
 // PlanScope는 계획 도구가 볼 수 있는 범위다.
 type PlanScope struct {
-	App       string
+	App string
+	// Namespace는 환경별 네임스페이스(Namespaces)에 없는 환경에 쓰는 네임스페이스다.
 	Namespace string
+	// Namespaces는 환경별 DB 네임스페이스다. 환경마다 다를 수 있다(gke는 charlie-apps, eks는 moimroom).
+	Namespaces map[string]string
 	// Envs는 이번 이전의 원본과 대상 환경 이름이다.
 	Envs []string
+}
+
+// NamespaceFor는 환경의 DB 네임스페이스다. 환경별 값이 없으면 Namespace를 쓴다.
+func (s PlanScope) NamespaceFor(env string) string {
+	if ns := s.Namespaces[env]; ns != "" {
+		return ns
+	}
+	return s.Namespace
 }
 
 // CNPGClusterGVR은 CloudNativePG Cluster 리소스다.
@@ -141,7 +152,7 @@ func PlanTools(scope PlanScope, platform *client.Client, clusters map[string]Clu
 		},
 		{
 			Name:        "get_cnpg_cluster",
-			Description: "앱 네임스페이스의 CNPG Cluster 설정(spec의 instances, imageName, storage, resources, bootstrap, replica)과 상태 요약을 본다.",
+			Description: "환경의 DB 네임스페이스(환경마다 다를 수 있음)에 있는 CNPG Cluster 설정(spec의 instances, imageName, storage, resources, bootstrap, replica)과 상태 요약을 본다.",
 			Properties: map[string]any{
 				"env":  envProp["env"],
 				"name": map[string]any{"type": "string", "description": "CNPG Cluster 이름"},
@@ -155,7 +166,7 @@ func PlanTools(scope PlanScope, platform *client.Client, clusters map[string]Clu
 				if err := envOK(in.Env); err != nil {
 					return nil, err
 				}
-				obj, err := clusters[in.Env].Dynamic.Resource(CNPGClusterGVR).Namespace(scope.Namespace).Get(ctx, in.Name, metav1.GetOptions{})
+				obj, err := clusters[in.Env].Dynamic.Resource(CNPGClusterGVR).Namespace(scope.NamespaceFor(in.Env)).Get(ctx, in.Name, metav1.GetOptions{})
 				if err != nil {
 					return nil, err
 				}

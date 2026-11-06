@@ -172,7 +172,8 @@ func main() {
 		}
 	}
 
-	scope := llm.PlanScope{App: *app, Namespace: draft.Source.Namespace, Envs: []string{*from, *to}}
+	// 원본과 대상의 DB 네임스페이스가 다를 수 있다(gke는 charlie-apps, eks는 moimroom). 환경마다 그 환경의 것을 본다.
+	scope := llm.PlanScope{App: *app, Namespace: draft.Source.Namespace, Namespaces: map[string]string{*from: draft.Source.Namespace, *to: draft.Target.Namespace}, Envs: []string{*from, *to}}
 	prop, planSession, err := agent.Plan(ctx, llm.PlanInput{App: *app, Draft: &draft, Tools: llm.PlanTools(scope, pc, clusters), Source: stats, SourceCluster: src})
 	if err != nil {
 		prewarm.Discard(ctx)

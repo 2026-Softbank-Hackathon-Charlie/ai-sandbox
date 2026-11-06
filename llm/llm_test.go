@@ -135,6 +135,51 @@ func scope() PlanScope {
 	return PlanScope{App: "moimroom", Namespace: "moimroom", Envs: []string{"gke", "eks"}}
 }
 
+// 원본(gke)과 대상(eks)의 DB 네임스페이스가 다르다(charlie-apps, moimroom). 2026-11-05 AI는 대상 클러스터를
+// 원본의 네임스페이스에서 찾아 not found를 받았다. 환경마다 그 환경의 네임스페이스를 봐야 한다.
+func TestGetCNPGClusterUsesEnvNamespace(t *testing.T) {
+	cnpg := func(ns, name string) *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "postgresql.cnpg.io/v1", "kind": "Cluster",
+			"metadata": map[string]any{"name": name, "namespace": ns},
+			"spec":     map[string]any{"instances": int64(1)},
+		}}
+	}
+	dyn := func(objs ...runtime.Object) *dynfake.FakeDynamicClient {
+		return dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{CNPGClusterGVR: "ClusterList"}, objs...)
+	}
+	cs := map[string]Cluster{
+		"gke": {Typed: fake.NewClientset(), Dynamic: dyn(cnpg("charlie-apps", "moimroom-db-gke"))},
+		"eks": {Typed: fake.NewClientset(), Dynamic: dyn(cnpg("moimroom", "moimroom-db"))},
+	}
+	get := func(sc PlanScope, env, name string) error {
+		t.Helper()
+		for _, tl := range PlanTools(sc, nil, cs) {
+			if tl.Name == "get_cnpg_cluster" {
+				_, err := tl.Run(context.Background(), json.RawMessage(fmt.Sprintf(`{"env":%q,"name":%q}`, env, name)))
+				return err
+			}
+		}
+		t.Fatal("get_cnpg_cluster 도구가 없음")
+		return nil
+	}
+
+	perEnv := PlanScope{App: "moimroom", Namespace: "charlie-apps", Namespaces: map[string]string{"gke": "charlie-apps", "eks": "moimroom"}, Envs: []string{"gke", "eks"}}
+	for env, name := range map[string]string{"gke": "moimroom-db-gke", "eks": "moimroom-db"} {
+		if err := get(perEnv, env, name); err != nil {
+			t.Errorf("%s/%s: 환경별 네임스페이스에서 찾아야 함: %v", env, name, err)
+		}
+	}
+	// 환경별 값이 없으면 Namespace를 쓴다(이전 동작). 대상 환경 값만 비어 있으면 원본 네임스페이스로 찾아 못 찾는다.
+	legacy := PlanScope{App: "moimroom", Namespace: "charlie-apps", Envs: []string{"gke", "eks"}}
+	if err := get(legacy, "gke", "moimroom-db-gke"); err != nil {
+		t.Errorf("Namespaces가 없으면 Namespace로 찾아야 함: %v", err)
+	}
+	if err := get(legacy, "eks", "moimroom-db"); err == nil {
+		t.Error("Namespaces가 없으면 eks 클러스터(moimroom)를 charlie-apps에서 못 찾아야 함")
+	}
+}
+
 func TestPlanUsesToolsAndLogsEverything(t *testing.T) {
 	f := &fakeAPI{replies: []reply{
 		{tool: "get_cnpg_cluster", toolInput: `{"env":"gke","name":"moimroom-db-gke"}`},
