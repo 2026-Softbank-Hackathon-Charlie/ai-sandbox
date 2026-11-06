@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,10 +15,12 @@ import (
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/platform/pkg/apiv1"
 	"github.com/2026-Softbank-Hackathon-Charlie/platform/pkg/client"
@@ -245,12 +248,21 @@ func TestSourceClusterRole(t *testing.T) {
 		return sc
 	}
 
+	const dsnGKE = "postgres://app:${GKE_MOIMROOM_PGPASSWORD}@moimroom-db-gke-rw.moimroom.gke.ts.net:5432/app?sslmode=require"
+
+	// 카탈로그의 원본은 낡은 moimroom-gcp-db인데 Plan의 DSN은 실제 primary를 가리킨다. 승인 전에 막아야 한다.
 	sc := read("moimroom-gcp-db", cluster("moimroom-gcp-db", false), cluster("moimroom-db-gke", false))
 	if sc.Name != "moimroom-gcp-db" || sc.Namespace != "charlie-apps" || sc.Replica || !slices.Equal(sc.OtherPrimaries, []string{"moimroom-db-gke"}) {
 		t.Fatalf("got %+v", sc)
 	}
-	if err := plan.CheckSourceRole(sc, false); err == nil {
-		t.Fatal("같은 네임스페이스에 다른 primary가 있으면 막아야 함")
+	if err := vetSource(sc, nil, dsnGKE, false, io.Discard); err == nil {
+		t.Fatal("DSN이 다른 primary를 가리키면 막아야 함")
+	}
+
+	// 카탈로그를 고친 뒤: 독립 DB가 남아 있어도 올바른 원본은 통과한다.
+	sc = read("moimroom-db-gke", cluster("moimroom-gcp-db", false), cluster("moimroom-db-gke", false))
+	if err := vetSource(sc, nil, dsnGKE, false, io.Discard); err != nil {
+		t.Fatalf("올바른 원본은 통과해야 함: %v", err)
 	}
 
 	// 혼자 있는 primary는 통과, replica인 이웃은 primary로 세지 않는다.
@@ -258,13 +270,76 @@ func TestSourceClusterRole(t *testing.T) {
 	if sc.Replica || len(sc.OtherPrimaries) != 0 || sc.OthersUnknown {
 		t.Fatalf("got %+v", sc)
 	}
-	if err := plan.CheckSourceRole(sc, false); err != nil {
-		t.Fatal(err)
-	}
 
-	// 원본 자체가 replica면 막는다.
-	if err := plan.CheckSourceRole(read("moimroom-db-follower", cluster("moimroom-db-follower", true)), true); err == nil {
+	// 원본 자체가 replica면 허용 플래그로도 막는다.
+	if err := vetSource(read("moimroom-db-follower", cluster("moimroom-db-follower", true)), nil, dsnGKE, true, io.Discard); err == nil {
 		t.Fatal("원본이 replica면 막아야 함")
+	}
+}
+
+func TestIsReplica(t *testing.T) {
+	with := func(name string, replica map[string]any) *unstructured.Unstructured {
+		spec := map[string]any{}
+		if replica != nil {
+			spec["replica"] = replica
+		}
+		return &unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": name}, "spec": spec}}
+	}
+	for _, c := range []struct {
+		name string
+		obj  *unstructured.Unstructured
+		want bool
+	}{
+		{"replica 설정 없음", with("a", nil), false},
+		{"enabled", with("a", map[string]any{"enabled": true}), true},
+		{"enabled false", with("a", map[string]any{"enabled": false}), false},
+		{"분산 토폴로지에서 primary가 다른 클러스터", with("a", map[string]any{"primary": "b", "source": "b"}), true},
+		{"분산 토폴로지에서 primary가 자기 자신", with("a", map[string]any{"primary": "a", "source": "b"}), false},
+	} {
+		if got := isReplica(c.obj); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// 원본을 못 읽었을 때: 없으면(카탈로그가 틀림) 막고, 권한 문제 등은 경고만 하고 넘어간다.
+func TestVetSourceReadFailures(t *testing.T) {
+	notFound := apierrors.NewNotFound(schema.GroupResource{Group: "postgresql.cnpg.io", Resource: "clusters"}, "moimroom-gcp-db")
+	var w strings.Builder
+	if err := vetSource(nil, notFound, "", false, &w); err == nil || !strings.Contains(err.Error(), "찾을 수 없음") {
+		t.Fatalf("원본이 없으면 막아야 함: %v", err)
+	}
+	if err := vetSource(nil, apierrors.NewForbidden(schema.GroupResource{Resource: "clusters"}, "x", errors.New("no")), "", false, &w); err != nil {
+		t.Fatalf("권한 오류는 호출한 쪽이 경고하고 넘어간다: %v", err)
+	}
+	// 이미지가 비어 읽기 오류가 나도 이미 읽은 역할로 검사한다.
+	if err := vetSource(&plan.SourceCluster{Name: "a", Namespace: "ns", Replica: true}, errors.New("image 없음"), "", false, &w); err == nil {
+		t.Fatal("읽기 오류가 있어도 replica면 막아야 함")
+	}
+}
+
+// 목록 조회 권한이 없으면(읽기 전용 kubeconfig) 다른 primary 검사만 건너뛰고 경고한다.
+func TestSourceClusterListForbidden(t *testing.T) {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "postgresql.cnpg.io/v1", "kind": "Cluster",
+		"metadata": map[string]any{"name": "moimroom-db-gke", "namespace": "charlie-apps"},
+		"spec":     map[string]any{"imageName": "ghcr.io/cloudnative-pg/postgresql:17.11"},
+	}}
+	gvr := map[schema.GroupVersionResource]string{llm.CNPGClusterGVR: "ClusterList"}
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvr, obj)
+	dyn.PrependReactor("list", "clusters", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "postgresql.cnpg.io", Resource: "clusters"}, "", errors.New("list 권한 없음"))
+	})
+	sc, err := sourceCluster(context.Background(), dyn, "charlie-apps", "moimroom-db-gke")
+	if err != nil || !sc.OthersUnknown || len(sc.OtherPrimaries) != 0 {
+		t.Fatalf("got %+v, err %v", sc, err)
+	}
+	var w strings.Builder
+	if err := vetSource(sc, nil, "", false, &w); err != nil {
+		t.Fatalf("목록을 못 읽은 것만으로 막으면 안 됨: %v", err)
+	}
+	if !strings.Contains(w.String(), "경고") {
+		t.Fatalf("경고가 나와야 함: %q", w.String())
 	}
 }
 

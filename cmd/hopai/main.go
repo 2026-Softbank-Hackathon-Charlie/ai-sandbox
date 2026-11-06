@@ -35,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
@@ -142,18 +143,16 @@ func main() {
 	var src *plan.SourceCluster
 	if c, ok := clusters[*from]; !ok {
 		fmt.Fprintf(os.Stderr, "경고: 원본 환경 %s의 -env kubeconfig가 없어 원본 PostgreSQL 버전과 설정을 모름. 이 검사 없이 계획합니다\n", *from)
-	} else if sc, err := sourceCluster(ctx, c.Dynamic, draft.Source.Namespace, draft.Source.Cluster); err != nil {
-		fmt.Fprintf(os.Stderr, "경고: 원본 CNPG 클러스터를 읽지 못함 (%v). 버전·설정 검사 없이 계획합니다\n", err)
 	} else {
-		// 원본이 replica이거나 같은 네임스페이스에 다른 primary가 있으면 카탈로그가 낡은 것일 수 있다. 승인 전에 멈춘다.
-		if err := plan.CheckSourceRole(sc, *allowOthers); err != nil {
-			must(fmt.Errorf("원본 검사 실패:\n%w", err))
+		sc, rerr := sourceCluster(ctx, c.Dynamic, draft.Source.Namespace, draft.Source.Cluster)
+		// 원본이 없거나 replica이거나 DSN이 다른 primary를 가리키면 카탈로그가 낡은 것이다. 승인 전에 멈춘다.
+		must(vetSource(sc, rerr, draft.Source.DSN, *allowOthers, os.Stderr))
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "경고: 원본 CNPG 클러스터를 읽지 못함 (%v). 버전·설정 검사 없이 계획합니다\n", rerr)
+		} else {
+			src = sc
+			fmt.Fprintf(os.Stderr, "원본 클러스터: %s/%s %s (%s), hot standby 설정 %v\n", sc.Namespace, sc.Name, sc.Image, plan.MajorLabel(sc.Image), sc.Parameters)
 		}
-		if sc.OthersUnknown {
-			fmt.Fprintf(os.Stderr, "경고: %s 네임스페이스의 다른 CNPG 클러스터 목록을 읽지 못해 원본이 맞는 primary인지 확인하지 못함\n", sc.Namespace)
-		}
-		src = sc
-		fmt.Fprintf(os.Stderr, "원본 클러스터: %s/%s %s (%s), hot standby 설정 %v\n", sc.Namespace, sc.Name, sc.Image, plan.MajorLabel(sc.Image), sc.Parameters)
 	}
 	// 리허설이 도는 대상 클러스터의 관리용 접속. 데모 준비도 이것으로 대상 StorageClass를 확인한다.
 	adminCfg, err := restConfig(*sbKube, *sbCtx)
@@ -474,22 +473,57 @@ func draftWithStats(ctx context.Context, pc drafter, req apiv1.PlanDraftRequest,
 	return d, nil, err
 }
 
-// sourceCluster는 원본 CNPG 클러스터에서 이미지와 hot standby 설정을 읽는다.
-// 이미지는 실제로 도는 것(status.image)을 먼저 보고, 없으면 spec.imageName을 본다.
+// isReplica는 CNPG Cluster가 다른 클러스터를 따라가는 replica인지 본다. 예전 방식인 spec.replica.enabled가 켜졌거나,
+// 분산 토폴로지에서 spec.replica.primary가 자기가 아닌 클러스터를 가리키면 replica다.
+func isReplica(o *unstructured.Unstructured) bool {
+	if on, _, _ := unstructured.NestedBool(o.Object, "spec", "replica", "enabled"); on {
+		return true
+	}
+	primary, _, _ := unstructured.NestedString(o.Object, "spec", "replica", "primary")
+	return primary != "" && primary != o.GetName()
+}
+
+// vetSource는 원본으로 읽은 클러스터가 이전의 원본으로 맞는지 승인 전에 본다. 걸리면 오류를 돌려주고, 경고는 w에 쓴다.
+// 플랫폼 카탈로그(apps.yaml)는 손으로 갱신되고 플랫폼 초안은 이름 형식만 보므로(2026-11-05 사고) 여기서 막는다.
+//   - 원본 클러스터가 없으면(NotFound) 카탈로그가 틀린 것이다. 경고만 하고 계획하면 리허설이 임시 원본으로 통과해 버린다.
+//   - 그 밖에 읽지 못한 오류(권한, 네트워크)는 호출하는 쪽이 경고하고 넘어간다.
+//   - 읽은 값이 있으면(이미지가 비어 오류가 난 경우도 포함) 역할을 본다.
+func vetSource(sc *plan.SourceCluster, readErr error, dsn string, allowOthers bool, w io.Writer) error {
+	if apierrors.IsNotFound(readErr) {
+		return fmt.Errorf("원본 검사 실패: 원본 CNPG 클러스터를 찾을 수 없음. 플랫폼 카탈로그(apps.yaml)의 cnpgCluster와 네임스페이스가 실제와 다를 수 있음: %w", readErr)
+	}
+	if sc == nil {
+		return nil
+	}
+	warns, err := plan.CheckSourceRole(sc, dsn, allowOthers)
+	for _, m := range warns {
+		fmt.Fprintln(w, "경고:", m)
+	}
+	if err != nil {
+		return fmt.Errorf("원본 검사 실패:\n%w", err)
+	}
+	if sc.OthersUnknown {
+		fmt.Fprintf(w, "경고: %s 네임스페이스의 다른 CNPG 클러스터 목록을 읽지 못해 원본이 맞는 primary인지 확인하지 못함\n", sc.Namespace)
+	}
+	return nil
+}
+
+// sourceCluster는 원본 CNPG 클러스터에서 이미지와 hot standby 설정, 역할을 읽는다.
+// 이미지는 실제로 도는 것(status.image)을 먼저 보고, 없으면 spec.imageName을 본다. 이미지가 없으면 오류와 함께
+// 지금까지 읽은 값(역할)도 돌려준다.
 func sourceCluster(ctx context.Context, dyn dynamic.Interface, ns, name string) (*plan.SourceCluster, error) {
 	obj, err := dyn.Resource(llm.CNPGClusterGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
-	sc := &plan.SourceCluster{Name: name, Namespace: ns}
-	sc.Replica, _, _ = unstructured.NestedBool(obj.Object, "spec", "replica", "enabled")
+	sc := &plan.SourceCluster{Name: name, Namespace: ns, Replica: isReplica(obj)}
 	// 같은 네임스페이스의 다른 primary. 카탈로그가 낡은 DB를 가리키는 사고를 승인 전에 잡는 근거다.
 	// 목록을 읽지 못하면(권한 등) 이 검사만 건너뛰고 알린다.
 	if list, err := dyn.Resource(llm.CNPGClusterGVR).Namespace(ns).List(ctx, metav1.ListOptions{}); err != nil {
 		sc.OthersUnknown = true
 	} else {
-		for _, o := range list.Items {
-			if replica, _, _ := unstructured.NestedBool(o.Object, "spec", "replica", "enabled"); o.GetName() != name && !replica {
+		for i := range list.Items {
+			if o := &list.Items[i]; o.GetName() != name && !isReplica(o) {
 				sc.OtherPrimaries = append(sc.OtherPrimaries, o.GetName())
 			}
 		}
@@ -500,7 +534,7 @@ func sourceCluster(ctx context.Context, dyn dynamic.Interface, ns, name string) 
 	} else if s, _, _ := unstructured.NestedString(obj.Object, "spec", "imageName"); s != "" {
 		sc.Image = s
 	} else {
-		return nil, errors.New("status.image와 spec.imageName이 모두 비어 있음")
+		return sc, errors.New("status.image와 spec.imageName이 모두 비어 있음")
 	}
 	params, _, _ := unstructured.NestedStringMap(obj.Object, "spec", "postgresql", "parameters")
 	for _, k := range plan.StandbyParams {
