@@ -168,13 +168,13 @@ func prepareSandbox(ctx context.Context, c *Config, ses agentlog.Session, a *Att
 			return nil, nil
 		}
 	}
-	log(agentlog.Event{Type: agentlog.ToolCall, Tool: "sandbox_source", Input: map[string]any{"cluster": pl.Source.Cluster, "rows": c.Rows, "schemas": pl.Verify.Schemas, "storageClass": tempSC}})
+	log(agentlog.Event{Type: agentlog.ToolCall, Tool: "sandbox_source", Input: map[string]any{"cluster": SandboxSource(pl), "rows": c.Rows, "schemas": pl.Verify.Schemas, "storageClass": tempSC}})
 	t0 = time.Now()
 	if _, err := aiDyn.Resource(llm.CNPGClusterGVR).Namespace(sb.Namespace).Create(ctx, srcObj, metav1.CreateOptions{}); err != nil {
 		failf("임시 원본 생성 실패: %v", err)
 		return nil, nil
 	}
-	if err := waitHealthy(ctx, aiDyn, sb.Namespace, pl.Source.Cluster, c.SourceTimeout); err != nil {
+	if err := waitHealthy(ctx, aiDyn, sb.Namespace, SandboxSource(pl), c.SourceTimeout); err != nil {
 		// 샌드박스를 곧 지우므로 원인 단서(Pod·PVC 상태, 경고 이벤트)를 지우기 전에 세션 로그와 리포트에 남긴다.
 		var brief string
 		a.Evidence, brief = sourceNotReadyEvidence(ctx, aiCS, sb.Namespace)
@@ -186,14 +186,14 @@ func prepareSandbox(ctx context.Context, c *Config, ses agentlog.Session, a *Att
 		}
 		return nil, nil
 	}
-	sec, err := aiCS.CoreV1().Secrets(sb.Namespace).Get(ctx, pl.Source.Cluster+"-app", metav1.GetOptions{})
+	sec, err := aiCS.CoreV1().Secrets(sb.Namespace).Get(ctx, SandboxSource(pl)+"-app", metav1.GetOptions{})
 	if err != nil {
 		failf("임시 원본 앱 계정을 읽을 수 없음: %v", err)
 		return nil, nil
 	}
 	password := string(sec.Data["password"])
 	p := &prepared{sb: sb, token: token, aiCS: aiCS, aiDyn: aiDyn, db: db, tempSC: tempSC}
-	if p.srcProxy, err = NewProxy(c.Admin, c.AdminREST, sb.Namespace, pl.Source.Cluster); err != nil {
+	if p.srcProxy, err = NewProxy(c.Admin, c.AdminREST, sb.Namespace, SandboxSource(pl)); err != nil {
 		return nil, err
 	}
 	if p.dstProxy, err = NewProxy(c.Admin, c.AdminREST, sb.Namespace, pl.Target.Cluster); err != nil {
@@ -206,7 +206,7 @@ func prepareSandbox(ctx context.Context, c *Config, ses agentlog.Session, a *Att
 		failf("%v", err)
 		return nil, nil
 	}
-	log(agentlog.Event{Type: agentlog.ToolResult, Tool: "sandbox_source", Status: "ok", Duration: time.Since(t0), Output: map[string]any{"cluster": pl.Source.Cluster, "rows": c.Rows}})
+	log(agentlog.Event{Type: agentlog.ToolResult, Tool: "sandbox_source", Status: "ok", Duration: time.Since(t0), Output: map[string]any{"cluster": SandboxSource(pl), "rows": c.Rows}})
 	return p, nil
 }
 

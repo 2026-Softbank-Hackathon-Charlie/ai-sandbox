@@ -565,3 +565,92 @@ func TestFailureLogSandboxNotes(t *testing.T) {
 		t.Fatalf("failureLog = %q", got)
 	}
 }
+
+// 두 환경에서 같은 이름을 쓰는 DB 짝(infra ADR 0063, moimroom-mig)은 원본과 대상을 한 샌드박스에 두려면
+// 임시 원본 이름을 바꿔야 한다. 이름이 같으면 CNPG가 externalClusters 중복으로 임시 원본을 거부했다.
+func TestPairedSameNameGetsDistinctSandboxSource(t *testing.T) {
+	const ns = "sandbox-moimroom-mig-ab12"
+	p := &eplan.Plan{
+		Source: eplan.Endpoint{Env: "gke", Cluster: "moimroom-mig-db"},
+		Target: eplan.Endpoint{Env: "eks", Cluster: "moimroom-mig-db"},
+	}
+	if got := SandboxSource(p); got != "moimroom-mig-db-source" {
+		t.Fatalf("임시 원본 이름: %s", got)
+	}
+	src := SourceManifest(p, ns, DBInfo{Name: "app", User: "app"}).Object
+	if name, _, _ := unstructured.NestedString(src, "metadata", "name"); name != "moimroom-mig-db-source" {
+		t.Fatalf("임시 원본 metadata.name: %s", name)
+	}
+	rep, _, _ := unstructured.NestedStringMap(src, "spec", "replica")
+	if rep["self"] != "moimroom-mig-db-source" || rep["primary"] != "moimroom-mig-db-source" || rep["source"] != "moimroom-mig-db" {
+		t.Fatalf("임시 원본 토폴로지: %+v", rep)
+	}
+	srcExt, _, _ := unstructured.NestedSlice(src, "spec", "externalClusters")
+	if names := extNames(srcExt); !slices.Equal(names, []string{"moimroom-mig-db-source", "moimroom-mig-db"}) {
+		t.Fatalf("임시 원본 externalClusters: %v", names)
+	}
+
+	// AI가 이 앱에 실제로 쓴 모양: 모든 자리가 같은 이름이고, externalClusters는 한 항목뿐이다(plan 검사가 중복을 거절함).
+	// 같은 이름 항목이 두 개여도 결과는 같아야 한다.
+	dup := "    - name: moimroom-mig-db\n      connectionParameters: {host: moimroom-mig-db-rw.moimroom-mig.svc, user: streaming_replica, dbname: postgres, sslmode: verify-full}\n"
+	for _, extra := range []string{"", dup} {
+		checkPairedTarget(t, p, ns, pairedTarget+extra)
+	}
+	if sp := SandboxPlan(p, ns, "k", "m", "s", "d"); sp.Source.Cluster != "moimroom-mig-db-source" || sp.Target.Cluster != "moimroom-mig-db" {
+		t.Fatalf("샌드박스 Plan: 원본 %s, 대상 %s", sp.Source.Cluster, sp.Target.Cluster)
+	}
+}
+
+const pairedTarget = `apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata: {name: moimroom-mig-db, namespace: moimroom-mig}
+spec:
+  instances: 1
+  replica: {self: moimroom-mig-db, primary: moimroom-mig-db, source: moimroom-mig-db}
+  bootstrap:
+    pg_basebackup: {source: moimroom-mig-db, database: app, owner: app, secret: {name: moimroom-mig-db-app}}
+  externalClusters:
+    - name: moimroom-mig-db
+      connectionParameters: {host: db-eks-moimroom-mig.hopcharlie-db-network.svc.cluster.local, user: streaming_replica, dbname: postgres, sslmode: verify-full}
+`
+
+func checkPairedTarget(t *testing.T, p *eplan.Plan, ns, manifest string) {
+	t.Helper()
+	out, err := TargetManifest(manifest, p, ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if name, _, _ := unstructured.NestedString(doc, "metadata", "name"); name != "moimroom-mig-db" {
+		t.Fatalf("대상 이름은 그대로여야 함: %s", name)
+	}
+	trep, _, _ := unstructured.NestedStringMap(doc, "spec", "replica")
+	if trep["self"] != "moimroom-mig-db" || trep["primary"] != "moimroom-mig-db-source" || trep["source"] != "moimroom-mig-db-source" {
+		t.Fatalf("대상 토폴로지: %+v", trep)
+	}
+	pb, _, _ := unstructured.NestedMap(doc, "spec", "bootstrap", "pg_basebackup")
+	if pb["source"] != "moimroom-mig-db-source" || pb["secret"].(map[string]any)["name"] != "moimroom-mig-db-source-app" {
+		t.Fatalf("pg_basebackup: %+v", pb)
+	}
+	ext, _, _ := unstructured.NestedSlice(doc, "spec", "externalClusters")
+	if names := extNames(ext); !slices.Equal(names, []string{"moimroom-mig-db-source", "moimroom-mig-db"}) {
+		t.Fatalf("대상 externalClusters: %v", names)
+	}
+	for _, e := range ext {
+		h := e.(map[string]any)["connectionParameters"].(map[string]any)["host"].(string)
+		if !strings.HasSuffix(h, "."+ns+".svc") {
+			t.Fatalf("운영 주소가 남음: %s", h)
+		}
+	}
+}
+
+func extNames(ext []any) []string {
+	var out []string
+	for _, e := range ext {
+		out = append(out, e.(map[string]any)["name"].(string))
+	}
+	return out
+}

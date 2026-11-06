@@ -65,11 +65,21 @@ func externalCluster(name, ns string) map[string]any {
 	}
 }
 
-// SourceManifest는 샌드박스에 만들 임시 원본이다. 이름은 Plan의 원본 클러스터와 같게 해서
+// SandboxSource는 샌드박스에 만들 임시 원본의 이름이다. 보통 Plan의 원본 클러스터 이름과 같다.
+// 두 환경에서 같은 이름을 쓰는 DB 짝(infra ADR 0063)은 원본과 대상을 한 샌드박스에 둘 수 없으므로
+// 원본 이름에 -source를 붙인다.
+func SandboxSource(p *eplan.Plan) string {
+	if p.Source.Cluster == p.Target.Cluster {
+		return p.Source.Cluster + "-source"
+	}
+	return p.Source.Cluster
+}
+
+// SourceManifest는 샌드박스에 만들 임시 원본이다. 이름은 SandboxSource(보통 Plan의 원본 클러스터와 같음)로 해서
 // 대상 매니페스트가 가리키는 시크릿(<원본>-app, -replication, -ca)이 그대로 맞게 한다.
 // 엔진의 분산 토폴로지대로 replica.source는 대상을 가리킨다 (migration-engine examples/cnpg와 같은 모양).
 func SourceManifest(p *eplan.Plan, ns string, db DBInfo) *unstructured.Unstructured {
-	src, dst := p.Source.Cluster, p.Target.Cluster
+	src, dst := SandboxSource(p), p.Target.Cluster
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "postgresql.cnpg.io/v1",
 		"kind":       "Cluster",
@@ -103,6 +113,10 @@ func TargetManifest(manifest string, p *eplan.Plan, ns string) (string, error) {
 	if spec == nil {
 		return "", fmt.Errorf("대상 매니페스트에 spec이 없음")
 	}
+	src := SandboxSource(p)
+	if src != p.Source.Cluster {
+		renameSource(spec, p.Source.Cluster, src)
+	}
 	ext, _ := spec["externalClusters"].([]any)
 	seen := map[string]bool{}
 	for _, e := range ext {
@@ -111,7 +125,7 @@ func TargetManifest(manifest string, p *eplan.Plan, ns string) (string, error) {
 			continue
 		}
 		name, _ := m["name"].(string)
-		if name != p.Source.Cluster && name != p.Target.Cluster {
+		if name != src && name != p.Target.Cluster {
 			continue
 		}
 		seen[name] = true
@@ -128,7 +142,7 @@ func TargetManifest(manifest string, p *eplan.Plan, ns string) (string, error) {
 		}
 	}
 	// 엔진은 전환 뒤 옛 원본이 새 primary를 따라가게 하므로 양쪽 항목이 모두 있어야 한다.
-	for _, name := range []string{p.Source.Cluster, p.Target.Cluster} {
+	for _, name := range []string{src, p.Target.Cluster} {
 		if !seen[name] {
 			ext = append(ext, externalCluster(name, ns))
 		}
@@ -151,6 +165,45 @@ func TargetManifest(manifest string, p *eplan.Plan, ns string) (string, error) {
 	}
 	out, err := yaml.Marshal(doc)
 	return string(out), err
+}
+
+// renameSource는 원본과 대상의 이름이 같은 대상 매니페스트에서 원본을 가리키는 자리를 샌드박스 원본 이름(to)으로 바꾼다.
+// 이름만으로는 어느 쪽인지 알 수 없으므로 자리로 정한다: replica.primary와 replica.source,
+// pg_basebackup의 source와 원본 앱 계정 시크릿은 원본이고, replica.self는 대상 자신이다.
+// externalClusters는 그 이름의 첫 항목을 원본으로 남기고 나머지는 지운다. 대상 항목은 호출한 쪽이 붙인다.
+func renameSource(spec map[string]any, from, to string) {
+	if r, _ := spec["replica"].(map[string]any); r != nil {
+		for _, k := range []string{"primary", "source"} {
+			if r[k] == from {
+				r[k] = to
+			}
+		}
+	}
+	if b, _ := spec["bootstrap"].(map[string]any); b != nil {
+		if pb, _ := b["pg_basebackup"].(map[string]any); pb != nil {
+			if pb["source"] == from {
+				pb["source"] = to
+			}
+			if s, _ := pb["secret"].(map[string]any); s != nil && s["name"] == from+"-app" {
+				s["name"] = to + "-app"
+			}
+		}
+	}
+	ext, _ := spec["externalClusters"].([]any)
+	var out []any
+	renamed := false
+	for _, e := range ext {
+		if m, _ := e.(map[string]any); m != nil && m["name"] == from {
+			if renamed {
+				continue
+			}
+			m["name"], renamed = to, true
+		}
+		out = append(out, e)
+	}
+	if ext != nil {
+		spec["externalClusters"] = out
+	}
 }
 
 // SandboxConfig는 대상 매니페스트를 리허설할 수 있게 샌드박스 Quota를 잡는다. 기본값(임시 원본, 검사 Pod, 작업 Pod 몫)에
@@ -228,7 +281,7 @@ func TokenKubeconfig(dir string, admin *rest.Config, token string) (string, erro
 func SandboxPlan(p *eplan.Plan, ns, kubeconfig, manifestPath, srcDSN, dstDSN string) *eplan.Plan {
 	sp := *p
 	sp.ID = p.ID + "-rehearsal"
-	sp.Source = eplan.Endpoint{Env: p.Source.Env, Kubeconfig: kubeconfig, Context: "sandbox", Namespace: ns, Cluster: p.Source.Cluster, DSN: srcDSN}
+	sp.Source = eplan.Endpoint{Env: p.Source.Env, Kubeconfig: kubeconfig, Context: "sandbox", Namespace: ns, Cluster: SandboxSource(p), DSN: srcDSN}
 	sp.Target = eplan.Endpoint{Env: p.Target.Env, Kubeconfig: kubeconfig, Context: "sandbox", Namespace: ns, Cluster: p.Target.Cluster, DSN: dstDSN, Manifest: manifestPath}
 	sp.Files = nil
 	sp.Gateway = eplan.GatewaySpec{Mode: "none", SourceBackend: p.Source.Env, TargetBackend: p.Target.Env}
