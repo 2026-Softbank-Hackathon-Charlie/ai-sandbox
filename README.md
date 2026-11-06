@@ -245,6 +245,13 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 
 원본 실측은 AI 도구가 아니다. `hopai`가 Plan 초안을 받을 때 플랫폼에 같이 재 달라고 하고(`POST /v1/plans/draft`에 `"sourceStats": true`, platform #47·ADR 0017), 숫자만 AI에 보여 준다. 플랫폼은 시작 전 용량 검사와 같은 쿼리로 클라이언트 세션 수, max_connections, max_worker_processes, DB 크기, 5초 동안의 WAL 생성 속도를 잰다. 그래서 이 실행기는 운영 DB에 붙지 않고 비밀번호도 갖지 않으며, 계획 검사와 시작 검사가 같은 숫자를 본다. 플랫폼이 재지 못하면(`sourceStatsReason: not_measured`: 비밀번호 변수 없음, 닿지 못함, 쿼리 실패) 경고만 내고 용량 검사 없이 계획한다(`-no-measure`로 요청하지 않을 수 있음). 크기나 WAL 속도만 빠지면 접속 수는 검사하고 초기 복사 검사는 하지 않는다.
 
+원본 검사도 AI 도구가 아니다. 플랫폼 카탈로그(`apps.yaml`)의 `cnpgCluster`는 사람이 SSM에 손으로 넣는 값이라 이전으로 DB가 바뀐 뒤에도 낡은 채 남을 수 있고, 플랫폼 초안은 이름 형식만 보고 엔진 precheck는 승인 뒤에야 보기 때문이다(2026-11-05: 카탈로그가 낡은 독립 DB `moimroom-gcp-db`를 가리켰고 실제 primary는 `moimroom-db-gke`였다). 그래서 `hopai`는 원본 클러스터를 읽을 때(`sourceCluster`) 다음을 보고, 걸리면 AI 계획과 리허설 준비를 시작하기 전에 멈춘다(`vetSource`, `plan.CheckSourceRole`).
+
+- 원본 클러스터가 없으면(NotFound) 멈춘다. 카탈로그의 이름이나 네임스페이스가 틀린 것이다. 경고만 하고 계획하면 리허설이 임시 원본으로 통과한다. 권한 오류나 네트워크 오류로 읽지 못한 경우는 지금처럼 경고하고 이 검사 없이 계획한다.
+- 원본이 replica(`spec.replica.enabled`, 또는 `spec.replica.primary`가 자기가 아닌 클러스터)면 멈춘다. `-allow-other-primaries`로도 넘길 수 없다.
+- 같은 네임스페이스에 다른 primary가 있으면 Plan의 원본 DSN 호스트(`<클러스터>-rw...`)를 본다. 호스트가 원본을 가리키면 통과하고(무관한 DB가 남아 있어도 막지 않는다), 다른 primary를 가리키면 멈춘다. 호스트로 판단할 수 없으면(프록시 이름 등) 경고만 한다. 호스트 이름이 클러스터 이름과 다르게 붙는 환경이 있어서(eks는 `moimroom-db`와 `moimroom-db-eks-rw`) 호스트가 원본과 다르다는 이유만으로는 막지 않는다. 원본이 맞다고 확인했으면 `-allow-other-primaries`로 넘긴다.
+- 같은 네임스페이스의 목록을 읽지 못하면(권한 등) 다른 primary 검사만 건너뛰고 경고한다.
+
 ## 6. 샌드박스
 
 리허설은 **대상 클러스터**에 만든다. 대상 환경의 차이(StorageClass, 노드 자원, 네트워크)를 미리 드러내는 것이 목적이다.
