@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"maps"
+	"net"
 	"regexp"
 	"slices"
 	"strings"
@@ -64,10 +65,23 @@ type Config struct {
 	// AllowEgressCIDRs는 샌드박스 밖으로 나가는 연결을 허용할 주소 대역이다.
 	// CNPG 인스턴스는 API 서버에 붙어야 하므로 API 서버 주소를 넣어야 한다. 그 밖에는 비워 둔다.
 	AllowEgressCIDRs []string
+	// AllowDNSCIDRs는 DNS(53번 포트, UDP와 TCP)만 허용할 주소 대역이다. GKE의 NodeLocal DNSCache처럼
+	// Pod가 kube-dns 대신 노드의 링크 로컬 주소로 DNS를 묻는 클러스터에서 쓴다. 다른 포트는 열지 않고,
+	// 메타데이터 주소(169.254.169.254)를 덮는 대역은 거절한다.
+	AllowDNSCIDRs []string
 }
 
 // CNPGOperatorNamespace는 CloudNativePG 오퍼레이터의 기본 네임스페이스다.
 const CNPGOperatorNamespace = "cnpg-system"
+
+const (
+	// NodeLocalDNSCIDR은 GKE NodeLocal DNSCache의 수신 주소다. 메타데이터 주소와는 다른 주소다.
+	NodeLocalDNSCIDR = "169.254.20.10/32"
+	// nodeLocalDNSName은 kube-system의 NodeLocal DNSCache DaemonSet 이름이다.
+	nodeLocalDNSName = "node-local-dns"
+	// metadataIP는 어떤 허용 대역도 덮으면 안 되는 클라우드 메타데이터 주소다.
+	metadataIP = "169.254.169.254"
+)
 
 // ForCNPG는 샌드박스에서 CNPG 클러스터가 뜰 수 있게 설정을 더한다.
 // 오퍼레이터가 인스턴스 관리자(8000번)에 들어오고, 인스턴스는 API 서버로 나간다.
@@ -102,6 +116,15 @@ func ForCNPG(ctx context.Context, cs kubernetes.Interface, c Config) (Config, er
 			if !slices.Contains(c.AllowEgressCIDRs, cidr) {
 				c.AllowEgressCIDRs = append(c.AllowEgressCIDRs, cidr)
 			}
+		}
+	}
+	// NodeLocal DNSCache가 있는 클러스터(GKE)에서 Pod는 kube-dns가 아니라 노드의 169.254.20.10으로 DNS를 묻는다.
+	// 정책이 kube-dns Pod만 허용하면 이름이 풀리지 않아 격리 검사의 dns 항목이 막힌다(2026-11-07 GKE 리허설).
+	// DaemonSet이 있을 때만 그 주소의 53번 포트를 연다. 읽지 못하면 열지 않는다(이전 동작).
+	c.AllowDNSCIDRs = append([]string{}, c.AllowDNSCIDRs...)
+	if _, err := cs.AppsV1().DaemonSets("kube-system").Get(ctx, nodeLocalDNSName, metav1.GetOptions{}); err == nil {
+		if !slices.Contains(c.AllowDNSCIDRs, NodeLocalDNSCIDR) {
+			c.AllowDNSCIDRs = append(c.AllowDNSCIDRs, NodeLocalDNSCIDR)
 		}
 	}
 	return c, nil
@@ -155,6 +178,15 @@ func (c Config) withDefaults() (Config, error) {
 	}
 	if c.Pods == 0 {
 		c.Pods = 20
+	}
+	for _, cidr := range c.AllowDNSCIDRs {
+		_, n, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return c, fmt.Errorf("DNS 허용 대역 %q를 읽을 수 없음: %w", cidr, err)
+		}
+		if n.Contains(net.ParseIP(metadataIP)) {
+			return c, fmt.Errorf("DNS 허용 대역 %q가 메타데이터 주소 %s를 덮음", cidr, metadataIP)
+		}
 	}
 	for _, q := range []string{c.CPU, c.Memory} {
 		v, err := resource.ParseQuantity(q)
@@ -219,6 +251,12 @@ func Build(c Config, now time.Time) (Objects, error) {
 		return metav1.ObjectMeta{Name: name, Namespace: ns, Labels: labels}
 	}
 
+	dnsPorts := func() []netv1.NetworkPolicyPort {
+		return []netv1.NetworkPolicyPort{
+			{Protocol: ptr(corev1.ProtocolUDP), Port: ptr(intstr.FromInt32(53))},
+			{Protocol: ptr(corev1.ProtocolTCP), Port: ptr(intstr.FromInt32(53))},
+		}
+	}
 	egress := []netv1.NetworkPolicyEgressRule{
 		// 같은 네임스페이스 안
 		{To: []netv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{}}}},
@@ -228,11 +266,15 @@ func Build(c Config, now time.Time) (Objects, error) {
 				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": "kube-system"}},
 				PodSelector:       &metav1.LabelSelector{MatchLabels: map[string]string{"k8s-app": "kube-dns"}},
 			}},
-			Ports: []netv1.NetworkPolicyPort{
-				{Protocol: ptr(corev1.ProtocolUDP), Port: ptr(intstr.FromInt32(53))},
-				{Protocol: ptr(corev1.ProtocolTCP), Port: ptr(intstr.FromInt32(53))},
-			},
+			Ports: dnsPorts(),
 		},
+	}
+	// 노드의 DNS 캐시 같은 주소는 DNS 포트만 연다
+	for _, cidr := range c.AllowDNSCIDRs {
+		egress = append(egress, netv1.NetworkPolicyEgressRule{
+			To:    []netv1.NetworkPolicyPeer{{IPBlock: &netv1.IPBlock{CIDR: cidr}}},
+			Ports: dnsPorts(),
+		})
 	}
 	for _, cidr := range c.AllowEgressCIDRs {
 		egress = append(egress, netv1.NetworkPolicyEgressRule{To: []netv1.NetworkPolicyPeer{{IPBlock: &netv1.IPBlock{CIDR: cidr}}}})
