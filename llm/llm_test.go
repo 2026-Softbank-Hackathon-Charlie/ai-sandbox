@@ -16,6 +16,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -133,6 +134,64 @@ func clusters() map[string]Cluster {
 
 func scope() PlanScope {
 	return PlanScope{App: "moimroom", Namespace: "moimroom", Envs: []string{"gke", "eks"}}
+}
+
+// 원본(gke)과 대상(eks)의 DB 네임스페이스가 다르다(charlie-apps, moimroom). 2026-11-05 AI는 대상 클러스터를
+// 원본의 네임스페이스에서 찾아 not found를 받았다. 환경마다 그 환경의 네임스페이스를 봐야 한다.
+func TestGetCNPGClusterUsesEnvNamespace(t *testing.T) {
+	cnpg := func(ns, name string) *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "postgresql.cnpg.io/v1", "kind": "Cluster",
+			"metadata": map[string]any{"name": name, "namespace": ns},
+			"spec":     map[string]any{"instances": int64(1)},
+		}}
+	}
+	dyn := func(objs ...runtime.Object) *dynfake.FakeDynamicClient {
+		return dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{CNPGClusterGVR: "ClusterList"}, objs...)
+	}
+	cs := map[string]Cluster{
+		"gke": {Typed: fake.NewClientset(), Dynamic: dyn(cnpg("charlie-apps", "moimroom-db-gke"))},
+		"eks": {Typed: fake.NewClientset(), Dynamic: dyn(cnpg("moimroom", "moimroom-db"))},
+	}
+	get := func(sc PlanScope, env, name string) error {
+		t.Helper()
+		for _, tl := range PlanTools(sc, nil, cs) {
+			if tl.Name == "get_cnpg_cluster" {
+				_, err := tl.Run(context.Background(), json.RawMessage(fmt.Sprintf(`{"env":%q,"name":%q}`, env, name)))
+				return err
+			}
+		}
+		t.Fatal("get_cnpg_cluster 도구가 없음")
+		return nil
+	}
+
+	perEnv := PlanScope{App: "moimroom", Namespace: "charlie-apps", Namespaces: map[string]string{"gke": "charlie-apps", "eks": "moimroom"}, Envs: []string{"gke", "eks"}}
+	for env, name := range map[string]string{"gke": "moimroom-db-gke", "eks": "moimroom-db"} {
+		if err := get(perEnv, env, name); err != nil {
+			t.Errorf("%s/%s: 환경별 네임스페이스에서 찾아야 함: %v", env, name, err)
+		}
+	}
+	// 환경별 값이 없으면 Namespace를 쓴다.
+	legacy := PlanScope{App: "moimroom", Namespace: "charlie-apps", Envs: []string{"gke", "eks"}}
+	if err := get(legacy, "gke", "moimroom-db-gke"); err != nil {
+		t.Errorf("Namespaces가 없으면 Namespace로 찾아야 함: %v", err)
+	}
+
+	// 이름을 잘못 짚으면(2026-11-05 AI는 moimroom-db-eks를 조회했다) 어느 환경과 네임스페이스를 봤는지, 그 네임스페이스에
+	// 실제로 있는 Cluster 이름이 오류에 있어야 한다. AI가 스스로 고치고 운영자가 원인을 가릴 수 있다.
+	err := get(perEnv, "eks", "moimroom-db-eks")
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Fatalf("없는 이름은 NotFound여야 함(원래 오류를 감싸야 함): %v", err)
+	}
+	for _, want := range []string{"환경 eks", "네임스페이스 moimroom", "moimroom-db-eks", "있는 Cluster: moimroom-db"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("오류에 %q가 없음: %v", want, err)
+		}
+	}
+	// 그 네임스페이스에 Cluster가 하나도 없으면 그렇게 알린다.
+	if err := get(PlanScope{App: "moimroom", Namespace: "empty", Envs: []string{"gke", "eks"}}, "gke", "x"); err == nil || !strings.Contains(err.Error(), "Cluster가 없음") {
+		t.Errorf("빈 네임스페이스는 Cluster가 없다고 알려야 함: %v", err)
+	}
 }
 
 func TestPlanUsesToolsAndLogsEverything(t *testing.T) {

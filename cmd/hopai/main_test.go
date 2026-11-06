@@ -22,6 +22,7 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	clienttesting "k8s.io/client-go/testing"
 
+	eplan "github.com/2026-Softbank-Hackathon-Charlie/migration-engine/pkg/plan"
 	"github.com/2026-Softbank-Hackathon-Charlie/platform/pkg/apiv1"
 	"github.com/2026-Softbank-Hackathon-Charlie/platform/pkg/client"
 
@@ -274,6 +275,22 @@ func TestSourceClusterRole(t *testing.T) {
 	// 원본 자체가 replica면 허용 플래그로도 막는다.
 	if err := vetSource(read("moimroom-db-follower", cluster("moimroom-db-follower", true)), nil, dsnGKE, true, io.Discard); err == nil {
 		t.Fatal("원본이 replica면 막아야 함")
+	}
+}
+
+// 원본과 대상의 DB 네임스페이스가 다르다(gke charlie-apps, eks moimroom). 계획 도구는 환경마다 그 환경의 것을 본다.
+func TestPlanScope(t *testing.T) {
+	var d eplan.Plan
+	d.Source.Namespace, d.Target.Namespace = "charlie-apps", "moimroom"
+	sc := planScope("moimroom", "gke", "eks", &d)
+	if got := sc.NamespaceFor("gke"); got != "charlie-apps" {
+		t.Errorf("원본 환경 네임스페이스 = %q", got)
+	}
+	if got := sc.NamespaceFor("eks"); got != "moimroom" {
+		t.Errorf("대상 환경 네임스페이스 = %q", got)
+	}
+	if !slices.Equal(sc.Envs, []string{"gke", "eks"}) || sc.App != "moimroom" {
+		t.Errorf("got %+v", sc)
 	}
 }
 
