@@ -590,8 +590,18 @@ func TestPairedSameNameGetsDistinctSandboxSource(t *testing.T) {
 		t.Fatalf("임시 원본 externalClusters: %v", names)
 	}
 
-	// AI가 이 앱에 실제로 쓴 모양: 모든 자리가 같은 이름
-	manifest := `apiVersion: postgresql.cnpg.io/v1
+	// AI가 이 앱에 실제로 쓴 모양: 모든 자리가 같은 이름이고, externalClusters는 한 항목뿐이다(plan 검사가 중복을 거절함).
+	// 같은 이름 항목이 두 개여도 결과는 같아야 한다.
+	dup := "    - name: moimroom-mig-db\n      connectionParameters: {host: moimroom-mig-db-rw.moimroom-mig.svc, user: streaming_replica, dbname: postgres, sslmode: verify-full}\n"
+	for _, extra := range []string{"", dup} {
+		checkPairedTarget(t, p, ns, pairedTarget+extra)
+	}
+	if sp := SandboxPlan(p, ns, "k", "m", "s", "d"); sp.Source.Cluster != "moimroom-mig-db-source" || sp.Target.Cluster != "moimroom-mig-db" {
+		t.Fatalf("샌드박스 Plan: 원본 %s, 대상 %s", sp.Source.Cluster, sp.Target.Cluster)
+	}
+}
+
+const pairedTarget = `apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata: {name: moimroom-mig-db, namespace: moimroom-mig}
 spec:
@@ -602,9 +612,10 @@ spec:
   externalClusters:
     - name: moimroom-mig-db
       connectionParameters: {host: db-eks-moimroom-mig.hopcharlie-db-network.svc.cluster.local, user: streaming_replica, dbname: postgres, sslmode: verify-full}
-    - name: moimroom-mig-db
-      connectionParameters: {host: moimroom-mig-db-rw.moimroom-mig.svc, user: streaming_replica, dbname: postgres, sslmode: verify-full}
 `
+
+func checkPairedTarget(t *testing.T, p *eplan.Plan, ns, manifest string) {
+	t.Helper()
 	out, err := TargetManifest(manifest, p, ns)
 	if err != nil {
 		t.Fatal(err)
@@ -633,9 +644,6 @@ spec:
 		if !strings.HasSuffix(h, "."+ns+".svc") {
 			t.Fatalf("운영 주소가 남음: %s", h)
 		}
-	}
-	if sp := SandboxPlan(p, ns, "k", "m", "s", "d"); sp.Source.Cluster != "moimroom-mig-db-source" || sp.Target.Cluster != "moimroom-mig-db" {
-		t.Fatalf("샌드박스 Plan: 원본 %s, 대상 %s", sp.Source.Cluster, sp.Target.Cluster)
 	}
 }
 

@@ -75,7 +75,7 @@ func SandboxSource(p *eplan.Plan) string {
 	return p.Source.Cluster
 }
 
-// SourceManifest는 샌드박스에 만들 임시 원본이다. 이름은 Plan의 원본 클러스터와 같게 해서
+// SourceManifest는 샌드박스에 만들 임시 원본이다. 이름은 SandboxSource(보통 Plan의 원본 클러스터와 같음)로 해서
 // 대상 매니페스트가 가리키는 시크릿(<원본>-app, -replication, -ca)이 그대로 맞게 한다.
 // 엔진의 분산 토폴로지대로 replica.source는 대상을 가리킨다 (migration-engine examples/cnpg와 같은 모양).
 func SourceManifest(p *eplan.Plan, ns string, db DBInfo) *unstructured.Unstructured {
