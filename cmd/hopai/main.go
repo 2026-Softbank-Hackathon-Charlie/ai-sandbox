@@ -84,6 +84,7 @@ func main() {
 	model := fs.String("model", llm.DefaultModel, "계획·진단에 쓸 Claude 모델 ID")
 	effort := fs.String("effort", "medium", "AI 생각 깊이: low, medium, high, xhigh, max")
 	noPrewarm := fs.Bool("no-prewarm", false, "AI 계획과 동시에 첫 리허설 샌드박스·임시 원본을 미리 준비하지 않음")
+	allowOthers := fs.Bool("allow-other-primaries", false, "원본과 같은 네임스페이스에 다른 primary CNPG 클러스터가 있어도 진행한다. 원본이 앱이 실제로 쓰는 DB가 맞을 때만 쓴다")
 	must(fs.Parse(os.Args[2:]))
 	eff, err := llm.ParseEffort(*effort)
 	must(err)
@@ -144,8 +145,15 @@ func main() {
 	} else if sc, err := sourceCluster(ctx, c.Dynamic, draft.Source.Namespace, draft.Source.Cluster); err != nil {
 		fmt.Fprintf(os.Stderr, "경고: 원본 CNPG 클러스터를 읽지 못함 (%v). 버전·설정 검사 없이 계획합니다\n", err)
 	} else {
+		// 원본이 replica이거나 같은 네임스페이스에 다른 primary가 있으면 카탈로그가 낡은 것일 수 있다. 승인 전에 멈춘다.
+		if err := plan.CheckSourceRole(sc, *allowOthers); err != nil {
+			must(fmt.Errorf("원본 검사 실패:\n%w", err))
+		}
+		if sc.OthersUnknown {
+			fmt.Fprintf(os.Stderr, "경고: %s 네임스페이스의 다른 CNPG 클러스터 목록을 읽지 못해 원본이 맞는 primary인지 확인하지 못함\n", sc.Namespace)
+		}
 		src = sc
-		fmt.Fprintf(os.Stderr, "원본 클러스터: %s (%s), hot standby 설정 %v\n", sc.Image, plan.MajorLabel(sc.Image), sc.Parameters)
+		fmt.Fprintf(os.Stderr, "원본 클러스터: %s/%s %s (%s), hot standby 설정 %v\n", sc.Namespace, sc.Name, sc.Image, plan.MajorLabel(sc.Image), sc.Parameters)
 	}
 	// 리허설이 도는 대상 클러스터의 관리용 접속. 데모 준비도 이것으로 대상 StorageClass를 확인한다.
 	adminCfg, err := restConfig(*sbKube, *sbCtx)
@@ -473,7 +481,20 @@ func sourceCluster(ctx context.Context, dyn dynamic.Interface, ns, name string) 
 	if err != nil {
 		return nil, err
 	}
-	sc := &plan.SourceCluster{}
+	sc := &plan.SourceCluster{Name: name, Namespace: ns}
+	sc.Replica, _, _ = unstructured.NestedBool(obj.Object, "spec", "replica", "enabled")
+	// 같은 네임스페이스의 다른 primary. 카탈로그가 낡은 DB를 가리키는 사고를 승인 전에 잡는 근거다.
+	// 목록을 읽지 못하면(권한 등) 이 검사만 건너뛰고 알린다.
+	if list, err := dyn.Resource(llm.CNPGClusterGVR).Namespace(ns).List(ctx, metav1.ListOptions{}); err != nil {
+		sc.OthersUnknown = true
+	} else {
+		for _, o := range list.Items {
+			if replica, _, _ := unstructured.NestedBool(o.Object, "spec", "replica", "enabled"); o.GetName() != name && !replica {
+				sc.OtherPrimaries = append(sc.OtherPrimaries, o.GetName())
+			}
+		}
+		slices.Sort(sc.OtherPrimaries)
+	}
 	if s, _, _ := unstructured.NestedString(obj.Object, "status", "image"); s != "" {
 		sc.Image = s
 	} else if s, _, _ := unstructured.NestedString(obj.Object, "spec", "imageName"); s != "" {

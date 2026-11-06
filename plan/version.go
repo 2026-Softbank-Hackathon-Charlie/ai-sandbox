@@ -14,6 +14,15 @@ type SourceCluster struct {
 	Image string `json:"image"`
 	// Parameters는 원본 spec.postgresql.parameters 중 StandbyParams에 든 것이다. 없는 설정은 원본도 기본값이다.
 	Parameters map[string]string `json:"parameters,omitempty"`
+	// Name과 Namespace는 읽은 원본 CNPG 클러스터다. 플랫폼 카탈로그의 값이라 실제 primary와 다를 수 있어 CheckSourceRole이 본다.
+	Name      string `json:"name,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	// Replica는 원본이 replica 클러스터(spec.replica.enabled)인지다. 이전의 원본은 primary여야 한다.
+	Replica bool `json:"replica,omitempty"`
+	// OtherPrimaries는 같은 네임스페이스에 있는 다른 primary CNPG 클러스터 이름이다(이름순).
+	OtherPrimaries []string `json:"otherPrimaries,omitempty"`
+	// OthersUnknown는 같은 네임스페이스의 클러스터 목록을 읽지 못했다는 뜻이다. 이때는 OtherPrimaries를 믿을 수 없다.
+	OthersUnknown bool `json:"othersUnknown,omitempty"`
 }
 
 // StandbyParams는 hot standby가 primary 이상이어야 시작하는 PostgreSQL 설정이다 (PostgreSQL 문서 "Hot Standby").

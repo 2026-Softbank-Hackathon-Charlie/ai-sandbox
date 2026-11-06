@@ -222,6 +222,52 @@ func TestSourceCluster(t *testing.T) {
 	}
 }
 
+// 2026-11-05: 카탈로그가 낡은 독립 DB(moimroom-gcp-db)를 원본으로 가리켰고 같은 네임스페이스에 실제 primary
+// (moimroom-db-gke)가 따로 있었다. 원본을 읽을 때 이 상황이 드러나야 한다.
+func TestSourceClusterRole(t *testing.T) {
+	cluster := func(name string, replica bool) *unstructured.Unstructured {
+		spec := map[string]any{"imageName": "ghcr.io/cloudnative-pg/postgresql:17.11"}
+		if replica {
+			spec["replica"] = map[string]any{"enabled": true}
+		}
+		return &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "postgresql.cnpg.io/v1", "kind": "Cluster",
+			"metadata": map[string]any{"name": name, "namespace": "charlie-apps"}, "spec": spec,
+		}}
+	}
+	gvr := map[schema.GroupVersionResource]string{llm.CNPGClusterGVR: "ClusterList"}
+	read := func(name string, objs ...runtime.Object) *plan.SourceCluster {
+		t.Helper()
+		sc, err := sourceCluster(context.Background(), dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvr, objs...), "charlie-apps", name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sc
+	}
+
+	sc := read("moimroom-gcp-db", cluster("moimroom-gcp-db", false), cluster("moimroom-db-gke", false))
+	if sc.Name != "moimroom-gcp-db" || sc.Namespace != "charlie-apps" || sc.Replica || !slices.Equal(sc.OtherPrimaries, []string{"moimroom-db-gke"}) {
+		t.Fatalf("got %+v", sc)
+	}
+	if err := plan.CheckSourceRole(sc, false); err == nil {
+		t.Fatal("같은 네임스페이스에 다른 primary가 있으면 막아야 함")
+	}
+
+	// 혼자 있는 primary는 통과, replica인 이웃은 primary로 세지 않는다.
+	sc = read("moimroom-db-gke", cluster("moimroom-db-gke", false), cluster("moimroom-db-follower", true))
+	if sc.Replica || len(sc.OtherPrimaries) != 0 || sc.OthersUnknown {
+		t.Fatalf("got %+v", sc)
+	}
+	if err := plan.CheckSourceRole(sc, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// 원본 자체가 replica면 막는다.
+	if err := plan.CheckSourceRole(read("moimroom-db-follower", cluster("moimroom-db-follower", true)), true); err == nil {
+		t.Fatal("원본이 replica면 막아야 함")
+	}
+}
+
 func TestSaveProposal(t *testing.T) {
 	raw, err := os.ReadFile("../../plan/testdata/proposal.json")
 	if err != nil {
