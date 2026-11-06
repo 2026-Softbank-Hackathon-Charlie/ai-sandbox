@@ -16,6 +16,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -170,13 +171,26 @@ func TestGetCNPGClusterUsesEnvNamespace(t *testing.T) {
 			t.Errorf("%s/%s: 환경별 네임스페이스에서 찾아야 함: %v", env, name, err)
 		}
 	}
-	// 환경별 값이 없으면 Namespace를 쓴다(이전 동작). 대상 환경 값만 비어 있으면 원본 네임스페이스로 찾아 못 찾는다.
+	// 환경별 값이 없으면 Namespace를 쓴다.
 	legacy := PlanScope{App: "moimroom", Namespace: "charlie-apps", Envs: []string{"gke", "eks"}}
 	if err := get(legacy, "gke", "moimroom-db-gke"); err != nil {
 		t.Errorf("Namespaces가 없으면 Namespace로 찾아야 함: %v", err)
 	}
-	if err := get(legacy, "eks", "moimroom-db"); err == nil {
-		t.Error("Namespaces가 없으면 eks 클러스터(moimroom)를 charlie-apps에서 못 찾아야 함")
+
+	// 이름을 잘못 짚으면(2026-11-05 AI는 moimroom-db-eks를 조회했다) 어느 환경과 네임스페이스를 봤는지, 그 네임스페이스에
+	// 실제로 있는 Cluster 이름이 오류에 있어야 한다. AI가 스스로 고치고 운영자가 원인을 가릴 수 있다.
+	err := get(perEnv, "eks", "moimroom-db-eks")
+	if err == nil || !apierrors.IsNotFound(err) {
+		t.Fatalf("없는 이름은 NotFound여야 함(원래 오류를 감싸야 함): %v", err)
+	}
+	for _, want := range []string{"환경 eks", "네임스페이스 moimroom", "moimroom-db-eks", "있는 Cluster: moimroom-db"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("오류에 %q가 없음: %v", want, err)
+		}
+	}
+	// 그 네임스페이스에 Cluster가 하나도 없으면 그렇게 알린다.
+	if err := get(PlanScope{App: "moimroom", Namespace: "empty", Envs: []string{"gke", "eks"}}, "gke", "x"); err == nil || !strings.Contains(err.Error(), "Cluster가 없음") {
+		t.Errorf("빈 네임스페이스는 Cluster가 없다고 알려야 함: %v", err)
 	}
 }
 

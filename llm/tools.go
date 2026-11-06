@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -166,9 +168,10 @@ func PlanTools(scope PlanScope, platform *client.Client, clusters map[string]Clu
 				if err := envOK(in.Env); err != nil {
 					return nil, err
 				}
-				obj, err := clusters[in.Env].Dynamic.Resource(CNPGClusterGVR).Namespace(scope.NamespaceFor(in.Env)).Get(ctx, in.Name, metav1.GetOptions{})
+				ns := scope.NamespaceFor(in.Env)
+				obj, err := clusters[in.Env].Dynamic.Resource(CNPGClusterGVR).Namespace(ns).Get(ctx, in.Name, metav1.GetOptions{})
 				if err != nil {
-					return nil, err
+					return nil, clusterLookupError(ctx, clusters[in.Env].Dynamic, in.Env, ns, err)
 				}
 				spec, _ := obj.Object["spec"].(map[string]any)
 				status, _ := obj.Object["status"].(map[string]any)
@@ -208,6 +211,35 @@ func PlanTools(scope PlanScope, platform *client.Client, clusters map[string]Clu
 		})
 	}
 	return tools
+}
+
+// maxListedClusters는 not found 오류에 붙이는 클러스터 이름의 상한이다.
+const maxListedClusters = 20
+
+// clusterLookupError는 CNPG Cluster 조회 오류에 어느 환경과 네임스페이스를 봤는지 붙인다. 없다는 답(NotFound)이면
+// 그 네임스페이스에 실제로 있는 Cluster 이름도 알려 준다. 이름을 추측한 AI가 스스로 고치고, 운영자가 로그만 보고
+// 네임스페이스가 틀렸는지 정말 없는지 가릴 수 있게 한다. 목록을 못 읽어도(권한 등) 오류는 그대로 돌려준다.
+func clusterLookupError(ctx context.Context, dyn dynamic.Interface, env, ns string, err error) error {
+	err = fmt.Errorf("환경 %s, 네임스페이스 %s: %w", env, ns, err)
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+	list, lerr := dyn.Resource(CNPGClusterGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
+	if lerr != nil {
+		return err
+	}
+	names := make([]string, 0, len(list.Items))
+	for _, o := range list.Items {
+		names = append(names, o.GetName())
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return fmt.Errorf("%w (이 네임스페이스에 CNPG Cluster가 없음)", err)
+	}
+	if len(names) > maxListedClusters {
+		names = names[:maxListedClusters]
+	}
+	return fmt.Errorf("%w (이 네임스페이스에 있는 Cluster: %s)", err, strings.Join(names, ", "))
 }
 
 type podRequests struct{ cpu, mem resource.Quantity }

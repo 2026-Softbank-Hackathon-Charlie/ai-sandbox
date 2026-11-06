@@ -172,8 +172,7 @@ func main() {
 		}
 	}
 
-	// 원본과 대상의 DB 네임스페이스가 다를 수 있다(gke는 charlie-apps, eks는 moimroom). 환경마다 그 환경의 것을 본다.
-	scope := llm.PlanScope{App: *app, Namespace: draft.Source.Namespace, Namespaces: map[string]string{*from: draft.Source.Namespace, *to: draft.Target.Namespace}, Envs: []string{*from, *to}}
+	scope := planScope(*app, *from, *to, &draft)
 	prop, planSession, err := agent.Plan(ctx, llm.PlanInput{App: *app, Draft: &draft, Tools: llm.PlanTools(scope, pc, clusters), Source: stats, SourceCluster: src})
 	if err != nil {
 		prewarm.Discard(ctx)
@@ -472,6 +471,17 @@ func draftWithStats(ctx context.Context, pc drafter, req apiv1.PlanDraftRequest,
 	}
 	d, err := pc.DraftPlan(ctx, req)
 	return d, nil, err
+}
+
+// planScope는 계획 도구가 볼 수 있는 범위다. 원본과 대상의 DB 네임스페이스가 다를 수 있어(gke는 charlie-apps,
+// eks는 moimroom) 환경마다 그 환경의 네임스페이스를 넘긴다.
+func planScope(app, from, to string, draft *eplan.Plan) llm.PlanScope {
+	return llm.PlanScope{
+		App:        app,
+		Namespace:  draft.Source.Namespace,
+		Namespaces: map[string]string{from: draft.Source.Namespace, to: draft.Target.Namespace},
+		Envs:       []string{from, to},
+	}
 }
 
 // isReplica는 CNPG Cluster가 다른 클러스터를 따라가는 replica인지 본다. 예전 방식인 spec.replica.enabled가 켜졌거나,
