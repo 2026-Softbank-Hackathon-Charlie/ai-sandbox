@@ -485,13 +485,18 @@ func planScope(app, from, to string, draft *eplan.Plan) llm.PlanScope {
 }
 
 // isReplica는 CNPG Cluster가 다른 클러스터를 따라가는 replica인지 본다. 예전 방식인 spec.replica.enabled가 켜졌거나,
-// 분산 토폴로지에서 spec.replica.primary가 자기가 아닌 클러스터를 가리키면 replica다.
+// 분산 토폴로지에서 spec.replica.primary가 자기(spec.replica.self, 비면 Cluster 이름)가 아닌 클러스터를 가리키면 replica다.
+// 등록 앱은 Cluster 이름과 self가 다르다(Cluster <cluster>, self <cluster>-<env>, infra hopcharlie-app 차트).
 func isReplica(o *unstructured.Unstructured) bool {
 	if on, _, _ := unstructured.NestedBool(o.Object, "spec", "replica", "enabled"); on {
 		return true
 	}
 	primary, _, _ := unstructured.NestedString(o.Object, "spec", "replica", "primary")
-	return primary != "" && primary != o.GetName()
+	self, _, _ := unstructured.NestedString(o.Object, "spec", "replica", "self")
+	if self == "" {
+		self = o.GetName()
+	}
+	return primary != "" && primary != self
 }
 
 // vetSource는 원본으로 읽은 클러스터가 이전의 원본으로 맞는지 승인 전에 본다. 걸리면 오류를 돌려주고, 경고는 w에 쓴다.

@@ -312,6 +312,13 @@ func TestIsReplica(t *testing.T) {
 		{"enabled false", with("a", map[string]any{"enabled": false}), false},
 		{"분산 토폴로지에서 primary가 다른 클러스터", with("a", map[string]any{"primary": "b", "source": "b"}), true},
 		{"분산 토폴로지에서 primary가 자기 자신", with("a", map[string]any{"primary": "a", "source": "b"}), false},
+		// 플랫폼 등록 앱: Cluster 이름은 하나이고 self가 <cluster>-<env>다(infra hopcharlie-app 차트).
+		{"등록 앱 primary (self가 Cluster 이름과 다름)", with("moimroom-mig", map[string]any{"self": "moimroom-mig-gke", "primary": "moimroom-mig-gke", "source": "moimroom-mig-gke"}), false},
+		{"등록 앱 replica", with("moimroom-mig", map[string]any{"self": "moimroom-mig-eks", "primary": "moimroom-mig-gke", "source": "moimroom-mig-gke"}), true},
+		// 운영 moimroom: eks는 Cluster 이름이 self이고 gke를 따라간다. gke는 Cluster 이름 moimroom-db-gke가 primary다.
+		{"eks moimroom-db (gke를 따라감)", with("moimroom-db", map[string]any{"self": "moimroom-db", "primary": "moimroom-db-gke", "source": "moimroom-db-gke"}), true},
+		{"gke moimroom-db-gke (primary)", with("moimroom-db-gke", map[string]any{"self": "moimroom-db-gke", "primary": "moimroom-db-gke", "source": "moimroom-db"}), false},
+		{"self 없이 primary가 다른 클러스터", with("moimroom-mig", map[string]any{"primary": "moimroom-mig-gke"}), true},
 	} {
 		if got := isReplica(c.obj); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)

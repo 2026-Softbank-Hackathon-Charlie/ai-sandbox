@@ -248,7 +248,7 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 원본 검사도 AI 도구가 아니다. 플랫폼 카탈로그(`apps.yaml`)의 `cnpgCluster`는 사람이 SSM에 손으로 넣는 값이라 이전으로 DB가 바뀐 뒤에도 낡은 채 남을 수 있고, 플랫폼 초안은 이름 형식만 보고 엔진 precheck는 승인 뒤에야 보기 때문이다(2026-11-05: 카탈로그가 낡은 독립 DB `moimroom-gcp-db`를 가리켰고 실제 primary는 `moimroom-db-gke`였다). 그래서 `hopai`는 원본 클러스터를 읽을 때(`sourceCluster`) 다음을 보고, 걸리면 AI 계획과 리허설 준비를 시작하기 전에 멈춘다(`vetSource`, `plan.CheckSourceRole`).
 
 - 원본 클러스터가 없으면(NotFound) 멈춘다. 카탈로그의 이름이나 네임스페이스가 틀린 것이다. 경고만 하고 계획하면 리허설이 임시 원본으로 통과한다. 권한 오류나 네트워크 오류로 읽지 못한 경우는 지금처럼 경고하고 이 검사 없이 계획한다.
-- 원본이 replica(`spec.replica.enabled`, 또는 `spec.replica.primary`가 자기가 아닌 클러스터)면 멈춘다. `-allow-other-primaries`로도 넘길 수 없다.
+- 원본이 replica(`spec.replica.enabled`, 또는 `spec.replica.primary`가 자기가 아닌 클러스터)면 멈춘다. 자기는 `spec.replica.self`이고, 비어 있으면 Cluster 이름이다. 플랫폼 등록 앱은 Cluster 이름(`<cluster>`)과 self(`<cluster>-<env>`)가 달라서, 이름과 비교하면 진짜 primary도 replica로 보였다. `-allow-other-primaries`로도 넘길 수 없다.
 - 같은 네임스페이스에 다른 primary가 있으면 Plan의 원본 DSN 호스트(`<클러스터>-rw...`)를 본다. 호스트가 원본을 가리키면 통과하고(무관한 DB가 남아 있어도 막지 않는다), 다른 primary를 가리키면 멈춘다. 호스트로 판단할 수 없으면(프록시 이름 등) 경고만 한다. 호스트 이름이 클러스터 이름과 다르게 붙는 환경이 있어서(eks는 `moimroom-db`와 `moimroom-db-eks-rw`) 호스트가 원본과 다르다는 이유만으로는 막지 않는다. 원본이 맞다고 확인했으면 `-allow-other-primaries`로 넘긴다.
 - 같은 네임스페이스의 목록을 읽지 못하면(권한 등) 다른 primary 검사만 건너뛰고 경고한다.
 
