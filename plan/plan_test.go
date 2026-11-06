@@ -307,3 +307,33 @@ func TestManifestAllowsDedicatedNodes(t *testing.T) {
 		t.Fatalf("전용 노드 설정이 걸림:\n%s", is.Error())
 	}
 }
+
+// 두 환경에서 이름이 같은 DB 짝(infra ADR 0063)은 그 이름의 externalClusters 항목 하나가 원본이다.
+// 그 항목의 호스트는 원본 DSN의 호스트여야 하고, 대상 DSN 호스트를 쓰면 걸린다.
+func TestManifestPairedSameNameSourceEntry(t *testing.T) {
+	p := &eplan.Plan{
+		Source: eplan.Endpoint{Env: "gke", Cluster: "moimroom-mig-db", DSN: "postgres://app:${GKE_PG}@db-gke-moimroom-mig.net:5432/app?sslmode=require"},
+		Target: eplan.Endpoint{Env: "eks", Namespace: "moimroom-mig", Cluster: "moimroom-mig-db", DSN: "postgres://app:${EKS_PG}@db-eks-moimroom-mig.net:5432/app?sslmode=require"},
+	}
+	m := func(host string) string {
+		return `apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata: {name: moimroom-mig-db, namespace: moimroom-mig}
+spec:
+  instances: 1
+  storage: {size: 4Gi}
+  replica: {self: moimroom-mig-db, primary: moimroom-mig-db, source: moimroom-mig-db}
+  bootstrap:
+    pg_basebackup: {source: moimroom-mig-db, database: app, owner: app, secret: {name: moimroom-mig-db-app}}
+  externalClusters:
+    - name: moimroom-mig-db
+      connectionParameters: {host: ` + host + `, user: streaming_replica, dbname: postgres, sslmode: verify-full}
+`
+	}
+	if is := CheckManifest(m("db-gke-moimroom-mig.net"), p); len(is) > 0 {
+		t.Fatalf("원본 호스트를 쓴 매니페스트가 걸림:\n%s", is.Error())
+	}
+	if is := CheckManifest(m("db-eks-moimroom-mig.net"), p); !strings.Contains(is.Error(), "externalClusters[0].connectionParameters.host") {
+		t.Fatalf("대상 호스트를 원본 항목에 쓰면 걸려야 함: %v", is)
+	}
+}

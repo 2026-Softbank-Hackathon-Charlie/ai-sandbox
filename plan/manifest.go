@@ -195,7 +195,10 @@ func checkExternalClusters(spec map[string]any, p *eplan.Plan) Issues {
 		is.add("spec.externalClusters", "목록이어야 함")
 		return is
 	}
-	endpoints := map[string]eplan.Endpoint{p.Source.Cluster: p.Source, p.Target.Cluster: p.Target}
+	// 두 환경에서 이름이 같은 DB 짝(infra ADR 0063)은 그 이름의 항목 하나가 원본(replica.source가 가리킴)이다.
+	// 그래서 대상을 먼저 넣고 원본으로 덮어쓴다.
+	endpoints := map[string]eplan.Endpoint{p.Target.Cluster: p.Target}
+	endpoints[p.Source.Cluster] = p.Source
 	seen := map[string]bool{}
 	for i, e := range list {
 		path := fmt.Sprintf("spec.externalClusters[%d]", i)
