@@ -537,3 +537,18 @@ REHEARSAL_KUBECONFIG=<kubeconfig> REHEARSAL_SC=standard go test -tags cluster -r
 - `hopai run`은 2026-11-05에 실제 Claude, 플랫폼, EKS(GKE→EKS)로 처음 돌려 AI 계획과 제출이 46초에 끝나는 것을 확인했다. 그 뒤 리허설이 격리 검사에서 멈춘 것을 v23, v24로 고쳤고, 수정 뒤의 전체 `hopai run`(리허설 통과, 실제 AI 진단, 수정안 첨부)은 아직 돌려 보지 못했다. 진단 단계는 가짜 API와 가짜 진단기로만 확인했다.
 - `hopai prepare`도 가짜 AI, 가짜 플랫폼, 로컬 git 원격으로만 확인했다. 실제 Claude, 플랫폼 푸시 토큰 API(ADR 0023), GitHub으로는 돌려 보지 못했다.
 - 파일(rclone), 게이트웨이와 카나리, 부하(k6)는 리허설하지 않는다.
+
+## Langfuse 자동 기록
+
+LANGFUSE_BASE_URL, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY를 설정하면 plan,
+diagnose, prepare, onboard의 실제 LLM·도구 실행을 Langfuse로 전송한다.
+HOPCHARLIE_RUN_ID는 Job 이름이며 플랫폼 sessionID도 metadata로 남는다.
+설정이 없으면 비활성이다. 기존 플랫폼/터미널 기록은 유지한다.
+
+기록은 마스킹·64KiB 상한과 잘림 표시를 적용한다. exporter1초,
+종료 flush2초 상한이며 관측 실패가 업무 결과를 바꾸지 않는다.
+코드·정책과 운영 세부사항은 [ADR0003](docs/adr/0003-record-real-agent-calls-in-langfuse.md)에 있다.
+
+운영자 검증용 hopai telemetry-check는 실제 LLM 경로와 메모리 읽기 도구만
+사용한다. HTTP4회·각1024출력토큰·180초 상한이므로 실행 전 모델 사용 승인이 필요하다.
+이 명령은 앱 이전·리허설·온보딩·Git push를 실행하지 않는다.
