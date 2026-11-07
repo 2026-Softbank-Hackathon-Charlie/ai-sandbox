@@ -57,6 +57,8 @@ type repoDir struct {
 	// existingFiles가 nil이 아니면(onboard) 새 파일만 쓸 수 있다. 기본 브랜치에 있는 경로(소문자로 바꾼 것)는 고칠 수 없고,
 	// 새 파일도 OnboardWritable이 받는 이름만 된다.
 	existingFiles map[string]bool
+	// allowUnchanged면 바꾼 파일이 없어도 된다 (onboard가 이미 맞는 계약이 있는 브랜치에서 이어서 돌 때).
+	allowUnchanged bool
 }
 
 func openRepo(dir string, index RepoIndex) (*repoDir, error) {

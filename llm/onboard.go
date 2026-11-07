@@ -134,6 +134,8 @@ func (a *Agent) Onboard(ctx context.Context, in OnboardInput) (*Onboarding, stri
 		return nil, "", err
 	}
 	r.existingFiles = map[string]bool{}
+	// 전에 만든 브랜치가 이미 맞으면(크래시 뒤 재실행) 고칠 것이 없다. 검사는 그 브랜치의 파일로 그대로 한다
+	r.allowUnchanged = in.Continue
 	for _, p := range in.Existing {
 		r.existingFiles[strings.ToLower(p)] = true
 	}

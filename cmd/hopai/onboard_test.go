@@ -281,3 +281,54 @@ func TestReadFacts(t *testing.T) {
 		}
 	}
 }
+
+// TestOnboardRerunUnchanged는 이미 맞는 계약이 있는 브랜치에서 다시 돌 때(크래시 뒤 재실행) 고칠 것이 없으면 커밋도 push도 없이
+// 종료 코드 0으로 그 head를 결과로 쓰는지 본다. 브랜치의 platform.yaml이 검사에 걸리면 고치지 않은 채로는 끝나지 않는다.
+func TestOnboardRerunUnchanged(t *testing.T) {
+	github, bare, _ := onboardRemote(t)
+	plat := &fakePlatformServer{}
+	answer := onboardFile(t, "reply/answer.json")
+	r := newPrepareRun(t, github, plat,
+		write("platform.yaml", onboardFile(t, "reply/platform.yaml")),
+		write("hopcharlie.Dockerfile", onboardFile(t, "reply/hopcharlie.Dockerfile")),
+		aiReply{text: answer},
+	)
+	if err := runOnboard(context.Background(), r.env, onboardArgsFor(t, "")); err != nil {
+		t.Fatalf("%v\n%s", err, r.stderr)
+	}
+	head := gitT(t, bare, "rev-parse", "hopcharlie/onboard")
+
+	r2 := newPrepareRun(t, github, plat, aiReply{tool: "read_file", input: `{"path":"platform.yaml"}`}, aiReply{text: answer})
+	err := runOnboard(context.Background(), r2.env, onboardArgsFor(t, ""))
+	if code := prepareExit(io.Discard, err); code != 0 {
+		t.Fatalf("종료 코드 %d: %v\n%s", code, err, r2.stderr)
+	}
+	res := decodeOnboardResult(t, r2.stdout.String())
+	if res["head"] != head || res["deployable"] != true || gitT(t, bare, "rev-parse", "hopcharlie/onboard") != head {
+		t.Fatalf("있던 head를 그대로 돌려줘야 함: %v", res)
+	}
+	if f, _ := json.Marshal(res["files"]); string(f) != `["hopcharlie.Dockerfile","platform.yaml"]` {
+		t.Fatalf("files: %s", f)
+	}
+	if len(pushArgs(*r2.argv)) != 0 {
+		t.Fatal("고칠 것이 없으면 push하지 않음")
+	}
+	r2.assertNoToken(t)
+
+	// 브랜치의 platform.yaml이 검사에 걸리면(앱 이름이 다름) 고치지 않은 답은 세 번 걸려 실패한다
+	github2, bare2, work := onboardRemote(t)
+	gitT(t, work, "switch", "--quiet", "-c", "hopcharlie/onboard")
+	_ = os.WriteFile(filepath.Join(work, "platform.yaml"), []byte(strings.Replace(onboardFile(t, "reply/platform.yaml"), "name: moimroom-legacy", "name: moimroom", 1)), 0o644)
+	_ = os.WriteFile(filepath.Join(work, "hopcharlie.Dockerfile"), []byte(onboardFile(t, "reply/hopcharlie.Dockerfile")), 0o644)
+	gitT(t, work, "add", "-A")
+	gitT(t, work, "commit", "--quiet", "-m", "bad")
+	gitT(t, work, "push", "--quiet", bare2, "hopcharlie/onboard")
+	before := gitT(t, bare2, "rev-parse", "hopcharlie/onboard")
+	r3 := newPrepareRun(t, github2, plat, aiReply{text: answer}, aiReply{text: answer}, aiReply{text: answer})
+	if err := runOnboard(context.Background(), r3.env, onboardArgsFor(t, "")); err == nil || !strings.Contains(err.Error(), "온보딩 앱 이름") {
+		t.Fatalf("검사에 걸려야 함: %v", err)
+	}
+	if len(pushArgs(*r3.argv)) != 0 || gitT(t, bare2, "rev-parse", "hopcharlie/onboard") != before || r3.stdout.Len() != 0 {
+		t.Fatal("push하지 않고 결과도 쓰지 않아야 함")
+	}
+}

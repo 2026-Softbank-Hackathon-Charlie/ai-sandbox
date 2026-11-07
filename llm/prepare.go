@@ -373,7 +373,7 @@ func (r *repoDir) checkPrepared(p *Preparation, extra func(spec *appspec.Spec, a
 	}
 	slices.Sort(dockerfiles)
 	p.Dockerfiles = slices.Compact(dockerfiles)
-	if p.Files = r.changed(); len(p.Files) == 0 {
+	if p.Files = r.changed(); len(p.Files) == 0 && !r.allowUnchanged {
 		add("", "레포를 바꾸지 않았음. write_file로 platform.yaml과 Dockerfile을 쓰고 답해라")
 	}
 	if len(is) > 0 {

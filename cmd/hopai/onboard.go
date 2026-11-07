@@ -307,6 +307,12 @@ func runOnboard(ctx context.Context, env prepareEnv, a onboardArgs) error {
 		return fmt.Errorf("%w (AI 세션 %s)", errNotDeployable, session)
 	}
 
+	// 4a. 있던 브랜치가 이미 맞고 고칠 것이 없으면(크래시 뒤 재실행) 커밋도 push도 하지 않고 그 head를 돌려준다.
+	// 기본 브랜치 대비 새 파일만인지는 클론할 때 봤고, platform.yaml 검사는 AI 답 검사에서 그 브랜치 파일로 했다.
+	if exists && len(ob.Files) == 0 {
+		return onboardUnchanged(ctx, env, g, dir, base, remote, ob, res)
+	}
+
 	// 4. 커밋, 검사한 바이트와 같은지, 기본 브랜치에 새 파일만 더했는지 확인, push
 	msg := ob.CommitMessage + "\n\nhopai onboard"
 	if a.onboarding != "" {
@@ -341,6 +347,30 @@ func runOnboard(ctx context.Context, env prepareEnv, a onboardArgs) error {
 	}
 	res.Head = sha
 	fmt.Fprintf(env.stderr, "push: %s %s (%.12s 다음), 새 파일 %s\n", repo, onboardBranch, base, strings.Join(res.Files, ", "))
+	writeOnboardResult(env.stdout, res)
+	return nil
+}
+
+// onboardUnchanged는 고칠 것이 없는 재실행이다. 작업 트리가 있던 브랜치 head 그대로이고, 검사한 platform.yaml과 Dockerfile이
+// 그 커밋에 일반 파일로 같은 바이트로 있으면 그 head를 결과로 쓴다.
+func onboardUnchanged(ctx context.Context, env prepareEnv, g *gitRunner, dir, base, remote string, ob *llm.Onboarding, res onboardResult) error {
+	if out, err := g.run(ctx, dir, "", "status", "--porcelain", "--untracked-files=all", "--ignored"); err != nil {
+		return err
+	} else if strings.TrimSpace(out) != "" {
+		return errors.New("바꾼 파일이 없다고 했는데 작업 트리가 브랜치 head와 다름. push하지 않음")
+	}
+	if err := g.verifyCommit(ctx, dir, nil, ob.Validated, nil, append([]string{appspec.FileName}, ob.Dockerfiles...)); err != nil {
+		return err
+	}
+	all, err := g.diffTrees(ctx, dir, base, remote)
+	if err != nil {
+		return err
+	}
+	if res.Files, err = onboardChangesOK(all, "있던 "+onboardBranch+" 브랜치"); err != nil {
+		return err
+	}
+	res.Head = remote
+	fmt.Fprintf(env.stderr, "고칠 것 없음: %s %s는 이미 맞음 (%.12s). push하지 않음\n", res.Repo, onboardBranch, remote)
 	writeOnboardResult(env.stdout, res)
 	return nil
 }

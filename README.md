@@ -449,7 +449,7 @@ go run ./cmd/hopai onboard            # 플래그로도 줄 수 있다: -repo -f
    - 커밋: 커밋한 뒤 기본 브랜치 커밋과 새 커밋의 트리 차이(`git diff --raw`)가 모두 추가(`A`)이고 일반 파일(100644, 100755)이며 위 이름 규칙에 맞는지 본다. 수정(`M`), 삭제(`D`), 종류 바뀜(`T`)이 하나라도 있으면 push하지 않는다. prepare와 같은 커밋 검사(검사한 바이트와 같은지)도 한다.
 6. 답을 prepare와 같은 검사(`appspec.Check`, 포트, Dockerfile, 비밀값, `$(이름)` 참조)에 더해 조사 결과와 맞는지 본다. `name`이 조사 결과의 `app`인지, public 서비스가 있는지, 조사에 DB가 있으면 `postgres` 리소스가, VM 밖 저장소가 있으면 `s3` 리소스가 있는지, `secrets`의 이름이 조사한 컨테이너 env에 있고 `excluded`가 아닌지, `mapping`이 compose 서비스를 모두 적었는지, `platformService`와 `resource`가 `platform.yaml`에 있고 둘 중 하나만 썼는지, 리버스 프록시가 넘기던 서비스를 public 서비스로 옮겼는지 본다. 걸리면 걸린 항목을 넣어 다시 묻는다(2회).
 7. 기존 파일이나 앱 코드를 고쳐야만 계약을 맞출 수 있으면 AI가 `deployable: false`와 `blockers`로 답하고, 커밋과 push 없이 끝난다(종료 코드 3).
-8. 통과하면 `HopCharlie AI`로 커밋하고(본문에 온보딩 ID와 AI 세션 ID) `refs/heads/hopcharlie/onboard`에만 fast-forward로 push한다. 새로 만들거나 이어 붙이기만 하고, 강제 push와 기본 브랜치 push는 하지 않는다.
+8. 통과하면 `HopCharlie AI`로 커밋하고(본문에 온보딩 ID와 AI 세션 ID) `refs/heads/hopcharlie/onboard`에만 fast-forward로 push한다. 새로 만들거나 이어 붙이기만 하고, 강제 push와 기본 브랜치 push는 하지 않는다. 있던 브랜치가 이미 맞아서 AI가 아무 파일도 고치지 않았으면(크래시 뒤 재실행) 커밋과 push 없이 종료 코드 0으로 끝나고, 그 브랜치 head를 `head`로 쓴다. 이때도 기본 브랜치 대비 새 파일만인지와 `platform.yaml` 검사는 그 브랜치 파일로 한다.
 
 표준 출력에는 결과 JSON 한 줄만 쓴다(사람이 읽는 기록과 에이전트 기록은 표준 오류). 플랫폼은 `head`로 PR을 열고 나머지를 리포트에 쓴다.
 
