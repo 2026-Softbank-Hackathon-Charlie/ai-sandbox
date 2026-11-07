@@ -166,6 +166,11 @@ type task[T any] struct {
 	parse   func([]byte) (T, plan.Issues)
 	// summary는 성공했을 때 세션 요약과 decision 이벤트 내용이다.
 	summary func(T) (string, any)
+	// requestOptions may further restrict a task's SDK budget without replacing
+	// its configured provider, model, telemetry middleware or credentials.
+	requestOptions []option.RequestOption
+	answerModel    func(string)
+	redactErrors   bool
 }
 
 // run은 세션을 열고, 도구를 쓰며 답을 받고, 검사에 걸리면 걸린 항목을 넣어 다시 묻는다.
@@ -187,6 +192,9 @@ func run[T any](ctx context.Context, a *Agent, t task[T]) (T, string, error) {
 	msgs := []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(t.user))}
 
 	fail := func(err error) (T, string, error) {
+		if t.redactErrors {
+			err = errors.New("recommendation AI unavailable")
+		}
 		a.obs.Result(observed, nil, err)
 		ses.Log(ctx, agentlog.Event{Type: agentlog.Error, Output: err.Error()})
 		if ferr := ses.Finish(ctx, false, err.Error()); ferr != nil {
@@ -214,7 +222,7 @@ func run[T any](ctx context.Context, a *Agent, t task[T]) (T, string, error) {
 				Betas:     []anthropic.AnthropicBeta{anthropic.AnthropicBetaServerSideFallback2026_07_01},
 			},
 			MaxIterations: a.cfg.MaxIterations,
-		})
+		}, t.requestOptions...)
 		var last *anthropic.BetaMessage
 		for {
 			start := time.Now()
@@ -236,6 +244,9 @@ func run[T any](ctx context.Context, a *Agent, t task[T]) (T, string, error) {
 		}
 		if last == nil || last.StopReason == anthropic.BetaStopReasonToolUse {
 			return fail(ErrNoAnswer)
+		}
+		if t.answerModel != nil {
+			t.answerModel(string(last.Model))
 		}
 		v, is := t.parse([]byte(text(last)))
 		if len(is) == 0 {

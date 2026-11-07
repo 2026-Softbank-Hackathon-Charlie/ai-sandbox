@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "snapshotId": { "type": "string" },
+    "recommendations": {
+      "type": "array",
+      "description": "Select at most four existing candidates; Go validates the bound.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "action": { "type": "string", "enum": ["move", "stay", "insufficient"] },
+          "reasons": { "type": "array", "description": "At most two exact existing reasons; Go validates the bound.", "items": { "type": "string" } }
+        },
+        "required": ["id", "action", "reasons"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["snapshotId", "recommendations"],
+  "additionalProperties": false
+}

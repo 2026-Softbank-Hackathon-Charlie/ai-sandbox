@@ -57,6 +57,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "recommend" {
+		os.Exit(recommendMain(os.Args[2:]))
+	}
 	if len(os.Args) >= 2 && os.Args[1] == "telemetry-check" {
 		os.Exit(telemetryCheckMain(os.Args[2:]))
 	}

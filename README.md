@@ -481,6 +481,14 @@ AI 답의 JSON Schema는 `llm/schema/onboard.json`이다. git은 prepare와 같�
 
 기본 브랜치를 지키는 것은 hopai 자신의 refspec이다. 푸시 토큰은 레포 전체에 `contents:write`이고, Free 플랜의 비공개 레포에는 ruleset이나 브랜치 보호가 없어서 GitHub이 기본 브랜치 push를 막아 주지 않는다. hopai는 `refs/heads/hopcharlie/onboard:refs/heads/hopcharlie/onboard` 하나만 push하고(강제 없음), 기본 브랜치 이름이 그 브랜치면 시작하지 않으며, 테스트가 push 명령줄을 본다.
 
+### 개요 화면의 이전 추천 (`hopai recommend`)
+
+플랫폼이 만든 추천 Job에서 `hopai recommend`를 실행한다. 기존 AI 모델·provider·agentlog·선택적 Langfuse 기록을 재사용하며, 고정 스냅샷 읽기 도구 하나만 제공한다. 클러스터와 DB를 조회하거나 Plan·이전을 실행하지 않는다.
+
+서버가 `HOP_RECOMMENDATION_ID`, `HOP_RECOMMENDATION_INPUT`(최대 64KiB JSON), 일회용 `HOP_RECOMMENDATION_NONCE`와 기존 `PLATFORM_URL`, `PLATFORM_TOKEN`, `ANTHROPIC_API_KEY`를 공급한다. 값 자체를 CLI 인자나 문서에 넣지 않는다. runner는 결과를 `POST /v1/migration-recommendations/{id}/result`로만 전달하며 stdout/stderr에 입력·nonce·키를 출력하지 않는다.
+
+AI는 서버 후보의 허용 동작과 기존 이유를 선택할 뿐 가격·절감액·대상·근거를 새로 만들 수 없다. 응답당 1500 token, 최대 3회 tool runner 호출, AI 전체 60초, SDK/검사 재시도 0회다. 호출 빈도와 증거 재검사는 플랫폼의 캐시·검증 경계가 소유한다. [ADR 0004](docs/adr/0004-bound-read-only-migration-recommendations.md)에 계약과 미검증 범위를 기록했다.
+
 ### 테스트
 
 ```bash
