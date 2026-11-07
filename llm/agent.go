@@ -19,6 +19,7 @@ import (
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/agentlog"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/mask"
 	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/plan"
+	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/telemetry"
 )
 
 // DefaultModel은 고정 버전 모델 ID다. 별칭이 아니다.
@@ -27,6 +28,8 @@ const DefaultModel = "claude-sonnet-5-5"
 // Config는 에이전트 설정이다. 0값이면 기본값을 쓴다.
 type Config struct {
 	Model string
+	// MaxTokens bounds one response; zero preserves the existing 16000 default.
+	MaxTokens int64
 	// Effort는 생각 깊이다. 기본 medium (데모 시간 안에 끝나도록).
 	Effort anthropic.BetaOutputConfigEffort
 	// CallTimeout은 AI 호출 한 번의 상한이다. 기본 90초.
@@ -49,9 +52,13 @@ type Config struct {
 type Agent struct {
 	api anthropic.Client
 	cfg Config
+	obs *telemetry.Recorder
 }
 
 func New(cfg Config) *Agent {
+	if cfg.MaxTokens == 0 {
+		cfg.MaxTokens = 16000
+	}
 	if cfg.Model == "" {
 		cfg.Model = DefaultModel
 	}
@@ -72,7 +79,14 @@ func New(cfg Config) *Agent {
 	}
 	// SDK 자체 재시도(429, 5xx)는 1번만. 전체 시간이 데모 안에 들어가야 한다.
 	opts := append([]option.RequestOption{option.WithMaxRetries(1), option.WithRequestTimeout(cfg.CallTimeout)}, cfg.Options...)
-	return &Agent{api: anthropic.NewClient(opts...), cfg: cfg}
+	obs, err := telemetry.NewFromEnv()
+	if err != nil && cfg.OnLogError != nil {
+		cfg.OnLogError(err)
+	}
+	if obs != nil {
+		opts = append(opts, option.WithMiddleware(obs.Middleware()))
+	}
+	return &Agent{api: anthropic.NewClient(opts...), cfg: cfg, obs: obs}
 }
 
 // 오류
@@ -103,6 +117,7 @@ type Tool struct {
 type loggedTool struct {
 	t   Tool
 	ses agentlog.Session
+	obs *telemetry.Recorder
 }
 
 func (l loggedTool) Name() string        { return l.t.Name }
@@ -118,9 +133,12 @@ func (l loggedTool) InputSchema() anthropic.BetaToolInputSchemaParam {
 func (l loggedTool) Execute(ctx context.Context, input json.RawMessage) ([]anthropic.BetaToolResultBlockParamContentUnion, error) {
 	var in any
 	_ = json.Unmarshal(input, &in)
+	ctx, span := l.obs.Tool(ctx, l.t.Name, in)
+	defer l.obs.End(span)
 	l.ses.Log(ctx, agentlog.Event{Type: agentlog.ToolCall, Tool: l.t.Name, Input: in})
 	start := time.Now()
 	out, err := l.t.Run(ctx, input)
+	l.obs.Result(span, out, err)
 	d := time.Since(start)
 	switch {
 	case errors.Is(err, ErrBlocked):
@@ -154,17 +172,22 @@ type task[T any] struct {
 func run[T any](ctx context.Context, a *Agent, t task[T]) (T, string, error) {
 	var zero T
 	t.session.Model = a.cfg.Model
+	ctx, observed := a.obs.Agent(ctx, t.session.Kind, t.session.Title, a.cfg.Model, map[string]any{"system": t.system, "user": t.user})
+	defer a.obs.Finish(ctx, observed)
 	ses, err := a.cfg.Sink.Start(ctx, t.session)
 	if err != nil {
+		a.obs.Result(observed, nil, err)
 		return zero, "", err
 	}
+	a.obs.Session(observed, ses.ID())
 	tools := make([]anthropic.BetaTool, len(t.tools))
 	for i, x := range t.tools {
-		tools[i] = loggedTool{t: x, ses: ses}
+		tools[i] = loggedTool{t: x, ses: ses, obs: a.obs}
 	}
 	msgs := []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(t.user))}
 
 	fail := func(err error) (T, string, error) {
+		a.obs.Result(observed, nil, err)
 		ses.Log(ctx, agentlog.Event{Type: agentlog.Error, Output: err.Error()})
 		if ferr := ses.Finish(ctx, false, err.Error()); ferr != nil {
 			err = errors.Join(err, ferr)
@@ -179,7 +202,7 @@ func run[T any](ctx context.Context, a *Agent, t task[T]) (T, string, error) {
 		runner := a.api.Beta.Messages.NewToolRunner(tools, anthropic.BetaToolRunnerParams{
 			BetaMessageNewParams: anthropic.BetaMessageNewParams{
 				Model:     a.cfg.Model,
-				MaxTokens: 16000,
+				MaxTokens: a.cfg.MaxTokens,
 				System:    []anthropic.BetaTextBlockParam{{Text: t.system}},
 				Messages:  msgs,
 				OutputConfig: anthropic.BetaOutputConfigParam{
@@ -217,6 +240,7 @@ func run[T any](ctx context.Context, a *Agent, t task[T]) (T, string, error) {
 		v, is := t.parse([]byte(text(last)))
 		if len(is) == 0 {
 			sum, detail := t.summary(v)
+			a.obs.Result(observed, detail, nil)
 			ses.Log(ctx, agentlog.Event{Type: agentlog.Decision, Status: "ok", Output: detail})
 			if err := ses.Finish(ctx, true, sum); err != nil && a.cfg.OnLogError != nil {
 				a.cfg.OnLogError(err)
