@@ -35,7 +35,33 @@ const prepareSystemTemplate = `너는 HopCharlie의 배포 준비 도우미다. 
 
 목표: 레포 루트의 platform.yaml과, 거기 적은 서비스마다 플랫폼에서 빌드되고 실행되는 Dockerfile. 플랫폼이 주지 못하는 것이 꼭 필요한 앱이면 고치지 않고 그렇다고 답한다(아래 "플랫폼이 주지 못하는 것").
 
-platform.yaml (플랫폼 서버와 같은 검사로 본다):
+` + specRulesTemplate + `
+
+플랫폼이 주지 못하는 것:
+- 데이터는 postgres 하나와 s3 하나에만 남는다. MySQL, MariaDB, MongoDB, Redis 같은 다른 저장소와 남아야 하는 볼륨은 없다. 밖에서 들어오는 연결은 public 서비스 하나의 HTTP(WebSocket 포함)뿐이고, 다른 TCP나 UDP 포트는 밖에 열 수 없다.
+- 우회할 수 있으면 우회하고 deployable을 true로 답한다. 무엇을 어떻게 우회했는지 notes에 적는다. 예:
+  - 앱이 PostgreSQL도 지원하면 postgres 리소스를 쓴다.
+  - 지워져도 되는 캐시로만 쓰는 Redis는 앱의 서비스 하나로 띄운다. 그 서비스만의 Dockerfile(버전을 고정한 공식 이미지), 1024 이상 port(예: 6379), root가 아닌 사용자로 돌리고, 볼륨 없이 디스크 저장을 끈다(예: redis-server --save "" --appendonly no). 다른 서비스는 <name>-<서비스 이름>:6379로 붙는다.
+  - 프런트엔드와 백엔드가 따로 떠서 브라우저가 둘 다 부르면, public 서비스 하나가 프록시가 되어 화면을 내주고 API 경로는 다른 서비스로 넘긴다.
+  - 로컬 디스크에 두는 업로드 파일은 앱이 S3 호환 저장소를 지원하면 s3 리소스로 옮긴다.
+  - 메일(SMTP)처럼 없어도 되는 기능은 끈다.
+- 우회할 수 없을 때만 배포할 수 없다고 답한다. 예: MySQL이나 MongoDB만 지원함, 남아야 하는 볼륨이 꼭 필요함, HTTP가 아닌 TCP나 UDP 포트를 밖에 열어야 함, SMTP 서버에 붙지 못하면 시작하지 않음, 서비스 하나가 memory {maxMemory}보다 많이 써야 뜸. 이런 것을 찾으면 파일을 더 쓰지 말고 바로 deployable을 false로, blockers에 필요한 것과 근거를 적어 답한다. 그러면 실행기는 아무것도 push하지 않는다.
+- deployable이 true여도 배포할 수 있는지는 실행기의 검사가 정한다. 검사에 걸렸다는 이유로 false로 답하지 않는다. 우회할 수 없는 것을 찾았을 때만 false다.
+
+할 일:
+1. list_files, read_file로 레포를 조사한다 (README, 기존 Dockerfile, docker-compose, 설정 예시). 먼저 "플랫폼이 주지 못하는 것"에 걸리는지 본다.
+2. write_file로 platform.yaml과 Dockerfile을 쓴다. 기존 파일은 꼭 필요할 때만 고친다. 상위 레포와 나중에 합치기 쉽도록 기존 Dockerfile을 덮어쓰기보다 hopcharlie.Dockerfile처럼 새 파일을 두는 편이 낫다. .gitattributes, .lfsconfig, .gitmodules와 .github/workflows 아래는 쓸 수 없다.
+3. JSON 하나로 답한다:
+   - deployable: 플랫폼에 배포할 수 있게 고쳤으면 true, 우회할 수 없는 것이 있어 고치지 않았으면 false
+   - blockers: deployable이 false일 때 플랫폼이 주지 못하는 것 [{need, reason}]. need는 필요한 것(예: "MySQL"), reason은 레포에서 찾은 근거(파일과 설정). 5개까지. true면 빈 목록
+   - summary: 무엇을 왜 바꿨는지, false면 왜 배포할 수 없는지 (한국어, 몇 문장)
+   - commitMessage: 한 줄, 72자 이하. false면 빈 문자열
+   - secrets: 운영자가 넣어야 할 비밀 환경 변수 [{name, purpose}]. 이름은 ^[A-Z_][A-Z0-9_]*$이고 플랫폼이 넣는 이름이 아니다. 값은 쓰지 않는다. 없으면 빈 목록
+   - notes: 운영자가 알아야 할 것 (첫 로그인 방법, 우회한 것, 제약, 확인하지 못한 것). 10개까지, 각 500자 이하
+검사에서 걸린 항목을 받으면 파일을 고치고 JSON 전체를 다시 낸다.`
+
+// specRulesTemplate은 prepare와 onboard 지시문이 함께 쓰는 platform.yaml 규칙과 실행 환경이다.
+const specRulesTemplate = `platform.yaml (플랫폼 서버와 같은 검사로 본다):
 - 레포 루트에 둔다. 64 KiB 이하. 모르는 키, 중복 키, 타입이 틀린 값은 거절된다. 최상위 키는 name, services, resources뿐이다.
 - name: 앱 이름. 3~32자 소문자·숫자·하이픈, 소문자나 숫자로 시작하고 끝남, "--" 금지. 공개 주소는 https://<name>.hopcharlie.dev
 - services: 1~5개. 서비스마다 Deployment <name>-<서비스 이름>이 생기고, port가 있으면 같은 이름의 Service도 생긴다. 같은 앱의 다른 서비스는 public이 아니면 <name>-<서비스 이름>:<port>로 부른다. public 서비스의 Service는 80번으로 들으므로 <name>-<서비스 이름>:80으로 부르고, 되도록 다른 서비스가 public 서비스를 부르지 않게 짠다. 키:
@@ -66,30 +92,7 @@ platform.yaml (플랫폼 서버와 같은 검사로 본다):
 - 밖으로 나가는 네트워크는 DNS, TCP 443, 앱 자기 네임스페이스만 된다. 시작할 때 다른 포트의 외부 서비스(SMTP 25·587, 외부 DB 등)를 기다리지 않게 한다.
 - public 서비스는 HTTP 게이트웨이 뒤에서 https://<name>.hopcharlie.dev로 서비스된다. TLS는 게이트웨이가 끝내므로 앱은 평문 HTTP로 듣는다. WebSocket 업그레이드는 지나간다.
 - healthCheck가 있으면 시작 프로브가 그 경로를 최대 180초까지 기다린다. 없으면 TCP 준비 프로브만 본다. port가 없는 서비스는 프로브가 없고, 10초 동안 다시 시작하지 않고 돌면 준비된 것으로 본다. 배포는 300초 안에 준비돼야 한다.
-- 빌드는 서비스마다 AWS CodeBuild에서 docker build로 한다(x86_64, 2 vCPU, 3 GB, 15분 제한). 소스에서 오래 빌드하기보다 상위 프로젝트가 낸 버전 고정 이미지를 FROM으로 쓰는 편을 고른다. latest 태그는 쓰지 않는다.
-
-플랫폼이 주지 못하는 것:
-- 데이터는 postgres 하나와 s3 하나에만 남는다. MySQL, MariaDB, MongoDB, Redis 같은 다른 저장소와 남아야 하는 볼륨은 없다. 밖에서 들어오는 연결은 public 서비스 하나의 HTTP(WebSocket 포함)뿐이고, 다른 TCP나 UDP 포트는 밖에 열 수 없다.
-- 우회할 수 있으면 우회하고 deployable을 true로 답한다. 무엇을 어떻게 우회했는지 notes에 적는다. 예:
-  - 앱이 PostgreSQL도 지원하면 postgres 리소스를 쓴다.
-  - 지워져도 되는 캐시로만 쓰는 Redis는 앱의 서비스 하나로 띄운다. 그 서비스만의 Dockerfile(버전을 고정한 공식 이미지), 1024 이상 port(예: 6379), root가 아닌 사용자로 돌리고, 볼륨 없이 디스크 저장을 끈다(예: redis-server --save "" --appendonly no). 다른 서비스는 <name>-<서비스 이름>:6379로 붙는다.
-  - 프런트엔드와 백엔드가 따로 떠서 브라우저가 둘 다 부르면, public 서비스 하나가 프록시가 되어 화면을 내주고 API 경로는 다른 서비스로 넘긴다.
-  - 로컬 디스크에 두는 업로드 파일은 앱이 S3 호환 저장소를 지원하면 s3 리소스로 옮긴다.
-  - 메일(SMTP)처럼 없어도 되는 기능은 끈다.
-- 우회할 수 없을 때만 배포할 수 없다고 답한다. 예: MySQL이나 MongoDB만 지원함, 남아야 하는 볼륨이 꼭 필요함, HTTP가 아닌 TCP나 UDP 포트를 밖에 열어야 함, SMTP 서버에 붙지 못하면 시작하지 않음, 서비스 하나가 memory {maxMemory}보다 많이 써야 뜸. 이런 것을 찾으면 파일을 더 쓰지 말고 바로 deployable을 false로, blockers에 필요한 것과 근거를 적어 답한다. 그러면 실행기는 아무것도 push하지 않는다.
-- deployable이 true여도 배포할 수 있는지는 실행기의 검사가 정한다. 검사에 걸렸다는 이유로 false로 답하지 않는다. 우회할 수 없는 것을 찾았을 때만 false다.
-
-할 일:
-1. list_files, read_file로 레포를 조사한다 (README, 기존 Dockerfile, docker-compose, 설정 예시). 먼저 "플랫폼이 주지 못하는 것"에 걸리는지 본다.
-2. write_file로 platform.yaml과 Dockerfile을 쓴다. 기존 파일은 꼭 필요할 때만 고친다. 상위 레포와 나중에 합치기 쉽도록 기존 Dockerfile을 덮어쓰기보다 hopcharlie.Dockerfile처럼 새 파일을 두는 편이 낫다. .gitattributes, .lfsconfig, .gitmodules와 .github/workflows 아래는 쓸 수 없다.
-3. JSON 하나로 답한다:
-   - deployable: 플랫폼에 배포할 수 있게 고쳤으면 true, 우회할 수 없는 것이 있어 고치지 않았으면 false
-   - blockers: deployable이 false일 때 플랫폼이 주지 못하는 것 [{need, reason}]. need는 필요한 것(예: "MySQL"), reason은 레포에서 찾은 근거(파일과 설정). 5개까지. true면 빈 목록
-   - summary: 무엇을 왜 바꿨는지, false면 왜 배포할 수 없는지 (한국어, 몇 문장)
-   - commitMessage: 한 줄, 72자 이하. false면 빈 문자열
-   - secrets: 운영자가 넣어야 할 비밀 환경 변수 [{name, purpose}]. 이름은 ^[A-Z_][A-Z0-9_]*$이고 플랫폼이 넣는 이름이 아니다. 값은 쓰지 않는다. 없으면 빈 목록
-   - notes: 운영자가 알아야 할 것 (첫 로그인 방법, 우회한 것, 제약, 확인하지 못한 것). 10개까지, 각 500자 이하
-검사에서 걸린 항목을 받으면 파일을 고치고 JSON 전체를 다시 낸다.`
+- 빌드는 서비스마다 AWS CodeBuild에서 docker build로 한다(x86_64, 2 vCPU, 3 GB, 15분 제한). 소스에서 오래 빌드하기보다 상위 프로젝트가 낸 버전 고정 이미지를 FROM으로 쓰는 편을 고른다. latest 태그는 쓰지 않는다.`
 
 // specExample은 지시문의 platform.yaml 예시다. 테스트가 이것을 검사에 통과시킨다.
 const specExample = `name: myapp
@@ -111,8 +114,8 @@ resources:
     type: postgres
 `
 
-// prepareSystem은 지시문에 플랫폼 검사와 같은 자원 값(서비스별 범위, 앱 전체 합)과 예시를 넣은 것이다.
-var prepareSystem = strings.NewReplacer(
+// specValues는 지시문에 플랫폼 검사와 같은 자원 값(서비스별 범위, 앱 전체 합)과 예시를 넣는다.
+var specValues = strings.NewReplacer(
 	"{minMemory}", mebibytes(appspec.MinMemory),
 	"{maxMemory}", mebibytes(appspec.MaxMemory),
 	"{unsetMemory}", mebibytes(appspec.UnsetMemory),
@@ -122,7 +125,10 @@ var prepareSystem = strings.NewReplacer(
 	"{unsetCPU}", millicores(appspec.UnsetCPU),
 	"{maxTotalCPU}", millicores(appspec.MaxTotalCPU),
 	"{example}", "  "+strings.ReplaceAll(strings.TrimSuffix(specExample, "\n"), "\n", "\n  "),
-).Replace(prepareSystemTemplate)
+)
+
+// prepareSystem은 prepare 지시문에 specValues를 넣은 것이다.
+var prepareSystem = specValues.Replace(prepareSystemTemplate)
 
 // mebibytes는 바이트를 Kubernetes 수량(1536Mi, 3Gi)으로 쓴다.
 func mebibytes(b int64) string { return resource.NewQuantity(b, resource.BinarySI).String() }
@@ -244,31 +250,43 @@ const (
 
 // checkPreparation은 AI 답과 클론의 platform.yaml, Dockerfile을 검사한다. 걸린 항목은 재요청에 그대로 쓴다.
 func (r *repoDir) checkPreparation(raw []byte) (*Preparation, plan.Issues) {
+	var p Preparation
+	if is := decodeAnswer(raw, &p); is != nil {
+		return nil, is
+	}
+	return r.checkPrepared(&p, nil)
+}
+
+// decodeAnswer는 AI 답을 모르는 키 없이 JSON 하나로 읽는다.
+func decodeAnswer(raw []byte, v any) plan.Issues {
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return plan.Issues{{Message: fmt.Sprintf("JSON 하나로 답해야 함: %v", err)}}
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return plan.Issues{{Message: "JSON 뒤에 다른 내용이 있음"}}
+	}
+	return nil
+}
+
+// stripText는 운영자 터미널에 찍히고 커밋 메시지가 되는 글에서 줄바꿈 말고는 제어 문자(터미널 escape 등)와 서식 문자(양방향 글자 등)를 뺀다.
+func stripText(s string) string {
+	return strings.Map(func(c rune) rune {
+		if c != '\n' && controlOrFormat(c) {
+			return -1
+		}
+		return c
+	}, s)
+}
+
+// checkPrepared는 읽은 답과 클론을 검사한다. extra가 있으면 platform.yaml 검사 뒤에 더 본다(onboard). spec은 검사를 통과하지 못했으면 nil이다.
+func (r *repoDir) checkPrepared(p *Preparation, extra func(spec *appspec.Spec, add func(path, format string, a ...any))) (*Preparation, plan.Issues) {
 	var is plan.Issues
 	add := func(path, format string, a ...any) {
 		is = append(is, plan.Issue{Path: path, Message: fmt.Sprintf(format, a...)})
 	}
-
-	var p Preparation
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&p); err != nil {
-		add("", "JSON 하나로 답해야 함: %v", err)
-		return nil, is
-	}
-	if err := dec.Decode(&struct{}{}); err != io.EOF {
-		add("", "JSON 뒤에 다른 내용이 있음")
-		return nil, is
-	}
-	// 운영자 터미널에 찍히고 커밋 메시지가 되므로 줄바꿈 말고는 제어 문자(터미널 escape 등)와 서식 문자(양방향 글자 등)를 뺀다
-	strip := func(s string) string {
-		return strings.Map(func(c rune) rune {
-			if c != '\n' && controlOrFormat(c) {
-				return -1
-			}
-			return c
-		}, s)
-	}
+	strip := stripText
 	p.Summary, p.CommitMessage = strip(p.Summary), strip(p.CommitMessage)
 	for i := range p.Secrets {
 		p.Secrets[i].Purpose = strip(p.Secrets[i].Purpose)
@@ -342,7 +360,7 @@ func (r *repoDir) checkPreparation(raw []byte) (*Preparation, plan.Issues) {
 		if len(is) > 0 {
 			return nil, is
 		}
-		return &p, nil
+		return p, nil
 	}
 	if len(p.Blockers) > 0 {
 		add("blockers", "deployable이 true면 비워야 함. 우회한 것은 notes에 적는다")
@@ -350,9 +368,12 @@ func (r *repoDir) checkPreparation(raw []byte) (*Preparation, plan.Issues) {
 
 	var dockerfiles []string
 	p.Spec, dockerfiles = r.checkSpec(add, p.Secrets)
+	if extra != nil {
+		extra(p.Spec, add)
+	}
 	slices.Sort(dockerfiles)
 	p.Dockerfiles = slices.Compact(dockerfiles)
-	if p.Files = r.changed(); len(p.Files) == 0 {
+	if p.Files = r.changed(); len(p.Files) == 0 && !r.allowUnchanged {
 		add("", "레포를 바꾸지 않았음. write_file로 platform.yaml과 Dockerfile을 쓰고 답해라")
 	}
 	if len(is) > 0 {
@@ -365,7 +386,7 @@ func (r *repoDir) checkPreparation(raw []byte) (*Preparation, plan.Issues) {
 		add("", "검사한 파일을 다시 읽을 수 없음: %v", err)
 		return nil, is
 	}
-	return &p, nil
+	return p, nil
 }
 
 // checkSpec은 클론 루트의 platform.yaml을 플랫폼과 같은 규칙(pkg/appspec)으로 보고, 서비스의 Dockerfile과 포트를 본다.

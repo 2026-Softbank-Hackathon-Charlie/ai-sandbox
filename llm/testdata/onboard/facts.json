@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "at": "2026-11-07T12:00:00Z",
+  "repo": "2026-Softbank-Hackathon-Charlie/moimroom-legacy",
+  "serviceUrl": "https://moimroom-legacy.hopcharlie.dev",
+  "app": "moimroom-legacy",
+  "github": {
+    "installed": true,
+    "defaultBranch": "main",
+    "composeFiles": ["compose.yaml"],
+    "dockerfiles": ["Dockerfile"],
+    "workflows": [{"id": 1, "path": ".github/workflows/deploy.yml", "name": "deploy", "state": "active", "deploysToVm": true}],
+    "platformYaml": false
+  },
+  "https": {
+    "host": "moimroom-legacy.hopcharlie.dev",
+    "addresses": ["203.0.113.10"],
+    "ttlSeconds": 60,
+    "record": {"name": "moimroom-legacy.hopcharlie.dev", "type": "A", "value": "203.0.113.10"},
+    "responds": true,
+    "status": 200,
+    "certNames": ["moimroom-legacy.hopcharlie.dev"],
+    "healthCandidates": ["/healthz", "/"]
+  },
+  "instance": {"cloud": "aws", "id": "i-0abc1234def567890", "region": "ap-northeast-2", "publicIp": "203.0.113.10", "tags": {}, "ssmManaged": true},
+  "vm": {
+    "dockerVersion": "27.3.1",
+    "composeVersion": "2.29.7",
+    "freeDiskBytes": 21474836480,
+    "project": "moimroom-legacy",
+    "workingDir": "/srv/moimroom",
+    "configFiles": ["/srv/moimroom/compose.yaml"],
+    "networks": [{"name": "moimroom-legacy_default", "driver": "bridge", "subnet": "172.18.0.0/16", "ipamConfigured": false}],
+    "containers": [
+      {"name": "moimroom-legacy-app-1", "service": "app", "image": "moimroom-legacy-app", "imageId": "sha256:aaa", "state": "running",
+       "ports": [{"container": 8080, "protocol": "tcp"}], "networks": ["moimroom-legacy_default"], "mounts": [],
+       "env": [
+         {"name": "DB_HOST", "secret": false, "excluded": "compose_ref"},
+         {"name": "DB_PORT", "secret": false},
+         {"name": "DB_NAME", "secret": false},
+         {"name": "DB_USER", "secret": false},
+         {"name": "DB_PASSWORD", "secret": true},
+         {"name": "S3_BUCKET", "secret": false, "excluded": "platform"},
+         {"name": "AWS_REGION", "secret": false},
+         {"name": "AWS_ACCESS_KEY_ID", "secret": true},
+         {"name": "AWS_SECRET_ACCESS_KEY", "secret": true},
+         {"name": "SESSION_SECRET", "secret": true}
+       ],
+       "memoryLimitBytes": 536870912},
+      {"name": "moimroom-legacy-db-1", "service": "db", "image": "postgres:17.11-alpine", "imageId": "sha256:bbb", "state": "running",
+       "ports": [{"container": 5432, "protocol": "tcp"}], "networks": ["moimroom-legacy_default"],
+       "mounts": [{"type": "volume", "source": "moimroom-legacy_pgdata", "destination": "/var/lib/postgresql/data"}],
+       "env": [
+         {"name": "POSTGRES_USER", "secret": false, "excluded": "db_container"},
+         {"name": "POSTGRES_PASSWORD", "secret": true, "excluded": "db_container"},
+         {"name": "POSTGRES_DB", "secret": false, "excluded": "db_container"}
+       ]},
+      {"name": "moimroom-legacy-caddy-1", "service": "caddy", "image": "caddy:2.8.4", "imageId": "sha256:ccc", "state": "running",
+       "ports": [{"container": 80, "host": 80, "protocol": "tcp"}, {"container": 443, "host": 443, "protocol": "tcp"}], "networks": ["moimroom-legacy_default"],
+       "mounts": [{"type": "bind", "source": "/srv/moimroom/Caddyfile", "destination": "/etc/caddy/Caddyfile", "readOnly": true},
+                  {"type": "volume", "source": "moimroom-legacy_caddy_data", "destination": "/data"}],
+       "env": []}
+    ],
+    "volumes": [
+      {"name": "moimroom-legacy_pgdata", "sizeBytes": 52428800, "usedBy": ["moimroom-legacy-db-1"], "role": "database"},
+      {"name": "moimroom-legacy_caddy_data", "sizeBytes": 20480, "usedBy": ["moimroom-legacy-caddy-1"], "role": "empty"}
+    ]
+  },
+  "db": {
+    "container": "moimroom-legacy-db-1", "service": "db", "port": 5432,
+    "serverVersionNum": 170011, "version": "PostgreSQL 17.11 on x86_64-pc-linux-musl", "libc": "musl",
+    "envDatabase": "app", "envUser": "app", "database": "app", "owner": "app",
+    "databases": [{"name": "app", "owner": "app", "locProvider": "c", "collate": "en_US.utf8", "ctype": "en_US.utf8", "sizeBytes": 9437184}],
+    "lcMonetary": "en_US.utf8", "lcNumeric": "en_US.utf8", "lcTime": "en_US.utf8", "lcMessages": "en_US.utf8",
+    "autoConf": [], "allowAlterSystem": "on", "walLevel": "replica", "maxWalSenders": 10, "passwordEncryption": "scram-sha-256",
+    "readOnlyRoleSettings": [], "walKeepSize": "0", "walKeepSizeSource": "default",
+    "superusers": ["app"], "postgresRole": false, "fenceUser": "app",
+    "hbaFile": "/var/lib/postgresql/data/pg_hba.conf", "configFile": "/var/lib/postgresql/data/postgresql.conf", "dataDirectory": "/var/lib/postgresql/data",
+    "walBytesPerSecond": 2048, "connections": 4, "maxConnections": 100,
+    "indexes": [{"name": "public.users_email_idx", "table": "public.users", "collation": "en_US.utf8", "sizeBytes": 16384}],
+    "collationDependent": [],
+    "tables": [{"name": "public.users", "rows": 120, "sizeBytes": 65536}]
+  },
+  "storage": {
+    "provider": "aws_s3", "endpoint": "https://s3.ap-northeast-2.amazonaws.com", "region": "ap-northeast-2", "bucket": "moimroom-legacy-files",
+    "container": "moimroom-legacy-app-1", "bucketEnv": "S3_BUCKET", "accessKeyEnv": "AWS_ACCESS_KEY_ID", "secretKeyEnv": "AWS_SECRET_ACCESS_KEY", "regionEnv": "AWS_REGION",
+    "objectCount": 12, "totalSizeBytes": 1048576
+  },
+  "target": {
+    "env": "eks",
+    "image": "ghcr.io/cloudnative-pg/postgresql:17.11-standard-bookworm@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "imageReason": "musl 원본, libc locale: standard-bookworm과 REINDEX",
+    "storageSize": "1Gi",
+    "reindex": ["public.users_email_idx"],
+    "publicService": "app", "port": 8080, "healthCheck": "/healthz"
+  },
+  "report": {
+    "blockers": [],
+    "warnings": [{"code": "reindex_required", "message": "musl 원본의 libc locale 인덱스 1개를 승격 뒤 REINDEX한다", "subject": "public.users_email_idx"}]
+  }
+}

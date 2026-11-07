@@ -1,0 +1,49 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["deployable", "blockers", "summary", "commitMessage", "secrets", "notes", "mapping"],
+  "properties": {
+    "deployable": { "type": "boolean" },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["need", "reason"],
+        "properties": {
+          "need": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "summary": { "type": "string" },
+    "commitMessage": { "type": "string" },
+    "secrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "purpose"],
+        "properties": {
+          "name": { "type": "string" },
+          "purpose": { "type": "string" }
+        }
+      }
+    },
+    "notes": { "type": "array", "items": { "type": "string" } },
+    "mapping": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["composeService", "platformService", "resource", "reason"],
+        "properties": {
+          "composeService": { "type": "string" },
+          "platformService": { "type": "string" },
+          "resource": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    }
+  }
+}

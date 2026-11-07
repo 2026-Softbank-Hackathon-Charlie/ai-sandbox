@@ -231,14 +231,9 @@ func (g *gitRunner) commit(ctx context.Context, dir, message string) (string, []
 	if err != nil {
 		return "", nil, err
 	}
-	var changes []gitChange
-	parts := strings.Split(strings.TrimSuffix(out, "\x00"), "\x00")
-	for i := 0; i+1 < len(parts); i += 2 {
-		f := strings.Fields(strings.TrimPrefix(parts[i], ":"))
-		if len(f) != 5 {
-			return "", nil, fmt.Errorf("git diff --raw 출력을 읽을 수 없음: %q", parts[i])
-		}
-		changes = append(changes, gitChange{Status: f[4], Path: parts[i+1], Mode: f[1]})
+	changes, err := parseRawDiff(out)
+	if err != nil {
+		return "", nil, err
 	}
 	if len(changes) == 0 {
 		return "", nil, errors.New("커밋할 변경이 없음 (AI가 쓴 내용이 원래 파일과 같음)")
@@ -248,6 +243,79 @@ func (g *gitRunner) commit(ctx context.Context, dir, message string) (string, []
 	}
 	sha, err := g.run(ctx, dir, "", "rev-parse", "HEAD")
 	return strings.TrimSpace(sha), changes, err
+}
+
+// parseRawDiff는 git diff --raw --no-renames -z 출력을 읽는다.
+func parseRawDiff(out string) ([]gitChange, error) {
+	var changes []gitChange
+	parts := strings.Split(strings.TrimSuffix(out, "\x00"), "\x00")
+	for i := 0; i+1 < len(parts); i += 2 {
+		f := strings.Fields(strings.TrimPrefix(parts[i], ":"))
+		if len(f) != 5 {
+			return nil, fmt.Errorf("git diff --raw 출력을 읽을 수 없음: %q", parts[i])
+		}
+		changes = append(changes, gitChange{Status: f[4], Path: parts[i+1], Mode: f[1]})
+	}
+	return changes, nil
+}
+
+// cloneOnboard는 기본 브랜치를 얕게 클론하고, branch가 원격에 있으면 그 브랜치를 받아 옮겨 가고 없으면 기본 브랜치에서 새로 만든다 (hopai onboard).
+// base는 기본 브랜치 커밋, defaultBranch는 그 이름이다. branch가 있으면 그 커밋(remote)도 돌려준다.
+func (g *gitRunner) cloneOnboard(ctx context.Context, parent, dir, url, branch string, exists bool) (base, defaultBranch, remote string, err error) {
+	if _, err = g.run(ctx, parent, "", "clone", "--depth", "1", "--single-branch", "--no-tags", "--", url, dir); err != nil {
+		return "", "", "", err
+	}
+	out, err := g.run(ctx, dir, "", "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", "", "", err
+	}
+	defaultBranch = strings.TrimSpace(out)
+	if defaultBranch == branch {
+		return "", "", "", fmt.Errorf("레포의 기본 브랜치가 %s임. 기본 브랜치에는 push하지 않음", branch)
+	}
+	if out, err = g.run(ctx, dir, "", "rev-parse", "HEAD"); err != nil {
+		return "", "", "", err
+	}
+	base = strings.TrimSpace(out)
+	if !exists {
+		_, err = g.run(ctx, dir, "", "switch", "-c", branch)
+		return base, defaultBranch, "", err
+	}
+	tracking := "refs/remotes/origin/" + branch
+	if _, err = g.run(ctx, dir, "", "fetch", "--depth", "1", "--no-tags", "origin", "+refs/heads/"+branch+":"+tracking); err != nil {
+		return "", "", "", err
+	}
+	if _, err = g.run(ctx, dir, "", "switch", "-c", branch, tracking); err != nil {
+		return "", "", "", err
+	}
+	if out, err = g.run(ctx, dir, "", "rev-parse", "HEAD"); err != nil {
+		return "", "", "", err
+	}
+	return base, defaultBranch, strings.TrimSpace(out), nil
+}
+
+// treeFiles는 rev의 모든 경로다 (git ls-tree -r).
+func (g *gitRunner) treeFiles(ctx context.Context, dir, rev string) ([]string, error) {
+	out, err := g.run(ctx, dir, "", "ls-tree", "-r", "-z", "--name-only", rev)
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, p := range strings.Split(strings.TrimSuffix(out, "\x00"), "\x00") {
+		if p != "" {
+			files = append(files, p)
+		}
+	}
+	return files, nil
+}
+
+// diffTrees는 두 커밋의 트리 차이다. 얕은 클론이라 이력 없이 트리끼리 비교한다.
+func (g *gitRunner) diffTrees(ctx context.Context, dir, from, to string) ([]gitChange, error) {
+	out, err := g.run(ctx, dir, "", "diff", "--raw", "--no-renames", "-z", from, to)
+	if err != nil {
+		return nil, err
+	}
+	return parseRawDiff(out)
 }
 
 // verifyCommit은 커밋이 검사한 것과 같은지 본다. 다르면 push하지 않는다.

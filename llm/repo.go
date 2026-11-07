@@ -19,6 +19,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/2026-Softbank-Hackathon-Charlie/platform/pkg/appspec"
+
+	"github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/mask"
 )
 
 // 레포 도구 (hopai prepare). 들여온 오픈소스 레포를 클론한 디렉터리 하나만 읽고 쓴다.
@@ -54,6 +56,13 @@ type repoDir struct {
 	writes int
 	// orig는 처음 쓰기 전 파일의 SHA-256이다 (없던 파일은 nil). 작업 트리가 바뀌었는지 볼 때 쓴다.
 	orig map[string]*[32]byte
+	// existingFiles가 nil이 아니면(onboard) 새 파일만 쓸 수 있다. 기본 브랜치에 있는 경로(소문자로 바꾼 것)는 고칠 수 없고,
+	// 새 파일도 OnboardWritable이 받는 이름만 된다.
+	existingFiles map[string]bool
+	// allowUnchanged면 바꾼 파일이 없어도 된다 (onboard가 이미 맞는 계약이 있는 브랜치에서 이어서 돌 때).
+	allowUnchanged bool
+	// touched는 onboard에서 이번 작업에 읽거나 쓴 파일이다 (정리한 경로).
+	touched map[string]bool
 }
 
 func openRepo(dir string, index RepoIndex) (*repoDir, error) {
@@ -296,6 +305,10 @@ func (r *repoDir) read(asked string) (any, error) {
 	if clean == "." {
 		return nil, errors.New("파일 경로가 필요함")
 	}
+	// onboard는 실제 운영 앱의 레포다. 커밋된 비밀 파일은 열지 않고 이름만 보인다
+	if r.existingFiles != nil && secretFile(path.Base(clean)) {
+		return map[string]any{"path": clean, "secretFile": true, "note": "비밀 파일이라 이름만 보임. 내용은 읽지 않는다"}, nil
+	}
 	fi, err := os.Stat(real)
 	if err != nil || !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%q는 일반 파일이 아님", clean)
@@ -320,7 +333,12 @@ func (r *repoDir) read(asked string) (any, error) {
 	if bytes.IndexByte(b, 0) >= 0 || !utf8.Valid(b) {
 		return nil, fmt.Errorf("%q는 UTF-8 텍스트가 아님 (바이너리는 읽지 않음)", clean)
 	}
-	out := map[string]any{"path": clean, "size": fi.Size(), "content": string(b)}
+	content := string(b)
+	if r.existingFiles != nil {
+		content = mask.String(content)
+		r.touched[clean] = true
+	}
+	out := map[string]any{"path": clean, "size": fi.Size(), "content": content}
 	if truncated {
 		out["truncated"] = true
 		out["note"] = fmt.Sprintf("앞의 %d KiB만 보임. 이 파일은 덮어쓸 수 없다", MaxReadBytes>>10)
@@ -353,6 +371,16 @@ func (r *repoDir) write(asked, content string) (any, error) {
 	}
 	if refused {
 		return nil, fmt.Errorf("%w: .gitattributes, .lfsconfig, .gitmodules, .github/workflows 아래는 쓰지 않음 (git과 GitHub이 설정이나 실행할 것으로 읽음): %q", ErrBlocked, clean)
+	}
+	if r.existingFiles != nil {
+		for _, p := range []string{clean, filepath.ToSlash(rel)} {
+			if r.existingFiles[strings.ToLower(p)] {
+				return nil, fmt.Errorf("%w: 기본 브랜치에 있는 파일은 고치지 않음 (원본 배포가 쓰는 파일일 수 있음). 새 파일만 더한다: %q", ErrBlocked, clean)
+			}
+			if err := OnboardWritable(p); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if err := r.checkIndex(clean); err != nil {
 		return nil, err
@@ -391,7 +419,17 @@ func (r *repoDir) write(asked, content string) (any, error) {
 		return nil, fmt.Errorf("%q를 쓸 수 없음", clean)
 	}
 	r.writes++
+	if r.touched != nil {
+		r.touched[clean] = true
+	}
 	return map[string]any{"path": clean, "bytes": len(content), "created": created, "writesLeft": MaxWrites - r.writes}, nil
+}
+
+// secretFile은 onboard에서 읽지 않는 비밀 파일 이름인지 본다 (.env, .env.*, *.pem, *.key, id_*, secrets.*, *credentials*).
+func secretFile(base string) bool {
+	b := strings.ToLower(base)
+	return b == ".env" || strings.HasPrefix(b, ".env.") || strings.HasSuffix(b, ".pem") || strings.HasSuffix(b, ".key") ||
+		strings.HasPrefix(b, "id_") || strings.HasPrefix(b, "secrets.") || strings.Contains(b, "credentials")
 }
 
 // checkIndex는 경로가 git 인덱스의 심볼릭 링크이거나 서브모듈 안이면 막는다 (대소문자 무시).
