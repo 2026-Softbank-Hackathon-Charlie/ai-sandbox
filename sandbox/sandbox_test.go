@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	authnv1 "k8s.io/api/authentication/v1"
 	authzv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -87,13 +86,14 @@ func TestBuild(t *testing.T) {
 	if len(np.PolicyTypes) != 2 || len(np.PodSelector.MatchLabels) != 0 {
 		t.Fatalf("NetworkPolicy가 모든 Pod의 들어오고 나감을 막아야 함: %+v", np)
 	}
-	if len(np.Egress) != 2 {
-		t.Fatalf("나가는 규칙은 같은 네임스페이스와 kube-dns 두 개여야 함: %d개", len(np.Egress))
+	if len(np.Egress) != 3 {
+		t.Fatalf("나가는 규칙은 같은 네임스페이스, kube-dns, NodeLocal DNS 세 개여야 함: %d개", len(np.Egress))
 	}
 	for _, e := range np.Egress {
 		for _, p := range e.To {
-			if p.IPBlock != nil {
-				t.Fatalf("기본 설정에 IP 대역 허용이 있으면 안 됨: %+v", p.IPBlock)
+			// 기본 설정에서 IP 대역은 NodeLocal DNSCache 주소의 DNS 포트뿐이다
+			if p.IPBlock != nil && (p.IPBlock.CIDR != NodeLocalDNSCIDR || len(e.Ports) != 2) {
+				t.Fatalf("기본 설정에 허용된 IP 대역은 %s의 DNS 포트뿐이어야 함: %+v %+v", NodeLocalDNSCIDR, p.IPBlock, e.Ports)
 			}
 		}
 	}
@@ -118,7 +118,7 @@ func TestBuildAllowsConfiguredExits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(o.NetworkPolicy.Spec.Egress) != 3 || o.NetworkPolicy.Spec.Egress[2].To[0].IPBlock.CIDR != "10.96.0.1/32" {
+	if len(o.NetworkPolicy.Spec.Egress) != 4 || o.NetworkPolicy.Spec.Egress[3].To[0].IPBlock.CIDR != "10.96.0.1/32" {
 		t.Fatalf("나가는 허용 대역이 안 들어감: %+v", o.NetworkPolicy.Spec.Egress)
 	}
 	if len(o.NetworkPolicy.Spec.Ingress[0].From) != 2 {
@@ -529,54 +529,49 @@ func TestForCNPG(t *testing.T) {
 	}
 }
 
-// GKE의 NodeLocal DNSCache가 있으면 Pod가 kube-dns 대신 169.254.20.10으로 DNS를 묻는다. 그 주소의 53번 포트만 열려야 한다.
-// (2026-11-07 GKE 리허설: 정책이 kube-dns Pod만 허용해 격리 검사의 dns 항목이 막혔다.)
-func TestForCNPGOpensNodeLocalDNSOnlyWhereItExists(t *testing.T) {
-	base := []runtime.Object{&discoveryv1.EndpointSlice{
+// GKE의 NodeLocal DNSCache는 Pod가 kube-dns 대신 169.254.20.10으로 DNS를 묻게 한다. 클러스터를 읽지 않고
+// 그 주소의 53번 포트만 항상 열어야 하고, 메타데이터 주소는 계속 막혀야 한다.
+// (2026-11-07 GKE 리허설: 정책이 kube-dns Pod만 허용해 격리 검사의 dns 항목이 막혔다. DaemonSet을 읽어 있을 때만
+// 여는 방식은 관리 계정에 읽기 권한이 없으면 조용히 건너뛰어 같은 실패가 났다.)
+func TestBuildAlwaysOpensNodeLocalDNSPortOnly(t *testing.T) {
+	// DaemonSet이 하나도 없는 클러스터(읽을 수 없는 경우와 같다)에서도 열려야 한다
+	cnpg, err := ForCNPG(context.Background(), fake.NewClientset(&discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{Name: "kubernetes", Namespace: "default", Labels: map[string]string{"kubernetes.io/service-name": "kubernetes"}},
 		Endpoints:  []discoveryv1.Endpoint{{Addresses: []string{"172.18.0.2"}}},
-	}}
-	dnsRules := func(t *testing.T, objs ...runtime.Object) []netv1.NetworkPolicyEgressRule {
-		t.Helper()
-		c, err := ForCNPG(context.Background(), fake.NewClientset(append(slices.Clone(base), objs...)...), Config{App: "moimroom", ID: "ab12"})
-		if err != nil {
-			t.Fatal(err)
-		}
+	}), Config{App: "moimroom", ID: "ab12"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]Config{"기본": {App: "moimroom", ID: "ab12"}, "CNPG 모드": cnpg} {
 		o, err := Build(c, now)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("%s: %v", name, err)
 		}
 		var rules []netv1.NetworkPolicyEgressRule
 		for _, r := range o.NetworkPolicy.Spec.Egress {
 			for _, to := range r.To {
-				if to.IPBlock != nil && to.IPBlock.CIDR == NodeLocalDNSCIDR {
+				if to.IPBlock == nil {
+					continue
+				}
+				if to.IPBlock.CIDR == NodeLocalDNSCIDR {
 					rules = append(rules, r)
 				}
 				// 어떤 허용 대역도 메타데이터 주소를 덮으면 안 된다
-				if to.IPBlock != nil {
-					if _, n, err := net.ParseCIDR(to.IPBlock.CIDR); err != nil || n.Contains(net.ParseIP("169.254.169.254")) {
-						t.Fatalf("메타데이터 주소를 덮는 허용 대역: %q", to.IPBlock.CIDR)
-					}
+				if _, n, err := net.ParseCIDR(to.IPBlock.CIDR); err != nil || n.Contains(net.ParseIP("169.254.169.254")) {
+					t.Fatalf("%s: 메타데이터 주소를 덮는 허용 대역: %q", name, to.IPBlock.CIDR)
 				}
 			}
 		}
-		return rules
-	}
-
-	if got := dnsRules(t); len(got) != 0 {
-		t.Fatalf("NodeLocal DNSCache가 없으면 열면 안 됨: %+v", got)
-	}
-
-	got := dnsRules(t, &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: "node-local-dns", Namespace: "kube-system"}})
-	if len(got) != 1 {
-		t.Fatalf("NodeLocal DNSCache가 있으면 규칙이 하나 있어야 함: %+v", got)
-	}
-	var ports []string
-	for _, p := range got[0].Ports {
-		ports = append(ports, string(*p.Protocol)+"/"+p.Port.String())
-	}
-	if !slices.Equal(ports, []string{"UDP/53", "TCP/53"}) {
-		t.Fatalf("DNS 포트만 열어야 함: %v", ports)
+		if len(rules) != 1 {
+			t.Fatalf("%s: NodeLocal DNS 규칙이 하나 있어야 함: %+v", name, rules)
+		}
+		var ports []string
+		for _, p := range rules[0].Ports {
+			ports = append(ports, string(*p.Protocol)+"/"+p.Port.String())
+		}
+		if !slices.Equal(ports, []string{"UDP/53", "TCP/53"}) {
+			t.Fatalf("%s: DNS 포트만 열어야 함: %v", name, ports)
+		}
 	}
 }
 
@@ -586,12 +581,13 @@ func TestBuildAllowDNSCIDRs(t *testing.T) {
 			t.Errorf("DNS 허용 대역 %q는 거절해야 함", bad)
 		}
 	}
-	o, err := Build(Config{App: "shop", ID: "ab12", AllowDNSCIDRs: []string{NodeLocalDNSCIDR}}, now)
+	// 추가 대역은 DNS 포트만 열고, NodeLocal DNS 주소를 또 넣어도 규칙은 하나다
+	o, err := Build(Config{App: "shop", ID: "ab12", AllowDNSCIDRs: []string{"10.0.0.2/32", NodeLocalDNSCIDR}}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	eg := o.NetworkPolicy.Spec.Egress
-	if len(eg) != 3 || eg[2].To[0].IPBlock.CIDR != NodeLocalDNSCIDR || len(eg[2].Ports) != 2 {
+	if len(eg) != 4 || eg[2].To[0].IPBlock.CIDR != NodeLocalDNSCIDR || eg[3].To[0].IPBlock.CIDR != "10.0.0.2/32" || len(eg[3].Ports) != 2 {
 		t.Fatalf("DNS 허용 규칙이 안 들어감: %+v", eg)
 	}
 }
