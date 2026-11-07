@@ -9,6 +9,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -90,6 +91,26 @@ jobs:
       # No -count=1: unchanged packages reuse their cached result.
       - name: Test
         run: go test ./...
+
+      # A manual, tested main revision can be packaged without compiling on
+      # the operator's Windows laptop or adding registry credentials to CI.
+      - name: Build Linux release binary
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p dist
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o dist/hopai ./cmd/hopai
+          go version -m dist/hopai > dist/buildinfo.txt
+          (cd dist && sha256sum hopai > SHA256SUMS)
+          printf '%s\n' "$GITHUB_SHA" > dist/source-commit.txt
+
+      - name: Upload tested release binary
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hopai-linux-amd64-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
 
       # Only main saves, so a PR spends no time uploading.
       - name: Save Go cache
