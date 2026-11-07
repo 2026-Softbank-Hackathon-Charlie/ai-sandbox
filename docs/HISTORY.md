@@ -32,7 +32,7 @@ ai-sandbox에 main으로 합쳐진 순서대로 무엇이 생겼는지 정리했
 | [v25](#v25--ai-계획-파일-저장) | [#29](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/29) | 11/5 14:21 | AI 계획을 리포트 옆 파일로 저장 | 117 |
 | [v26](#v26--들여온-오픈소스-앱-배포-준비) | [#33](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/33) | 11/5 17:58 | 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie`로 push | 158 |
 | [v29](#v29-배포할-수-없는-앱-알리기) | [#36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36) | 11/6 01:18 | `hopai prepare`가 플랫폼이 주지 못하는 것을 찾으면 push하지 않고 알림, 새 `platform.yaml` 계약 | 175 |
-| [v30](#v30-compose로-돌던-앱의-온보딩-계약) | [#PRNUM](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/PRNUM) | 머지 전 | compose로 돌던 앱의 레포에 계약 파일을 새 파일로만 더해 `hopcharlie/onboard`로 push (`hopai onboard`) | 204 |
+| [v30](#v30-compose로-돌던-앱의-온보딩-계약) | [#49](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/49) | 머지 전 | compose로 돌던 앱의 레포에 계약 파일을 새 파일로만 더해 `hopcharlie/onboard`로 push (`hopai onboard`) | 204 |
 
 - 머지 시각은 한국 시간이고, "테스트"는 그 버전에 들어 있던 테스트 함수 개수입니다.
 - 닫힌 PR #1, #2는 플랫폼의 계획 형식이 정해진 뒤 #4~#8로 나눠 다시 올렸습니다.
@@ -588,7 +588,7 @@ MySQL, Redis, 볼륨 같은 리소스 종류를 늘리려면 eks, gke, 온프레
 
 ## v30 compose로 돌던 앱의 온보딩 계약
 
-[PR #PRNUM](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/PRNUM), 머지 전, STATS, 패키지 `llm`, `cmd/hopai`
+[PR #49](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/49), 머지 전, 22파일 +1769 −57, 패키지 `llm`, `cmd/hopai`
 
 **무엇이 달라졌나**
 

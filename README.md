@@ -36,7 +36,7 @@ HopCharlie의 AI(Plan 작성, 리허설 실패 진단, 수정안)와 샌드박�
 | v25 | [#29](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/29) | 11/5 14:21 | AI 계획을 리포트 옆 파일로 저장 |
 | v26 | [#33](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/33) | 11/5 17:58 | 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie`로 push (`hopai prepare`) |
 | v29 | [#36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36) | 11/6 01:18 | `hopai prepare`가 플랫폼이 주지 못하는 것(MySQL, 볼륨 등)을 찾으면 push하지 않고 알림, 새 `platform.yaml` 계약 반영 |
-| v30 | [#PRNUM](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/PRNUM) | 머지 전 | compose로 돌던 앱의 레포에 계약 파일을 새 파일로만 더해 `hopcharlie/onboard`로 push (`hopai onboard`, platform ADR 0042) |
+| v30 | [#49](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/49) | 머지 전 | compose로 돌던 앱의 레포에 계약 파일을 새 파일로만 더해 `hopcharlie/onboard`로 push (`hopai onboard`, platform ADR 0042) |
 
 # HopCharlie AI·샌드박스 사용 설계 (D 영역 초안)
 
