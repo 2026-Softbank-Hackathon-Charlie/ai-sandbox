@@ -12,7 +12,7 @@
 
 `hopai recommend`는 기존 `llm.Agent`, Anthropic SDK client, `DefaultModel`, 기본 effort와 선택적 Langfuse 계측을 재사용한다. AI의 읽기 도구는 서버가 확인해 전달한 고정 스냅샷을 반환하는 `recommendation_snapshot` 하나다. kubeconfig, 운영 DB, Plan 생성·제출, 샌드박스 생성 및 이전 실행 도구는 제공하지 않는다.
 
-입력은 최대 64KiB이며 snapshot ID, 생성·만료 시각과 최대 16개 후보를 갖는다. 후보의 앱·원본·대상·허용 action·이유·출처·미확인 항목·추정 절감액은 서버 소유다. 도구를 실제로 읽어야 결과를 인정한다. AI는 후보의 우선순위, 허용된 `move/stay/insufficient`, 기존 이유 중 최대 두 개만 선택한다. 새 수치·가격·환경·출처를 출력할 수 없다. 최대 네 개 결과의 ID 중복, 다른 스냅샷, 허용되지 않은 동작, 새 이유와 알 수 없는 JSON 필드는 거부한다. 플랫폼도 원래 사실과 대조해야 한다.
+입력은 최대 64KiB이며 snapshot ID, 생성·만료 시각과 최대 16개 후보를 갖는다. 후보의 앱·원본·대상·허용 action·이유·출처·미확인 항목·추정 절감액은 서버 소유다. 도구를 실제로 읽어야 결과를 인정한다. AI는 후보의 우선순위, 허용된 `move/stay/insufficient`, 기존 이유 중 1~2개를 선택한다. 모든 선택은 원문 이유가 적어도 하나 있어야 하며, `stay/insufficient`도 빈 이유를 허용하지 않는다. 플랫폼 callback과 같은 하한을 적용한다. 새 수치·가격·환경·출처를 출력할 수 없다. 최대 네 개 결과의 ID 중복, 다른 스냅샷, 허용되지 않은 동작, 새 이유와 알 수 없는 JSON 필드는 거부한다. 플랫폼도 원래 사실과 대조해야 한다.
 
 출력 token은 응답당 1500, tool runner는 최대 3회, SDK 재시도와 검사 재시도는 0회, HTTP 호출당 30초·전체 AI 작업 60초로 제한한다. 공유 task에 선택적 요청 옵션만 추가하여 기존 계획·진단 작업의 예산은 바꾸지 않는다. 실제 마지막 API 응답의 model ID와 플랫폼 explain session ID를 전달한다. schema는 Claude가 지원하는 JSON Schema만 쓰며 배열 상한은 Go에서 별도로 강제한다.
 

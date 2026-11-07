@@ -10,7 +10,7 @@
         "properties": {
           "id": { "type": "string" },
           "action": { "type": "string", "enum": ["move", "stay", "insufficient"] },
-          "reasons": { "type": "array", "description": "At most two exact existing reasons; Go validates the bound.", "items": { "type": "string" } }
+          "reasons": { "type": "array", "description": "One or two exact existing reasons for every selected action; Go validates the bound.", "items": { "type": "string" } }
         },
         "required": ["id", "action", "reasons"],
         "additionalProperties": false
