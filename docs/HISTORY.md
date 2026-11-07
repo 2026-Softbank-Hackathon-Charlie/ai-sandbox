@@ -32,6 +32,7 @@ ai-sandbox에 main으로 합쳐진 순서대로 무엇이 생겼는지 정리했
 | [v25](#v25--ai-계획-파일-저장) | [#29](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/29) | 11/5 14:21 | AI 계획을 리포트 옆 파일로 저장 | 117 |
 | [v26](#v26--들여온-오픈소스-앱-배포-준비) | [#33](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/33) | 11/5 17:58 | 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie`로 push | 158 |
 | [v29](#v29-배포할-수-없는-앱-알리기) | [#36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36) | 11/6 01:18 | `hopai prepare`가 플랫폼이 주지 못하는 것을 찾으면 push하지 않고 알림, 새 `platform.yaml` 계약 | 175 |
+| [v30](#v30-compose로-돌던-앱의-온보딩-계약) | [#PRNUM](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/PRNUM) | 머지 전 | compose로 돌던 앱의 레포에 계약 파일을 새 파일로만 더해 `hopcharlie/onboard`로 push (`hopai onboard`) | 204 |
 
 - 머지 시각은 한국 시간이고, "테스트"는 그 버전에 들어 있던 테스트 함수 개수입니다.
 - 닫힌 PR #1, #2는 플랫폼의 계획 형식이 정해진 뒤 #4~#8로 나눠 다시 올렸습니다.
@@ -582,6 +583,41 @@ MySQL, Redis, 볼륨 같은 리소스 종류를 늘리려면 eks, gke, 온프레
 | 지시문의 예시 `platform.yaml`(port 없는 워커, `memory`, `cpu`, `$(이름)` 참조), 서비스 둘이 같은 Dockerfile | 통과 |
 
 `go vet`, gofmt, `go test ./...`가 통과했습니다. 실제 Claude와 플랫폼으로는 돌려 보지 못했습니다.
+
+---
+
+## v30 compose로 돌던 앱의 온보딩 계약
+
+[PR #PRNUM](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/PRNUM), 머지 전, STATS, 패키지 `llm`, `cmd/hopai`
+
+**무엇이 달라졌나**
+
+platform ADR 0042(플랫폼 밖 VM에서 docker compose로 돌던 앱을 무중단으로 가져오기)의 "2. 계약 PR"에서 hopai가 맡는 부분입니다. 플랫폼이 온보딩의 `patching`, `checking` 상태에서 hopai Job(`KIND=onboard`)을 띄우면, `hopai onboard`가 조사 결과와 기본 브랜치 클론을 받아 플랫폼 계약 파일을 새 파일로만 더하고 `hopcharlie/onboard` 브랜치로 push합니다. PR은 플랫폼이 엽니다.
+
+1. 새 명령 `hopai onboard`. 입력은 `REPO`, `FACTS_FILE`(platform `pkg/onboard/facts`의 조사 결과 JSON, 비밀값 없음), 재시도 때 `CHECK_LOG_FILE`(실패한 시험 배포 기록), `ONBOARDING`, `BRANCH`이고 플래그로도 줄 수 있습니다. 조사 결과의 레포가 다르거나, 버전이 높거나, 차단 사유가 있으면 시작하지 않습니다.
+2. prepare와 같은 안전 장치를 씁니다. AI는 명령을 실행하지 못하고 클론 안의 파일만 읽고 씁니다. push는 실행기가 `POST /v1/github/push-tokens`로 받은 토큰으로, `refs/heads/hopcharlie/onboard`에만 새로 만들거나 fast-forward로 합니다. 기본 브랜치에는 push하지 않습니다.
+3. 원본 배포를 바꾸지 않도록 새 파일만 더하는 것을 실행기가 막습니다. 쓰기 도구는 기본 브랜치에 있는 경로(대소문자 무시)를 거절하고, 새 파일도 루트 `platform.yaml`과 `hopcharlie.`로 시작하는 이름만 받습니다. `.dockerignore`, `.env`, `compose.override.yaml`처럼 docker compose와 docker build가 저절로 읽는 이름과 `.github` 아래는 새로 만들지도 못합니다. 커밋한 뒤에도 기본 브랜치와 트리를 비교해 모두 새 일반 파일(`A`)인지 다시 보고, 아니면 push하지 않습니다. 재시도 때 있던 브랜치가 기본 브랜치 파일을 고친 상태면 AI를 부르지 않고 멈춥니다.
+4. AI 지시문에 compose에서 옮기는 법을 넣었습니다. TLS 리버스 프록시는 옮기지 않고, compose 안의 PostgreSQL은 `postgres` 리소스로, 외부 S3는 `s3` 리소스로, 앱이 다른 이름으로 읽는 접속 정보는 env의 `$(...)` 참조로 잇습니다. 비밀값이나 레포에 없는 값은 `secrets`에 이름만 적고, 원래 값은 플랫폼이 넣습니다. `platform.yaml` 규칙과 실행 환경 문단은 prepare 지시문과 같은 상수를 함께 씁니다(prepare 지시문은 바이트까지 그대로).
+5. 답에 `mapping[{composeService, platformService, resource, reason}]`이 더해졌습니다(`llm/schema/onboard.json`). prepare와 같은 검사에 더해 앱 이름이 조사 결과의 `app`인지, public 서비스와 필요한 `postgres`, `s3` 리소스가 있는지, 시크릿 이름이 조사한 env에 있고 옮기지 않는 이름이 아닌지, compose 서비스를 모두 적었는지, 리버스 프록시가 넘기던 서비스가 public인지 봅니다.
+6. 기존 파일을 고쳐야만 하면 AI가 `deployable: false`로 답하고 push 없이 종료 코드 3으로 끝납니다. 기본 브랜치에 `platform.yaml`이 이미 있으면 AI 없이 같은 결과를 냅니다.
+7. 표준 출력에는 결과 JSON 한 줄만 씁니다(`kind`, `onboarding`, `repo`, `branch`, `base`, `head`, `session`, `files`와 AI 답). 플랫폼은 `head`로 PR을 엽니다.
+8. platform 모듈을 `4feac3a`에서 ADR 0042 계약이 들어간 platform main(`91cbe7a`)으로 올렸습니다.
+
+**어떻게 확인했나**
+
+moimroom-legacy처럼 app, postgres, caddy를 compose로 돌리고 파일은 외부 S3에 두는 레포, 그 조사 결과, 가짜 AI 응답(`llm/testdata/onboard`)과 로컬 git 원격으로 확인했습니다.
+
+| 경우 | 결과 |
+| --- | --- |
+| 가짜 AI가 `platform.yaml`과 `hopcharlie.Dockerfile`을 쓰고 mapping 4개로 답함 (중간에 기존 `Dockerfile`에 쓰려 함) | 쓰기 한 번 거절, `Dockerfile` 그대로, `appspec` 검사 통과(public `app`, `postgres`, `s3`), `hopcharlie/onboard`에 커밋 하나, 기본 브랜치 대비 `A` 두 개뿐, push 한 번, 결과 JSON의 `head`가 그 커밋 |
+| 시험 배포 기록을 준 재시도 | 있던 브랜치 위에 fast-forward, 기록은 AI에 가고 비밀번호는 가림 |
+| 기존 파일, 대소문자만 다른 이름, `.dockerignore`, `.env`, `compose.override.yaml`, `.github` 아래 새 파일에 쓰기 | 모두 거절, 파일 그대로 |
+| 있던 `hopcharlie/onboard`가 `compose.yaml`을 고침 | AI 호출과 push 없이 멈춤 |
+| 기본 브랜치에 `platform.yaml`이 있음, AI가 `deployable: false` | push 없이 결과 JSON, 종료 코드 3 |
+| 앱 이름, 빠진 리소스, 빠진 compose 서비스, 조사에 없거나 `excluded`인 시크릿, 없는 서비스로 옮김 | 세 번 묻고 실패 |
+| 커밋 차이에 수정, 삭제, 심볼릭 링크, 허용하지 않는 새 이름 | push하지 않음 |
+
+`go vet`, gofmt, `go test ./...`가 통과했습니다. 실제 Claude, 플랫폼, GitHub으로는 돌려 보지 못했습니다(플랫폼의 온보딩 구현과 push 토큰 허가가 아직 없음).
 
 ---
 

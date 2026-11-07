@@ -1,0 +1,22 @@
+name: moimroom-legacy
+services:
+  - name: app
+    dockerfile: hopcharlie.Dockerfile
+    port: 8080
+    healthCheck: /healthz
+    public: true
+    memory: "512Mi"
+    env:
+      AWS_ACCESS_KEY_ID: "$(S3_ACCESS_KEY)"
+      AWS_REGION: "$(S3_REGION)"
+      AWS_SECRET_ACCESS_KEY: "$(S3_SECRET_KEY)"
+      DB_HOST: "$(PGHOST)"
+      DB_NAME: "$(PGDATABASE)"
+      DB_PASSWORD: "$(PGPASSWORD)"
+      DB_PORT: "$(PGPORT)"
+      DB_USER: "$(PGUSER)"
+resources:
+  - name: db
+    type: postgres
+  - name: files
+    type: s3

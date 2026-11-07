@@ -36,6 +36,7 @@ HopCharlie의 AI(Plan 작성, 리허설 실패 진단, 수정안)와 샌드박�
 | v25 | [#29](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/29) | 11/5 14:21 | AI 계획을 리포트 옆 파일로 저장 |
 | v26 | [#33](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/33) | 11/5 17:58 | 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie`로 push (`hopai prepare`) |
 | v29 | [#36](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/36) | 11/6 01:18 | `hopai prepare`가 플랫폼이 주지 못하는 것(MySQL, 볼륨 등)을 찾으면 push하지 않고 알림, 새 `platform.yaml` 계약 반영 |
+| v30 | [#PRNUM](https://github.com/2026-Softbank-Hackathon-Charlie/ai-sandbox/pull/PRNUM) | 머지 전 | compose로 돌던 앱의 레포에 계약 파일을 새 파일로만 더해 `hopcharlie/onboard`로 push (`hopai onboard`, platform ADR 0042) |
 
 # HopCharlie AI·샌드박스 사용 설계 (D 영역 초안)
 
@@ -363,10 +364,10 @@ Go 함수로 구현하고, 함수 안에서 허용 범위를 다시 검사한다
 | `plan` | AI 출력(엔진 Plan + 매니페스트 + 근거) 검사, 진단 수정안 검사와 사본 적용, 제출 본문과 후보 digest | 3, 7 |
 | `mask` | AI와 플랫폼에 보내기 전 비밀값 가리기 | 4 |
 | `agentlog` | 플랫폼 에이전트 세션 기록 (`/v1/agent/sessions`) | 4 |
-| `llm` | 도구를 쓰는 에이전트 (계획, 진단, 배포 준비, 검사에 걸리면 대화를 이어 재요청), 읽기 전용 조사 도구, 클론 하나만 보는 레포 도구와 배포 준비 검사 | 4, 5 |
+| `llm` | 도구를 쓰는 에이전트 (계획, 진단, 배포 준비, 검사에 걸리면 대화를 이어 재요청), 읽기 전용 조사 도구, 클론 하나만 보는 레포 도구와 배포 준비 검사, 온보딩 계약 검사(새 파일만 쓰기) | 4, 5 |
 | `sandbox` | 샌드박스 생성·삭제, 1시간 토큰, 만료 정리, CNPG 모드, 격리 검사 | 6 |
 | `rehearsal` | 샌드박스에서 실제 엔진으로 리허설, 실패 시 진단과 재실행, 리포트(`candidate`, `coverage`, `cleanup`, `warnings`) | 7 |
-| `cmd/hopai` | 전체 흐름 (초안 → 계획 → 제출 → 리허설 → 후보 일치 확인 → 첨부). `hopai prepare`: 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie` 브랜치로 push (푸시 토큰, git 클론과 커밋, 지난 배포 기록) | 2, 12 |
+| `cmd/hopai` | 전체 흐름 (초안 → 계획 → 제출 → 리허설 → 후보 일치 확인 → 첨부). `hopai prepare`: 들여온 오픈소스 레포를 AI가 고쳐 `hopcharlie` 브랜치로 push (푸시 토큰, git 클론과 커밋, 지난 배포 기록). `hopai onboard`: compose로 돌던 앱의 레포에 계약 파일을 새 파일로만 더해 `hopcharlie/onboard`로 push | 2, 12 |
 | `cmd/sandboxctl` | 샌드박스를 손으로 만들고 검사하고 지우는 도구 | 6 |
 
 ### 실행
@@ -424,6 +425,49 @@ git은 운영자 설정 없이 돌린다. 레포가 git에 명령을 실행시�
 - 종료 코드는 성공 0, 실패 1, 사용법 2로 `hopai run`과 같고, AI가 플랫폼이 주지 못하는 것을 찾아 push하지 않았으면 3이다(표준 오류에 `중단:`으로 시작하는 줄). 전체 제한 시간은 30분이다.
 - `git` 2.23 이상(`git switch`)이 PATH에 있어야 한다.
 
+### 온보딩 계약 (`hopai onboard`)
+
+플랫폼 밖 VM 한 대에서 docker compose로 돌던 앱을 옮길 때(platform ADR 0042 "2. 계약 PR"), 그 레포에 플랫폼 계약 파일을 새 파일로만 더해 `hopcharlie/onboard` 브랜치로 push한다. 플랫폼이 온보딩의 `patching`, `checking` 상태에서 Job(`KIND=onboard`)으로 띄우고, PR은 플랫폼이 App 토큰으로 연다. hopai는 PR을 만들지 않는다.
+
+```bash
+export ANTHROPIC_API_KEY=...   PLATFORM_URL=...   PLATFORM_TOKEN=...   # agent 토큰
+export REPO=<owner/name>  FACTS_FILE=/onboarding/facts.json  ONBOARDING=onb-<hex 12자>  BRANCH=hopcharlie/onboard
+# 재시도 때만: CHECK_LOG_FILE=/onboarding/check.log
+go run ./cmd/hopai onboard            # 플래그로도 줄 수 있다: -repo -facts -check-log -onboarding
+```
+
+입력은 환경 변수와 파일이다(platform `internal/onboard`). `FACTS_FILE`은 플랫폼 조사 결과 `facts.Facts`(platform `pkg/onboard/facts`) JSON이고 비밀값이 없다. 환경 변수는 이름, 비밀값 여부, 옮기지 않는 이유(`excluded`)만 있다. `CHECK_LOG_FILE`은 실패한 시험 배포 기록의 마지막 32 KiB이고, hopai는 비밀값을 가리고 뒤 16 KiB만 AI에 넣는다. `KIND`가 `onboard`가 아니거나 `BRANCH`가 `hopcharlie/onboard`가 아니면 시작하지 않는다(종료 코드 2).
+
+하는 일:
+
+1. 조사 결과를 읽는다. 버전이 `facts.Version`보다 높거나, 레포가 `REPO`와 다르거나, GitHub App이 설치되지 않았거나, 차단 사유(`report.blockers`)가 있으면 멈춘다.
+2. 푸시 토큰을 받는다(`POST /v1/github/push-tokens`). 플랫폼은 온보딩이 `patching`이나 `checking`인 레포에 `contents:write` 하나로 준다.
+3. 기본 브랜치를 얕게 클론한다. `hopcharlie/onboard`가 원격에 있으면(시험 배포 실패 뒤 재시도) 그 브랜치를 받아 그 위에서 이어서 고친다. 이때 그 브랜치가 기본 브랜치에 새 파일만 더한 것인지 트리끼리 비교해 보고, 아니면(기본 브랜치가 그사이 바뀌었거나 누가 고침) AI를 부르지 않고 멈춘다. 기본 브랜치 이름이 `hopcharlie/onboard`이면 멈춘다. 기본 브랜치에 `platform.yaml`이 이미 있으면 AI 없이 "계약을 더할 수 없음"으로 끝낸다(플랫폼은 맞는 `platform.yaml`이면 `patching`을 건너뛰므로, 여기 왔으면 맞지 않는 것이다).
+4. AI가 레포 도구로 compose 파일과 Dockerfile을 읽고 새 파일을 쓴다(`llm.Onboard`, 세션 종류 `other`, 제목에 레포와 온보딩 ID). 입력은 조사 결과(테이블, 인덱스 목록은 뺌), compose 서비스 이름(VM 컨테이너의 서비스와 레포 compose 파일의 `services` 키), 파일 목록, 재시도면 시험 배포 기록이다. 지시문은 prepare와 같은 `platform.yaml` 규칙과 실행 환경에 옮기는 법을 더했다: 이름은 조사 결과의 `app`, 리버스 프록시가 넘기던 `target.publicService`를 public으로, TLS 리버스 프록시(caddy 등)는 옮기지 않음, compose 안의 PostgreSQL은 `postgres` 리소스로, 외부 S3는 `s3` 리소스로, 앱이 다른 이름으로 읽는 접속 정보는 env에서 `$(PGHOST)`, `$(S3_ACCESS_KEY)` 같은 플랫폼 변수로 잇기, 비밀값이거나 값이 레포에 없는 환경 변수는 `secrets`에 이름만(플랫폼이 원래 값을 넣는다).
+5. 새 파일만 더하는 것을 실행기가 두 번 막는다.
+   - 쓰기 도구: 기본 브랜치 커밋의 모든 경로(`git ls-tree`, 대소문자 무시)에는 쓰지 못한다. 새 파일도 레포 루트의 `platform.yaml`과 이름이 `hopcharlie.`로 시작하는 파일(`hopcharlie.Dockerfile`, `app/hopcharlie.Dockerfile`, `hopcharlie.entrypoint.sh` 등)만 된다. `.dockerignore`, `.env`, `compose.override.yaml`처럼 docker compose와 docker build가 저절로 읽어 원본 배포를 바꿀 수 있는 이름과 `.github` 아래는 새로 만들지도 못한다. 빌드에서 뺄 것은 `hopcharlie.Dockerfile.dockerignore`(BuildKit이 그 Dockerfile에만 쓰는 파일)에 둔다. 이 브랜치에서 전에 더한 파일은 다시 고칠 수 있다.
+   - 커밋: 커밋한 뒤 기본 브랜치 커밋과 새 커밋의 트리 차이(`git diff --raw`)가 모두 추가(`A`)이고 일반 파일(100644, 100755)이며 위 이름 규칙에 맞는지 본다. 수정(`M`), 삭제(`D`), 종류 바뀜(`T`)이 하나라도 있으면 push하지 않는다. prepare와 같은 커밋 검사(검사한 바이트와 같은지)도 한다.
+6. 답을 prepare와 같은 검사(`appspec.Check`, 포트, Dockerfile, 비밀값, `$(이름)` 참조)에 더해 조사 결과와 맞는지 본다. `name`이 조사 결과의 `app`인지, public 서비스가 있는지, 조사에 DB가 있으면 `postgres` 리소스가, VM 밖 저장소가 있으면 `s3` 리소스가 있는지, `secrets`의 이름이 조사한 컨테이너 env에 있고 `excluded`가 아닌지, `mapping`이 compose 서비스를 모두 적었는지, `platformService`와 `resource`가 `platform.yaml`에 있고 둘 중 하나만 썼는지, 리버스 프록시가 넘기던 서비스를 public 서비스로 옮겼는지 본다. 걸리면 걸린 항목을 넣어 다시 묻는다(2회).
+7. 기존 파일이나 앱 코드를 고쳐야만 계약을 맞출 수 있으면 AI가 `deployable: false`와 `blockers`로 답하고, 커밋과 push 없이 끝난다(종료 코드 3).
+8. 통과하면 `HopCharlie AI`로 커밋하고(본문에 온보딩 ID와 AI 세션 ID) `refs/heads/hopcharlie/onboard`에만 fast-forward로 push한다. 새로 만들거나 이어 붙이기만 하고, 강제 push와 기본 브랜치 push는 하지 않는다.
+
+표준 출력에는 결과 JSON 한 줄만 쓴다(사람이 읽는 기록과 에이전트 기록은 표준 오류). 플랫폼은 `head`로 PR을 열고 나머지를 리포트에 쓴다.
+
+| 키 | 내용 |
+| --- | --- |
+| `kind` | `"onboard"` |
+| `onboarding`, `repo`, `branch` | 온보딩 ID, 레포(GitHub의 지금 이름), `hopcharlie/onboard` |
+| `base` | 클론한 기본 브랜치 커밋 |
+| `head` | push한 커밋(PR head). push하지 않았으면 없다 |
+| `session` | AI 에이전트 세션 ID |
+| `files` | 이 브랜치가 기본 브랜치에 더한 새 파일 전체 |
+| `deployable`, `blockers[{need, reason}]` | 계약을 더했는지, 못 더한 이유 |
+| `summary`, `commitMessage`, `notes` | 한국어 요약, 커밋 제목, 운영자가 알아야 할 것 |
+| `secrets[{name, purpose}]` | 플랫폼이 원래 값을 넣을 앱 시크릿 이름 |
+| `mapping[{composeService, platformService, resource, reason}]` | compose 서비스마다 옮긴 곳. `platformService`와 `resource` 중 하나만 있고, 둘 다 비면 옮기지 않은 것(리버스 프록시) |
+
+AI 답의 JSON Schema는 `llm/schema/onboard.json`이다. 종료 코드는 prepare와 같다(성공 0, 실패 1, 사용법 2, 계약을 더할 수 없음 3). git은 prepare와 같이 운영자 설정 없이 돌리고, 토큰도 같은 방식으로만 넘긴다.
+
 ### 테스트
 
 ```bash
@@ -434,6 +478,7 @@ go test ./...
 - 형식이 깨진 AI 응답과 규칙을 어긴 응답(대상 DSN 바꾸기, fence 비교 끄기, 슈퍼유저 키 등) 사례가 들어 있다.
 - `.github/workflows/ci.yml`이 PR과 main에서 `go vet`, gofmt, `go test ./...`를 조직 self-hosted runner로 돌린다. 비공개 모듈(platform, migration-engine)을 받으려면 저장소 시크릿 `MODULE_READ_TOKEN`이 필요하다. 실제 클러스터가 필요한 `cluster` 태그 테스트는 CI에서 돌리지 않는다.
 - `hopai prepare`: 레포 도구가 막아야 하는 경로(`..`, 절대 경로, `.git`, 클론 밖을 가리키는 심볼릭 링크, `.gitattributes` 같은 git 설정 파일, 크기와 횟수 상한), 검사에 걸리면 세 번 묻고 실패, 로컬 맨 레포를 원격으로 한 클론부터 push까지(새 브랜치, 다시 실행하면 fast-forward, 그사이 다른 push가 있으면 거절, 이름이 바뀐 레포), git http-backend로 토큰이 자격 증명 도우미로만 가는지와 운영자 설정의 `store`가 저장하지 않는지, 다른 호스트에는 토큰을 주지 않는지, 토큰이 출력과 에이전트 기록과 git 명령줄과 AI 요청에 없는지 본다. git-lfs를 쓰게 만든 레포(`.gitattributes`, 공격자 주소의 `.lfsconfig`)와 git-lfs를 켠 운영자 설정을 함께 넣어도 공격자 주소로 요청이 0번이고 push한 내용이 검사한 바이트와 같은지, 운영자 설정의 `pushInsteadOf`, `insteadOf`(SSH), 훅, 서명, 홈의 `.netrc`, 임시 디렉터리를 둘러싼 레포의 설정이 끼어들지 못하는지도 본다. 커밋 검사(심볼릭 링크로 커밋된 `platform.yaml`, 서브모듈 안이라 빠진 파일, 대문자 `PLATFORM.YAML`), 서브모듈 안 쓰기 차단, 클론 전 크기 검사, 비밀값 판정(설정값과 `$(이름)` 참조는 통과), 터미널 출력의 제어 문자 빼기도 테스트가 있다. AI가 `deployable: false`로 답하면 쓰다 만 파일이 있어도 다시 묻지 않고, 커밋과 push 없이 이유를 출력하고 플랫폼 세션에 남기고 종료 코드 3으로 끝나는지, docker-doom처럼 서비스 하나짜리 앱에 `deployable: true`로 답하면 지금처럼 push하는지 본다. `deployable`과 `blockers`가 서로 맞지 않는 답, env와 시크릿의 `PGHOST`, `PGPASSWORD` 같은 플랫폼 이름은 걸린다. 지시문의 예시 `platform.yaml`(port 없는 워커, `memory`, `cpu`, `$(이름)` 참조)은 검사를 통과하고, `memory` 범위 밖, 밀리코어 정수가 아닌 `cpu`, port 없는 public, 롤링 업데이트 중 memory 합 초과는 `appspec` 검사로 걸린다. 서비스 둘이 같은 Dockerfile을 써도 통과한다. `$(이름)` 참조는 풀리는 것(postgres 변수, `PORT`, 답의 시크릿, 앞선 키)은 통과하고, 없는 이름, postgres 없는 `$(PGHOST)`, 뒤에 오는 키는 걸린다. AI가 배포할 수 없다고 답할 때 전에 만든 `hopcharlie` 브랜치가 있어도 그대로인지 본다. 테스트는 개발자 컴퓨터의 git 설정을 읽지 않게 `TestMain`에서 `GIT_CONFIG_NOSYSTEM`과 빈 `GIT_CONFIG_GLOBAL`을 둔다. `git`이 없으면 git을 쓰는 테스트를, git-lfs가 없으면 LFS 테스트를, 심볼릭 링크를 만들 수 없으면 링크 테스트만 건너뛴다. 실제 GitHub에 닿는지는 `HOPAI_GITHUB_TEST=1 go test -run TestGitReachesGitHub ./cmd/hopai/`로 본다.
+- `hopai onboard`: moimroom-legacy처럼 app, postgres, caddy를 compose로 돌리고 파일은 외부 S3에 두는 레포와 조사 결과, 가짜 AI 응답(`llm/testdata/onboard`)으로 본다. 그 응답이 `appspec` 검사를 통과하는 `platform.yaml`(public `app`, `postgres`, `s3`, env의 `$(PGHOST)`, `$(S3_ACCESS_KEY)` 참조)이 되는지, 기존 파일(`compose.yaml`, `Dockerfile`, `.github/workflows/deploy.yml`, 대소문자만 다른 이름 포함)과 `.dockerignore`, `.env`, `compose.override.yaml`, `.github` 아래 새 파일에 쓰기가 거절되고 파일이 그대로인지, 조사 결과와 맞지 않는 답(앱 이름, 빠진 리소스, 빠진 compose 서비스, 조사에 없거나 `excluded`인 시크릿, 없는 서비스로 옮김)이 세 번 묻고 실패하는지 본다. 로컬 맨 레포로는 `hopcharlie/onboard`에만 한 번 push하고 기본 브랜치 대비 새 파일만 있는지, 결과 JSON의 `head`가 그 커밋인지, 시험 배포 기록을 준 재시도가 fast-forward로 이어 가고 기록의 비밀번호는 가려지는지, 있던 브랜치가 기존 파일을 고쳤으면 AI 없이 멈추는지, 기본 브랜치에 `platform.yaml`이 있거나 AI가 `deployable: false`로 답하면 push 없이 종료 코드 3인지, 커밋 검사가 수정, 삭제, 심볼릭 링크, 허용하지 않는 새 이름을 막는지 본다.
 
 실제 클러스터(CNPG 설치)에서 리허설을 돌리는 테스트는 따로 있다. AI 없이 예시 계획으로 엔진만 실제로 돌린다.
 

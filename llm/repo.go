@@ -54,6 +54,9 @@ type repoDir struct {
 	writes int
 	// orig는 처음 쓰기 전 파일의 SHA-256이다 (없던 파일은 nil). 작업 트리가 바뀌었는지 볼 때 쓴다.
 	orig map[string]*[32]byte
+	// existingFiles가 nil이 아니면(onboard) 새 파일만 쓸 수 있다. 기본 브랜치에 있는 경로(소문자로 바꾼 것)는 고칠 수 없고,
+	// 새 파일도 OnboardWritable이 받는 이름만 된다.
+	existingFiles map[string]bool
 }
 
 func openRepo(dir string, index RepoIndex) (*repoDir, error) {
@@ -353,6 +356,16 @@ func (r *repoDir) write(asked, content string) (any, error) {
 	}
 	if refused {
 		return nil, fmt.Errorf("%w: .gitattributes, .lfsconfig, .gitmodules, .github/workflows 아래는 쓰지 않음 (git과 GitHub이 설정이나 실행할 것으로 읽음): %q", ErrBlocked, clean)
+	}
+	if r.existingFiles != nil {
+		for _, p := range []string{clean, filepath.ToSlash(rel)} {
+			if r.existingFiles[strings.ToLower(p)] {
+				return nil, fmt.Errorf("%w: 기본 브랜치에 있는 파일은 고치지 않음 (원본 배포가 쓰는 파일일 수 있음). 새 파일만 더한다: %q", ErrBlocked, clean)
+			}
+			if err := OnboardWritable(p); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if err := r.checkIndex(clean); err != nil {
 		return nil, err

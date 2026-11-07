@@ -13,6 +13,7 @@
 // 운영 DB 비밀번호는 받지 않는다. 원본 실측은 플랫폼이 초안과 함께 한다 (platform #47).
 //
 // hopai prepare는 들여온 오픈소스 레포를 AI가 고쳐 hopcharlie 브랜치로 push한다 (prepare.go).
+// hopai onboard는 compose로 돌던 앱의 레포에 계약 파일을 새 파일로만 더해 hopcharlie/onboard 브랜치로 push한다 (onboard.go).
 //
 // 예:
 //
@@ -59,9 +60,13 @@ func main() {
 	if len(os.Args) >= 2 && os.Args[1] == "prepare" {
 		os.Exit(prepareMain(os.Args[2:]))
 	}
+	if len(os.Args) >= 2 && os.Args[1] == "onboard" {
+		os.Exit(onboardMain(os.Args[2:]))
+	}
 	if len(os.Args) < 2 || os.Args[1] != "run" {
 		fmt.Fprintln(os.Stderr, "사용법: hopai run -app <앱> -from <원본 환경> -to <대상 환경> -env <환경>=<kubeconfig>[@<context>] ... -sandbox-kubeconfig <파일> [옵션]")
 		fmt.Fprintln(os.Stderr, "        "+strings.TrimPrefix(prepareUsage, "사용법: "))
+		fmt.Fprintln(os.Stderr, "        "+strings.TrimPrefix(onboardUsage, "사용법: "))
 		os.Exit(2)
 	}
 	fs := flag.NewFlagSet("run", flag.ExitOnError)

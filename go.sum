@@ -8,6 +8,8 @@ github.com/2026-Softbank-Hackathon-Charlie/migration-engine v0.0.0-2026110709580
 github.com/2026-Softbank-Hackathon-Charlie/migration-engine v0.0.0-20261107095807-f520e9f754c7/go.mod h1:6T6kxe10SsazZmS5ex/qZ74TWcy7XIVo0d2IGtMrvx8=
 github.com/2026-Softbank-Hackathon-Charlie/platform v0.0.0-20261107101412-4feac3a8f1fb h1:fjLUMVme2kHslDhNNmiY+Gd2OjbjhuZbtqgvqKrvOIs=
 github.com/2026-Softbank-Hackathon-Charlie/platform v0.0.0-20261107101412-4feac3a8f1fb/go.mod h1:X1DR9xeDhAb0k3vb6ury7uqP35s3x0r+jKJCPr+RRdM=
+github.com/2026-Softbank-Hackathon-Charlie/platform v0.0.0-20261107113442-91cbe7a69c4f h1:reLH1NwLaMuT54T0GylNkxdjX/KkE/qq6MjNvJUUGeg=
+github.com/2026-Softbank-Hackathon-Charlie/platform v0.0.0-20261107113442-91cbe7a69c4f/go.mod h1:X1DR9xeDhAb0k3vb6ury7uqP35s3x0r+jKJCPr+RRdM=
 github.com/anthropics/anthropic-sdk-go v1.84.0 h1:mnAhggc5H5A98JYmhQELT+j4J89PYBFKnnSvUTNwNd8=
 github.com/anthropics/anthropic-sdk-go v1.84.0/go.mod h1:GThfYqPJoaQ/6pmibCI98Cr4y5su2FXMUHn3NrSSnIc=
 github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5 h1:0CwZNZbxp69SHPdPJAN/hZIm0C4OItdklCFmMRWYpio=
