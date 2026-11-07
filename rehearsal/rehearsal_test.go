@@ -115,6 +115,9 @@ func TestTargetManifestKeepsWhatIsRehearsed(t *testing.T) {
 
 func TestSandboxPlanDropsProductionPaths(t *testing.T) {
 	p := proposal(t)
+	// Explicit engine thresholds survive sandbox adaptation; omitted fence
+	// budgets are covered separately against the engine's Parse defaults.
+	p.Plan.Thresholds.MaxFenceGate.Duration = 7 * time.Second
 	sp := SandboxPlan(&p.Plan, "sandbox-moimroom-ab12", "/tmp/k", "/tmp/target.yaml", "postgres://a:b@127.0.0.1:1/app", "postgres://a:b@127.0.0.1:2/app")
 	if err := sp.Validate(); err != nil {
 		t.Fatal(err)

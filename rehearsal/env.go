@@ -285,6 +285,12 @@ func SandboxPlan(p *eplan.Plan, ns, kubeconfig, manifestPath, srcDSN, dstDSN str
 	sp.Target = eplan.Endpoint{Env: p.Target.Env, Kubeconfig: kubeconfig, Context: "sandbox", Namespace: ns, Cluster: p.Target.Cluster, DSN: dstDSN, Manifest: manifestPath}
 	sp.Files = nil
 	sp.Gateway = eplan.GatewaySpec{Mode: "none", SourceBackend: p.Source.Env, TargetBackend: p.Target.Env}
+	// Rehearsal passes a struct directly to engine.New instead of plan.Parse.
+	// Match the engine's omitted/zero default (ADR 0013); a zero gate budget
+	// would reject every nonzero rehearsal before the write hold.
+	if sp.Thresholds.MaxFenceGate.Duration == 0 {
+		sp.Thresholds.MaxFenceGate.Duration = 20 * time.Second
+	}
 	sp.Verify = p.Verify
 	sp.Verify.Schemas = fixtureSchemas(p.Verify.Schemas)
 	sp.Verify.Tables = fixtureTables(sp.Verify.Schemas)

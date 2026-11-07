@@ -172,6 +172,9 @@ func CheckAgainstDraft(p, draft *eplan.Plan) Issues {
 		}
 	}
 	same("plan.id", p.ID, draft.ID)
+	// This permission belongs to the platform's registered DB group. The
+	// model may neither remove an approved opt-in nor enable one itself.
+	same("plan.allowSourceRewire", p.AllowSourceRewire, draft.AllowSourceRewire)
 	same("plan.source", p.Source, draft.Source)
 	for _, f := range []struct {
 		path      string
