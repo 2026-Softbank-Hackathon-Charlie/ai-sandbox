@@ -9,6 +9,7 @@
       "required": ["id", "source", "target", "gateway", "verify", "thresholds"],
       "properties": {
         "id": { "type": "string" },
+        "allowSourceRewire": { "type": "boolean", "description": "Server-owned opt-in; must match the platform draft exactly." },
         "source": { "$ref": "#/$defs/endpoint" },
         "target": { "$ref": "#/$defs/endpoint" },
         "files": {

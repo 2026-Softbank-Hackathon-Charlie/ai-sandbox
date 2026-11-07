@@ -105,7 +105,7 @@ func (a *Agent) Plan(ctx context.Context, in PlanInput) (*plan.Proposal, string,
 	}
 	return run(ctx, a, task[*plan.Proposal]{
 		session: agentlog.Start{Kind: agentlog.KindPlan, Title: in.App + " 이전 계획 (" + in.Draft.Source.Env + " → " + in.Draft.Target.Env + ")"},
-		system:  planSystem,
+		system:  planSystem + "\nallowSourceRewire is owned by the platform. Copy its value from the draft unchanged; never enable, disable or remove an enabled opt-in.",
 		user:    "다음 Plan 초안으로 이전 계획을 작성해라.\n\n<draft>\n" + string(draft) + "\n</draft>" + sourceStatsBlock(in.Source) + sourceClusterBlock(in.SourceCluster),
 		tools:   in.Tools,
 		schema:  proposalSchema,
@@ -117,6 +117,7 @@ func (a *Agent) Plan(ctx context.Context, in PlanInput) (*plan.Proposal, string,
 			// Only restore secrets after the model's immutable fields match the safe draft.
 			manifest := p.Plan.Target.Manifest
 			p.Plan.ID = in.Draft.ID
+			p.Plan.AllowSourceRewire = in.Draft.AllowSourceRewire
 			p.Plan.Source = in.Draft.Source
 			p.Plan.Target = in.Draft.Target
 			p.Plan.Target.Manifest = manifest
