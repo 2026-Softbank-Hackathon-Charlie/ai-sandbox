@@ -238,7 +238,7 @@ func TestOnboardNotDeployableDoesNotPush(t *testing.T) {
 
 // TestOnboardChangesOK는 기본 브랜치 대비 바뀐 것이 허용된 새 일반 파일일 때만 push하는지 본다.
 func TestOnboardChangesOK(t *testing.T) {
-	ok := []gitChange{{"A", "platform.yaml", "100644"}, {"A", "app/hopcharlie.Dockerfile", "100644"}, {"A", "hopcharlie.entrypoint.sh", "100755"}}
+	ok := []gitChange{{"A", "platform.yaml", "100644"}, {"A", "hopcharlie.web.Dockerfile", "100644"}, {"A", "hopcharlie/entrypoint.sh", "100755"}}
 	if files, err := onboardChangesOK(ok, "커밋"); err != nil || len(files) != 3 {
 		t.Fatalf("%v %v", files, err)
 	}
@@ -246,6 +246,7 @@ func TestOnboardChangesOK(t *testing.T) {
 		{"M", "compose.yaml", "100644"}, {"D", "Dockerfile", "000000"}, {"T", "platform.yaml", "120000"},
 		{"A", "hopcharlie.Dockerfile", "120000"}, {"A", ".dockerignore", "100644"}, {"A", ".github/workflows/x.yml", "100644"},
 		{"A", "compose.override.yaml", "100644"}, {"A", "app/platform.yaml", "100644"},
+		{"A", "hopcharlie.go", "100644"}, {"A", "conf.d/hopcharlie.conf", "100644"}, {"A", "app/hopcharlie.Dockerfile", "100644"},
 	} {
 		if _, err := onboardChangesOK([]gitChange{c}, "커밋"); err == nil {
 			t.Errorf("%v: 막아야 함", c)
@@ -330,5 +331,107 @@ func TestOnboardRerunUnchanged(t *testing.T) {
 	}
 	if len(pushArgs(*r3.argv)) != 0 || gitT(t, bare2, "rev-parse", "hopcharlie/onboard") != before || r3.stdout.Len() != 0 {
 		t.Fatal("push하지 않고 결과도 쓰지 않아야 함")
+	}
+}
+
+// firstOnboard는 hopcharlie/onboard를 처음 만든다 (가짜 AI 응답 그대로).
+func firstOnboard(t *testing.T, github string, plat *fakePlatformServer) {
+	t.Helper()
+	r := newPrepareRun(t, github, plat,
+		write("platform.yaml", onboardFile(t, "reply/platform.yaml")),
+		write("hopcharlie.Dockerfile", onboardFile(t, "reply/hopcharlie.Dockerfile")),
+		aiReply{text: onboardFile(t, "reply/answer.json")},
+	)
+	if err := runOnboard(context.Background(), r.env, onboardArgsFor(t, "")); err != nil {
+		t.Fatalf("%v\n%s", err, r.stderr)
+	}
+}
+
+// TestOnboardBranchWithUncheckedFile은 있던 브랜치에 platform.yaml이 쓰지 않고 AI가 읽지도 쓰지도 않은 새 파일이 있으면
+// 고칠 것이 없는 재실행이어도 push하지 않고 브랜치를 다시 시작하라는 종료 코드 4로 끝나는지 본다.
+func TestOnboardBranchWithUncheckedFile(t *testing.T) {
+	github, bare, work := onboardRemote(t)
+	gitT(t, work, "switch", "--quiet", "-c", "hopcharlie/onboard")
+	for p, c := range map[string]string{"platform.yaml": onboardFile(t, "reply/platform.yaml"), "hopcharlie.Dockerfile": onboardFile(t, "reply/hopcharlie.Dockerfile"), "hopcharlie/old.sh": "echo old\n"} {
+		_ = os.MkdirAll(filepath.Dir(filepath.Join(work, p)), 0o755)
+		_ = os.WriteFile(filepath.Join(work, p), []byte(c), 0o644)
+	}
+	gitT(t, work, "add", "-A")
+	gitT(t, work, "commit", "--quiet", "-m", "branch")
+	gitT(t, work, "push", "--quiet", bare, "hopcharlie/onboard")
+	before := gitT(t, bare, "rev-parse", "hopcharlie/onboard")
+	r := newPrepareRun(t, github, &fakePlatformServer{}, aiReply{tool: "read_file", input: `{"path":"platform.yaml"}`}, aiReply{text: onboardFile(t, "reply/answer.json")})
+	err := runOnboard(context.Background(), r.env, onboardArgsFor(t, ""))
+	if code := onboardExit(io.Discard, err); code != exitRestartBranch || !strings.Contains(err.Error(), "hopcharlie/old.sh") {
+		t.Fatalf("종료 코드 %d: %v", code, err)
+	}
+	if !strings.Contains(r.ai.requests[0], "hopcharlie/old.sh") {
+		t.Fatal("브랜치가 더한 파일 목록을 AI에 알려야 함")
+	}
+	if len(pushArgs(*r.argv)) != 0 || gitT(t, bare, "rev-parse", "hopcharlie/onboard") != before || r.stdout.Len() != 0 {
+		t.Fatal("push와 결과가 없어야 함")
+	}
+}
+
+// TestOnboardCheckLogNeedsChange는 시험 배포가 실패한 재시도에서 AI가 아무것도 고치지 않으면 성공하지 않는지 본다.
+func TestOnboardCheckLogNeedsChange(t *testing.T) {
+	github, bare, _ := onboardRemote(t)
+	plat := &fakePlatformServer{}
+	firstOnboard(t, github, plat)
+	before := gitT(t, bare, "rev-parse", "hopcharlie/onboard")
+	answer := onboardFile(t, "reply/answer.json")
+	r := newPrepareRun(t, github, plat, aiReply{text: answer}, aiReply{text: answer}, aiReply{text: answer})
+	err := runOnboard(context.Background(), r.env, onboardArgsFor(t, "Error: crash loop"))
+	if code := onboardExit(io.Discard, err); code != 1 || !strings.Contains(err.Error(), "레포를 바꾸지 않았음") {
+		t.Fatalf("종료 코드 %d: %v", code, err)
+	}
+	if len(pushArgs(*r.argv)) != 0 || gitT(t, bare, "rev-parse", "hopcharlie/onboard") != before {
+		t.Fatal("push하지 않아야 함")
+	}
+}
+
+// TestOnboardRemoteAdvancedBeforePush는 클론한 뒤 push 전에 누가 hopcharlie/onboard에 push하면 강제로 덮지 않고 다시 실행하라는
+// 종료 코드 5로 끝나는지 본다.
+func TestOnboardRemoteAdvancedBeforePush(t *testing.T) {
+	github, bare, work := onboardRemote(t)
+	plat := &fakePlatformServer{}
+	firstOnboard(t, github, plat)
+	other := func() {
+		gitT(t, work, "fetch", "--quiet", bare, "hopcharlie/onboard")
+		gitT(t, work, "switch", "--quiet", "-C", "hopcharlie/onboard", "FETCH_HEAD")
+		_ = os.WriteFile(filepath.Join(work, "hopcharlie.web.Dockerfile"), []byte("FROM scratch\n"), 0o644)
+		gitT(t, work, "add", "-A")
+		gitT(t, work, "commit", "--quiet", "-m", "other")
+		gitT(t, work, "push", "--quiet", bare, "hopcharlie/onboard")
+	}
+	r := newPrepareRun(t, github, plat,
+		aiReply{tool: "read_file", input: `{"path":"platform.yaml"}`, before: nil},
+		write("hopcharlie.Dockerfile", onboardFile(t, "reply/hopcharlie.Dockerfile")+"ENV HOME=/tmp\n"),
+		aiReply{text: onboardFile(t, "reply/answer.json"), before: other},
+	)
+	err := runOnboard(context.Background(), r.env, onboardArgsFor(t, ""))
+	if code := onboardExit(io.Discard, err); code != exitRerun || !strings.Contains(err.Error(), "fast-forward가 거절") {
+		t.Fatalf("종료 코드 %d: %v", code, err)
+	}
+	if got := gitT(t, bare, "log", "-1", "--format=%s", "hopcharlie/onboard"); got != "other" {
+		t.Fatalf("다른 push를 덮으면 안 됨: %s", got)
+	}
+}
+
+// TestOnboardDefaultAdvanced는 브랜치를 만든 뒤 기본 브랜치가 바뀌면 AI 없이 브랜치를 다시 시작하라는 종료 코드 4로 끝나는지 본다.
+func TestOnboardDefaultAdvanced(t *testing.T) {
+	github, bare, work := onboardRemote(t)
+	plat := &fakePlatformServer{}
+	firstOnboard(t, github, plat)
+	_ = os.WriteFile(filepath.Join(work, "README.md"), []byte("# changed\n"), 0o644)
+	gitT(t, work, "commit", "--quiet", "-am", "main moved")
+	gitT(t, work, "push", "--quiet", bare, "main")
+	r := newPrepareRun(t, github, plat)
+	err := runOnboard(context.Background(), r.env, onboardArgsFor(t, ""))
+	if code := onboardExit(io.Discard, err); code != exitRestartBranch || !strings.Contains(err.Error(), `"README.md"가 바뀜`) {
+		t.Fatalf("종료 코드 %d: %v", code, err)
+	}
+	if len(r.ai.requests) != 0 || len(pushArgs(*r.argv)) != 0 {
+		t.Fatal("AI 호출과 push가 없어야 함")
 	}
 }

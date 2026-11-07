@@ -83,6 +83,9 @@ func TestOnboardRefusesExistingFiles(t *testing.T) {
 		"compose.yaml", "Dockerfile", "Caddyfile", "README.md", "./compose.yaml", "COMPOSE.yaml",
 		".github/workflows/deploy.yml", ".github/dependabot.yml", ".github/hopcharlie.yml",
 		".dockerignore", ".env", "compose.override.yaml", "docker-compose.yml", "app/Dockerfile", "sub/platform.yaml", "hopcharlie.",
+		// 원본 빌드나 설정 glob이 집어 갈 수 있는 곳
+		"hopcharlie.go", "conf.d/hopcharlie.conf", "initdb/hopcharlie.sql", "app/hopcharlie.Dockerfile", "hopcharlie.entrypoint.sh",
+		"hopcharlie/main.go", "hopcharlie/app.js", "hopcharlie/.env", ".hopcharlie/x.sh", "hopcharlie.Web.Dockerfile",
 	} {
 		if _, err := r.write(p, "x\n"); !errors.Is(err, ErrBlocked) {
 			t.Errorf("%s: 막아야 함: %v", p, err)
@@ -94,7 +97,7 @@ func TestOnboardRefusesExistingFiles(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".dockerignore")); err == nil {
 		t.Fatal(".dockerignore가 생김")
 	}
-	for _, p := range []string{"platform.yaml", "hopcharlie.Dockerfile", "app/hopcharlie.Dockerfile", "hopcharlie.Dockerfile.dockerignore", "hopcharlie.entrypoint.sh"} {
+	for _, p := range []string{"platform.yaml", "hopcharlie.Dockerfile", "hopcharlie.web.Dockerfile", "hopcharlie.Dockerfile.dockerignore", "hopcharlie.web.Dockerfile.dockerignore", "hopcharlie/entrypoint.sh", "hopcharlie/conf/nginx.conf"} {
 		if _, err := r.write(p, "x\n"); err != nil {
 			t.Errorf("%s: 새 파일은 써야 함: %v", p, err)
 		}
@@ -248,5 +251,38 @@ func TestOnboardNotDeployable(t *testing.T) {
 	}
 	if !strings.Contains(sink.Sessions[0].Summary, "기존 Dockerfile 수정") {
 		t.Fatalf("세션 요약: %q", sink.Sessions[0].Summary)
+	}
+}
+
+// TestOnboardReadRefusesSecretFiles는 onboard의 read_file이 커밋된 비밀 파일(.env 등)은 이름만 보이고, 다른 파일의 비밀값은 가려 보이는지 본다.
+func TestOnboardReadRefusesSecretFiles(t *testing.T) {
+	dir, existing, _ := onboardFixture(t)
+	for p, c := range map[string]string{".env": "SESSION_SECRET=Zx81kQp2LmN4rT7v\n", "deploy/id_ed25519": "key\n", "config/app.yml": "db:\n  password: hunter2pw\n"} {
+		_ = os.MkdirAll(filepath.Dir(filepath.Join(dir, p)), 0o755)
+		_ = os.WriteFile(filepath.Join(dir, p), []byte(c), 0o644)
+		existing = append(existing, p)
+	}
+	r, _ := openRepo(dir, RepoIndex{})
+	r.existingFiles, r.touched = map[string]bool{}, map[string]bool{}
+	for _, p := range existing {
+		r.existingFiles[strings.ToLower(p)] = true
+	}
+	for _, p := range []string{".env", "deploy/id_ed25519", ".ENV.production", "certs/tls.pem", "secrets.yaml", "gcp-credentials.json"} {
+		_ = os.MkdirAll(filepath.Dir(filepath.Join(dir, p)), 0o755)
+		if _, err := os.Stat(filepath.Join(dir, p)); err != nil {
+			_ = os.WriteFile(filepath.Join(dir, p), []byte("Zx81kQp2LmN4rT7v\n"), 0o644)
+		}
+		out, err := r.read(p)
+		b, _ := json.Marshal(out)
+		if err != nil || !strings.Contains(string(b), `"secretFile":true`) || strings.Contains(string(b), "Zx81") {
+			t.Errorf("%s: 이름만 보여야 함: %s %v", p, b, err)
+		}
+	}
+	out, err := r.read("config/app.yml")
+	if b, _ := json.Marshal(out); err != nil || strings.Contains(string(b), "hunter2pw") || !strings.Contains(string(b), "password: ***") {
+		t.Fatalf("비밀값은 가려 보여야 함: %s %v", b, err)
+	}
+	if !r.touched["config/app.yml"] {
+		t.Fatal("읽은 파일은 touched에 남아야 함")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"regexp"
+	"strings"
 )
 
 // Placeholder는 지운 값 자리에 남기는 표시다.
@@ -20,6 +21,8 @@ type rule struct {
 var rules = []rule{
 	// PEM 개인 키, 인증서
 	{regexp.MustCompile(`-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----`), Placeholder},
+	// 끝나지 않은 PEM (잘린 파일, 잘린 기록): 끝까지 지운다
+	{regexp.MustCompile(`-----BEGIN [A-Z0-9 ]+-----[\s\S]*$`), Placeholder},
 	// Authorization 헤더
 	{regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`), "${1} " + Placeholder},
 	// JWT (Kubernetes ServiceAccount 토큰 포함)
@@ -39,8 +42,29 @@ var (
 	variable = regexp.MustCompile(`^\$(\{[A-Za-z_][A-Za-z0-9_]*\}|\([A-Z_][A-Z0-9_]*\))$`)
 	// 사용자가 비어 있거나(:pass@) 비밀번호에 @가 있어도 호스트 앞의 마지막 @까지 지운다 (경로 /, ?, #은 넘지 않음).
 	dsnPassword = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://[^:/@\s]*:)([^\s/?#]*)@`)
-	assignment  = regexp.MustCompile(`(?i)("?[A-Za-z0-9_.-]*(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential)[A-Za-z0-9_.-]*"?\s*[:=]\s*)("[^"]*"|'[^']*'|\$\{[A-Za-z_][A-Za-z0-9_]*\}|[^\s,}]+)`)
+	assignment  = regexp.MustCompile(`(?i)("?[A-Za-z0-9_.-]*(password|passwd|pwd|pass\b|passphrase|salt|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|app[_-]?key|_key\b|credential)[A-Za-z0-9_.-]*"?\s*[:=]\s*)("[^"]*"|'[^']*'|\$\{[A-Za-z_][A-Za-z0-9_]*\}|[^\s,}]+)`)
+	// blob은 키나 토큰일 수 있는 긴 base64, hex 덩어리다. blobSecret이 정한다.
+	blob = regexp.MustCompile(`(sha(256|384|512):)?[A-Za-z0-9+/]{40,}={0,2}`)
+	hex  = regexp.MustCompile(`^[0-9a-fA-F]+$`)
 )
+
+// blobSecret은 긴 덩어리가 비밀값으로 보이는지 정한다. 다이제스트(sha256: 앞붙이, 40/64/96/128자리 hex: git 커밋, sha1~sha512)는
+// 두고, 그 밖의 48자리 이상 hex, 대문자와 소문자가 섞인 40자리(AWS 비밀 키)와 48자리 이상 base64는 지운다. 휴리스틱이다.
+func blobSecret(m string) bool {
+	if strings.HasPrefix(m, "sha") && strings.Contains(m, ":") {
+		return false
+	}
+	v := strings.TrimRight(m, "=")
+	if hex.MatchString(v) {
+		switch len(v) {
+		case 40, 64, 96, 128:
+			return false
+		}
+		return len(v) >= 48
+	}
+	upper, lower := strings.ContainsAny(v, "ABCDEFGHIJKLMNOPQRSTUVWXYZ"), strings.ContainsAny(v, "abcdefghijklmnopqrstuvwxyz")
+	return upper && lower && (len(v) == 40 || len(v) >= 48)
+}
 
 var secretKey = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|authorization|cookie)`)
 
@@ -60,6 +84,12 @@ func String(s string) string {
 	for _, r := range rules {
 		s = r.re.ReplaceAllString(s, r.repl)
 	}
+	s = blob.ReplaceAllStringFunc(s, func(m string) string {
+		if blobSecret(m) {
+			return Placeholder
+		}
+		return m
+	})
 	return assignment.ReplaceAllStringFunc(s, func(match string) string {
 		parts := assignment.FindStringSubmatch(match)
 		value := parts[3]

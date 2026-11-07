@@ -118,7 +118,34 @@ func onboardMain(args []string) int {
 		githubAPI: "https://api.github.com",
 		stdout:    os.Stdout, stderr: os.Stderr,
 	}, a)
-	return prepareExit(os.Stderr, err)
+	return onboardExit(os.Stderr, err)
+}
+
+// hopai onboard의 종료 코드. 0, 1, 2, 3은 prepare와 같다.
+const (
+	// exitRestartBranch: 있던 hopcharlie/onboard를 이어 쓸 수 없음(기본 브랜치가 그사이 바뀜, 기본 브랜치 파일을 고친 커밋, 검사하지 않은 파일).
+	// 플랫폼은 그 브랜치를 지우고 다시 돌린다.
+	exitRestartBranch = 4
+	// exitRerun: 그사이 누가 hopcharlie/onboard에 push해 fast-forward가 거절됨. 플랫폼은 그대로 다시 돌린다.
+	exitRerun = 5
+)
+
+var (
+	errRestartBranch = errors.New("hopcharlie/onboard 브랜치를 지우고 다시 시작해야 함")
+	errRerun         = errors.New("hopai onboard를 다시 실행해야 함")
+)
+
+// onboardExit은 runOnboard의 결과를 종료 코드로 바꾼다.
+func onboardExit(w io.Writer, err error) int {
+	switch {
+	case errors.Is(err, errRestartBranch):
+		fmt.Fprintln(w, "중단:", err)
+		return exitRestartBranch
+	case errors.Is(err, errRerun):
+		fmt.Fprintln(w, "중단:", err)
+		return exitRerun
+	}
+	return prepareExit(w, err)
 }
 
 // readFacts는 조사 결과를 읽고 이 레포의 것인지, 계약을 더할 수 있는 상태인지 본다.
@@ -272,14 +299,15 @@ func runOnboard(ctx context.Context, env prepareEnv, a onboardArgs) error {
 			return fmt.Errorf("%w: 기본 브랜치에 %s가 있음", errNotDeployable, p)
 		}
 	}
+	var branchFiles []string
 	if exists {
 		// 전에 만든 브랜치는 기본 브랜치에 새 파일만 더한 것이어야 한다. 아니면(기본 브랜치가 그사이 바뀌었거나 누가 고침) 이어서 고치지 않는다.
 		changes, err := g.diffTrees(ctx, dir, base, remote)
 		if err != nil {
 			return err
 		}
-		if _, err := onboardChangesOK(changes, "있던 "+onboardBranch+" 브랜치"); err != nil {
-			return fmt.Errorf("%w. 플랫폼이 브랜치를 지우고 다시 시작해야 함", err)
+		if branchFiles, err = onboardChangesOK(changes, "있던 "+onboardBranch+" 브랜치"); err != nil {
+			return fmt.Errorf("%w (%v)", errRestartBranch, err)
 		}
 	}
 	index, err := g.index(ctx, dir)
@@ -295,7 +323,7 @@ func runOnboard(ctx context.Context, env prepareEnv, a onboardArgs) error {
 	// 3. AI
 	ob, session, err := env.agent.Onboard(ctx, llm.OnboardInput{
 		Repo: repo, Branch: onboardBranch, Onboarding: a.onboarding, Continue: exists, Dir: dir,
-		Facts: f, CheckLog: checkLog, Index: index, Existing: existing,
+		Facts: f, CheckLog: checkLog, Index: index, Existing: existing, BranchFiles: branchFiles,
 	})
 	if err != nil {
 		return fmt.Errorf("AI 온보딩 계약 실패 (세션 %s): %w", session, err)
@@ -309,7 +337,7 @@ func runOnboard(ctx context.Context, env prepareEnv, a onboardArgs) error {
 
 	// 4a. 있던 브랜치가 이미 맞고 고칠 것이 없으면(크래시 뒤 재실행) 커밋도 push도 하지 않고 그 head를 돌려준다.
 	// 기본 브랜치 대비 새 파일만인지는 클론할 때 봤고, platform.yaml 검사는 AI 답 검사에서 그 브랜치 파일로 했다.
-	if exists && len(ob.Files) == 0 {
+	if exists && len(ob.Files) == 0 && checkLog == "" {
 		return onboardUnchanged(ctx, env, g, dir, base, remote, ob, res)
 	}
 
@@ -332,6 +360,9 @@ func runOnboard(ctx context.Context, env prepareEnv, a onboardArgs) error {
 	if res.Files, err = onboardChangesOK(all, "커밋"); err != nil {
 		return err
 	}
+	if err := prFilesOK(ctx, g, dir, res.Files, ob); err != nil {
+		return err
+	}
 	if time.Until(tok.ExpiresAt) < 5*time.Minute {
 		fresh, err := env.tokens.PushToken(ctx, repo)
 		if err != nil {
@@ -343,6 +374,9 @@ func runOnboard(ctx context.Context, env prepareEnv, a onboardArgs) error {
 		g.token = fresh.Token
 	}
 	if err := g.push(ctx, dir, onboardBranch); err != nil {
+		if errors.Is(err, errPushRejected) {
+			return fmt.Errorf("%w: 그사이 누가 %s에 push해 fast-forward가 거절됨", errRerun, onboardBranch)
+		}
 		return err
 	}
 	res.Head = sha
@@ -369,9 +403,35 @@ func onboardUnchanged(ctx context.Context, env prepareEnv, g *gitRunner, dir, ba
 	if res.Files, err = onboardChangesOK(all, "있던 "+onboardBranch+" 브랜치"); err != nil {
 		return err
 	}
+	if err := prFilesOK(ctx, g, dir, res.Files, ob); err != nil {
+		return err
+	}
 	res.Head = remote
 	fmt.Fprintf(env.stderr, "고칠 것 없음: %s %s는 이미 맞음 (%.12s). push하지 않음\n", res.Repo, onboardBranch, remote)
 	writeOnboardResult(env.stdout, res)
+	return nil
+}
+
+// prFilesOK는 PR의 새 파일(기본 브랜치 대비 HEAD) 하나하나가 platform.yaml, 서비스 Dockerfile과 그 .dockerignore, 이번 작업에서
+// AI가 읽거나 쓴 파일 중 하나이고, 내용이 검사한 바이트와 같은지 본다. 있던 브랜치에 아무도 확인하지 않은 파일이 남아 있으면 브랜치를
+// 지우고 다시 시작해야 한다.
+func prFilesOK(ctx context.Context, g *gitRunner, dir string, files []string, ob *llm.Onboarding) error {
+	known := map[string]bool{appspec.FileName: true}
+	for _, d := range ob.Dockerfiles {
+		known[d], known[d+".dockerignore"] = true, true
+	}
+	for _, t := range ob.Touched {
+		known[t] = true
+	}
+	for _, f := range files {
+		want, validated := ob.Validated[f]
+		if !known[f] || !validated {
+			return fmt.Errorf("%w: %s의 %q는 이번 작업에서 검사하지 않은 파일임 (platform.yaml이 쓰지 않고 AI가 읽지도 쓰지도 않음)", errRestartBranch, onboardBranch, f)
+		}
+		if err := g.sameBlob(ctx, dir, f, want); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
