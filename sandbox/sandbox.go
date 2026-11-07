@@ -76,9 +76,11 @@ const CNPGOperatorNamespace = "cnpg-system"
 
 const (
 	// NodeLocalDNSCIDR은 GKE NodeLocal DNSCache의 수신 주소다. 메타데이터 주소와는 다른 주소다.
+	// NodeLocal DNSCache가 있는 클러스터(GKE)에서 Pod는 kube-dns가 아니라 이 주소로 DNS를 묻는다.
+	// 정책이 kube-dns Pod만 허용하면 이름이 풀리지 않아 격리 검사의 dns 항목이 막힌다(2026-11-07 GKE 리허설).
+	// 그 DaemonSet을 읽어 있을 때만 여는 방식은 관리 계정에 읽기 권한이 없으면 조용히 건너뛰어 같은 실패가 났으므로,
+	// 클러스터를 읽지 않고 항상 이 주소의 DNS 포트만 연다. 다른 클러스터에는 이 주소에 듣는 것이 없어 영향이 없다.
 	NodeLocalDNSCIDR = "169.254.20.10/32"
-	// nodeLocalDNSName은 kube-system의 NodeLocal DNSCache DaemonSet 이름이다.
-	nodeLocalDNSName = "node-local-dns"
 	// metadataIP는 어떤 허용 대역도 덮으면 안 되는 클라우드 메타데이터 주소다.
 	metadataIP = "169.254.169.254"
 )
@@ -116,15 +118,6 @@ func ForCNPG(ctx context.Context, cs kubernetes.Interface, c Config) (Config, er
 			if !slices.Contains(c.AllowEgressCIDRs, cidr) {
 				c.AllowEgressCIDRs = append(c.AllowEgressCIDRs, cidr)
 			}
-		}
-	}
-	// NodeLocal DNSCache가 있는 클러스터(GKE)에서 Pod는 kube-dns가 아니라 노드의 169.254.20.10으로 DNS를 묻는다.
-	// 정책이 kube-dns Pod만 허용하면 이름이 풀리지 않아 격리 검사의 dns 항목이 막힌다(2026-11-07 GKE 리허설).
-	// DaemonSet이 있을 때만 그 주소의 53번 포트를 연다. 읽지 못하면 열지 않는다(이전 동작).
-	c.AllowDNSCIDRs = append([]string{}, c.AllowDNSCIDRs...)
-	if _, err := cs.AppsV1().DaemonSets("kube-system").Get(ctx, nodeLocalDNSName, metav1.GetOptions{}); err == nil {
-		if !slices.Contains(c.AllowDNSCIDRs, NodeLocalDNSCIDR) {
-			c.AllowDNSCIDRs = append(c.AllowDNSCIDRs, NodeLocalDNSCIDR)
 		}
 	}
 	return c, nil
@@ -269,8 +262,14 @@ func Build(c Config, now time.Time) (Objects, error) {
 			Ports: dnsPorts(),
 		},
 	}
-	// 노드의 DNS 캐시 같은 주소는 DNS 포트만 연다
+	// 노드의 DNS 캐시 같은 주소는 DNS 포트만 연다. NodeLocal DNSCache 주소는 항상 포함한다.
+	dnsCIDRs := []string{NodeLocalDNSCIDR}
 	for _, cidr := range c.AllowDNSCIDRs {
+		if !slices.Contains(dnsCIDRs, cidr) {
+			dnsCIDRs = append(dnsCIDRs, cidr)
+		}
+	}
+	for _, cidr := range dnsCIDRs {
 		egress = append(egress, netv1.NetworkPolicyEgressRule{
 			To:    []netv1.NetworkPolicyPeer{{IPBlock: &netv1.IPBlock{CIDR: cidr}}},
 			Ports: dnsPorts(),
