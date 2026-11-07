@@ -557,8 +557,8 @@ func TestBuildAlwaysOpensNodeLocalDNSPortOnly(t *testing.T) {
 					rules = append(rules, r)
 				}
 				// 어떤 허용 대역도 메타데이터 주소를 덮으면 안 된다
-				if _, n, err := net.ParseCIDR(to.IPBlock.CIDR); err != nil || n.Contains(net.ParseIP("169.254.169.254")) {
-					t.Fatalf("%s: 메타데이터 주소를 덮는 허용 대역: %q", name, to.IPBlock.CIDR)
+				if coversMetadata(to.IPBlock) {
+					t.Fatalf("%s: 메타데이터 주소를 덮는 허용 대역: %+v", name, to.IPBlock)
 				}
 			}
 		}
@@ -572,6 +572,94 @@ func TestBuildAlwaysOpensNodeLocalDNSPortOnly(t *testing.T) {
 		if !slices.Equal(ports, []string{"UDP/53", "TCP/53"}) {
 			t.Fatalf("%s: DNS 포트만 열어야 함: %v", name, ports)
 		}
+	}
+}
+
+// coversMetadata는 허용 대역이 except를 빼고도 메타데이터 주소를 덮는지 본다.
+func coversMetadata(b *netv1.IPBlock) bool {
+	_, n, err := net.ParseCIDR(b.CIDR)
+	if err != nil {
+		return true
+	}
+	if !n.Contains(net.ParseIP("169.254.169.254")) {
+		return false
+	}
+	for _, e := range b.Except {
+		if _, x, err := net.ParseCIDR(e); err == nil && x.Contains(net.ParseIP("169.254.169.254")) {
+			return false
+		}
+	}
+	return true
+}
+
+// 이 GKE에서 Pod의 DNS 서버는 kube-dns ClusterIP이고, NodeLocal DNSCache가 그 패킷을 가로채 응답한다(infra ADR 0052).
+// kube-dns Service의 주소를 읽으면 그 주소의 DNS 포트만 열고, 읽지 못하면 DNS 포트를 모든 목적지로 연다(메타데이터 제외).
+func TestForCNPGOpensKubeDNSClusterIP(t *testing.T) {
+	slice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{Name: "kubernetes", Namespace: "default", Labels: map[string]string{"kubernetes.io/service-name": "kubernetes"}},
+		Endpoints:  []discoveryv1.Endpoint{{Addresses: []string{"172.18.0.2"}}},
+	}
+	dnsPortsOf := func(r netv1.NetworkPolicyEgressRule) []string {
+		var ports []string
+		for _, p := range r.Ports {
+			ports = append(ports, string(*p.Protocol)+"/"+p.Port.String())
+		}
+		return ports
+	}
+	// IP 대역 규칙을 CIDR로 모은다. except가 있으면 "CIDR except X"로 적는다.
+	opened := func(c Config) map[string][]string {
+		o, err := Build(c, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string][]string{}
+		for _, r := range o.NetworkPolicy.Spec.Egress {
+			for _, to := range r.To {
+				if to.IPBlock != nil {
+					key := to.IPBlock.CIDR
+					if len(to.IPBlock.Except) > 0 {
+						key += " except " + strings.Join(to.IPBlock.Except, ",")
+					}
+					got[key] = dnsPortsOf(r)
+				}
+			}
+		}
+		return got
+	}
+	dnsOnly := []string{"UDP/53", "TCP/53"}
+
+	// kube-dns Service를 읽은 경우: 그 주소와 NodeLocal 주소만, 모든 목적지 규칙은 없다
+	withSvc, err := ForCNPG(context.Background(), fake.NewClientset(slice, &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "kube-dns", Namespace: "kube-system"},
+		Spec:       corev1.ServiceSpec{ClusterIP: "10.82.0.10", ClusterIPs: []string{"10.82.0.10"}},
+	}), Config{App: "moimroom", ID: "ab12"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withSvc.AllowDNSAnywhere {
+		t.Fatal("kube-dns Service를 읽었으면 모든 목적지로 열면 안 됨")
+	}
+	got := opened(withSvc)
+	if !slices.Equal(got["10.82.0.10/32"], dnsOnly) || !slices.Equal(got[NodeLocalDNSCIDR], dnsOnly) {
+		t.Fatalf("kube-dns ClusterIP와 NodeLocal 주소의 DNS 포트가 열려야 함: %v", got)
+	}
+	for k := range got {
+		if strings.HasPrefix(k, "0.0.0.0/0") {
+			t.Fatalf("모든 목적지 규칙이 있으면 안 됨: %v", got)
+		}
+	}
+
+	// kube-dns Service를 읽지 못한 경우: DNS 포트를 모든 목적지로 열되 메타데이터 주소는 뺀다
+	without, err := ForCNPG(context.Background(), fake.NewClientset(slice), Config{App: "moimroom", ID: "ab12"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !without.AllowDNSAnywhere {
+		t.Fatal("kube-dns Service를 읽지 못하면 DNS를 모든 목적지로 열어야 함")
+	}
+	got = opened(without)
+	if !slices.Equal(got["0.0.0.0/0 except 169.254.169.254/32"], dnsOnly) {
+		t.Fatalf("DNS 포트만, 메타데이터 주소는 제외하고 열려야 함: %v", got)
 	}
 }
 

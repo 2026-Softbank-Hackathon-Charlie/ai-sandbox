@@ -69,6 +69,9 @@ type Config struct {
 	// Pod가 kube-dns 대신 노드의 링크 로컬 주소로 DNS를 묻는 클러스터에서 쓴다. 다른 포트는 열지 않고,
 	// 메타데이터 주소(169.254.169.254)를 덮는 대역은 거절한다.
 	AllowDNSCIDRs []string
+	// AllowDNSAnywhere는 DNS(53번 포트)를 모든 목적지로 허용한다(메타데이터 주소만 제외). kube-dns Service의 주소를
+	// 읽지 못해 정확한 대역을 모를 때의 대비다. infra ADR 0052가 같은 GKE에서 이렇게 해서 DNS 장애를 풀었다.
+	AllowDNSAnywhere bool
 }
 
 // CNPGOperatorNamespace는 CloudNativePG 오퍼레이터의 기본 네임스페이스다.
@@ -119,6 +122,30 @@ func ForCNPG(ctx context.Context, cs kubernetes.Interface, c Config) (Config, er
 				c.AllowEgressCIDRs = append(c.AllowEgressCIDRs, cidr)
 			}
 		}
+	}
+	// GKE의 NodeLocal DNSCache(hostNetwork)는 kube-dns ClusterIP로 가는 DNS를 가로채서 응답한다. Pod의 DNS 서버는
+	// 그 ClusterIP라서, 정책이 kube-dns Pod selector만 보면 막힌다(infra ADR 0052, 같은 GKE에서 확인).
+	// 그래서 kube-dns Service의 주소도 DNS 포트만 연다. 읽지 못하면 정확한 대역을 모르므로 DNS 포트를
+	// 모든 목적지로 연다(메타데이터 주소 제외). 조용히 건너뛰어 같은 실패가 나는 것보다 낫다.
+	c.AllowDNSCIDRs = append([]string{}, c.AllowDNSCIDRs...)
+	found := false
+	if svc, err := cs.CoreV1().Services("kube-system").Get(ctx, "kube-dns", metav1.GetOptions{}); err == nil {
+		for _, ip := range svc.Spec.ClusterIPs {
+			if ip == "" || ip == corev1.ClusterIPNone {
+				continue
+			}
+			cidr := ip + "/32"
+			if strings.Contains(ip, ":") {
+				cidr = ip + "/128"
+			}
+			found = true
+			if !slices.Contains(c.AllowDNSCIDRs, cidr) {
+				c.AllowDNSCIDRs = append(c.AllowDNSCIDRs, cidr)
+			}
+		}
+	}
+	if !found {
+		c.AllowDNSAnywhere = true
 	}
 	return c, nil
 }
@@ -272,6 +299,12 @@ func Build(c Config, now time.Time) (Objects, error) {
 	for _, cidr := range dnsCIDRs {
 		egress = append(egress, netv1.NetworkPolicyEgressRule{
 			To:    []netv1.NetworkPolicyPeer{{IPBlock: &netv1.IPBlock{CIDR: cidr}}},
+			Ports: dnsPorts(),
+		})
+	}
+	if c.AllowDNSAnywhere {
+		egress = append(egress, netv1.NetworkPolicyEgressRule{
+			To:    []netv1.NetworkPolicyPeer{{IPBlock: &netv1.IPBlock{CIDR: "0.0.0.0/0", Except: []string{metadataIP + "/32"}}}},
 			Ports: dnsPorts(),
 		})
 	}
