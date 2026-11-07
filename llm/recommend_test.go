@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -44,6 +45,8 @@ func TestRecommendationRejectsInventedFactsAndBypassedToolWithoutRetry(t *testin
 		useTool      bool
 	}{
 		{"invented savings", `{"snapshotId":"rec_123","recommendations":[{"id":"candidate-1","action":"move","reasons":["월 99% 절감"]}]}`, true},
+		{"stay without reason", `{"snapshotId":"rec_123","recommendations":[{"id":"candidate-1","action":"stay","reasons":[]}]}`, true},
+		{"insufficient without reason", `{"snapshotId":"rec_123","recommendations":[{"id":"candidate-1","action":"insufficient","reasons":[]}]}`, true},
 		{"wrong snapshot", `{"snapshotId":"other","recommendations":[]}`, true},
 		{"wrong candidate", `{"snapshotId":"rec_123","recommendations":[{"id":"other","action":"move","reasons":[]}]}`, true},
 		{"unknown field", `{"snapshotId":"rec_123","recommendations":[],"command":"migrate"}`, true},
@@ -63,6 +66,29 @@ func TestRecommendationRejectsInventedFactsAndBypassedToolWithoutRetry(t *testin
 				t.Fatal("invalid output retried beyond the recommendation budget")
 			}
 		})
+	}
+}
+
+func TestRecommendationRequiresOneOrTwoOriginalReasonsForEveryAction(t *testing.T) {
+	for _, action := range []string{"move", "stay", "insufficient"} {
+		for _, count := range []int{0, 1, 2, 3} {
+			t.Run(action+"-"+strconv.Itoa(count), func(t *testing.T) {
+				in := recommendationInput()
+				in.Candidates[0].Reasons = append(in.Candidates[0].Reasons, "전력·장비 상각 견적을 확인했습니다")
+				reasons := []string{}
+				for i := 0; i < count; i++ {
+					reasons = append(reasons, in.Candidates[0].Reasons[i])
+				}
+				raw, err := json.Marshal(RecommendationDecision{SnapshotID: in.SnapshotID, Recommendations: []Recommendation{{ID: in.Candidates[0].ID, Action: action, Reasons: reasons}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = parseRecommendationDecision(raw, in, true)
+				if (err == nil) != (count == 1 || count == 2) {
+					t.Fatalf("action %s reasons %d: %v", action, count, err)
+				}
+			})
+		}
 	}
 }
 
