@@ -7,3 +7,5 @@ kubeconfig*
 /bin/
 *.test
 *.out
+
+build/
